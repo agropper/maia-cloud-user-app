@@ -83,10 +83,10 @@ export default function setupFileRoutes(app) {
         });
       }
 
-      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia.tor1';
+      const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
 
       const s3Client = new S3Client({
-        endpoint: bucketUrl,
+        endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
         region: 'us-east-1',
         forcePathStyle: false,
         credentials: {
@@ -145,10 +145,10 @@ export default function setupFileRoutes(app) {
       const { bucketKey } = req.params;
 
       const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
-      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia.tor1';
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
 
       const s3Client = new S3Client({
-        endpoint: bucketUrl,
+        endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
         region: 'us-east-1',
         forcePathStyle: false,
         credentials: {
