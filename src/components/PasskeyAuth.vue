@@ -21,6 +21,7 @@
     <!-- Step 2: User ID Input -->
     <div v-if="currentStep === 'userId'">
       <q-input
+        ref="userIdInputRef"
         v-model="userId"
         label="User ID"
         outlined
@@ -74,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, nextTick } from 'vue';
 import { startRegistration } from '@simplewebauthn/browser';
 import { startAuthentication } from '@simplewebauthn/browser';
 
@@ -85,15 +86,20 @@ const userId = ref('');
 const loading = ref(false);
 const error = ref('');
 const action = ref(''); // 'signin' or 'register'
+const userIdInputRef = ref(null);
 
-const startSignInFlow = () => {
+const startSignInFlow = async () => {
   action.value = 'signin';
   currentStep.value = 'userId';
+  await nextTick();
+  userIdInputRef.value?.focus();
 };
 
-const startRegistrationFlow = () => {
+const startRegistrationFlow = async () => {
   action.value = 'register';
   currentStep.value = 'userId';
+  await nextTick();
+  userIdInputRef.value?.focus();
 };
 
 const resetFlow = () => {
