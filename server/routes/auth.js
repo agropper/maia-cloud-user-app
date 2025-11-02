@@ -3,6 +3,34 @@
  */
 
 export default function setupAuthRoutes(app, passkeyService, cloudant, doClient) {
+  // Check if user exists and has passkey
+  app.get('/api/passkey/check-user', async (req, res) => {
+    try {
+      const { userId } = req.query;
+
+      if (!userId) {
+        return res.status(400).json({ error: 'User ID required' });
+      }
+
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        res.json({
+          exists: true,
+          hasPasskey: !!userDoc.credentialID
+        });
+      } catch (error) {
+        // User doesn't exist
+        res.json({
+          exists: false,
+          hasPasskey: false
+        });
+      }
+    } catch (error) {
+      console.error('Check user error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // Passkey registration - generate options
   app.post('/api/passkey/register', async (req, res) => {
     try {

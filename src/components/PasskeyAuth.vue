@@ -110,6 +110,22 @@ const continueAction = async () => {
 
   try {
     if (action.value === 'register') {
+      // Check if userId is available before proceeding
+      const checkResponse = await fetch(`/api/passkey/check-user?userId=${userId.value}`, {
+        credentials: 'include'
+      });
+      
+      if (!checkResponse.ok) {
+        const errorData = await checkResponse.json();
+        throw new Error(errorData.error || 'Failed to check user ID');
+      }
+
+      const checkData = await checkResponse.json();
+      
+      if (checkData.exists && checkData.hasPasskey) {
+        throw new Error('This user ID already has a passkey. Please sign in instead.');
+      }
+      
       await handleRegistration();
     } else {
       await handleSignIn();
