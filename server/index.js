@@ -15,7 +15,9 @@ import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cl
 import { DigitalOceanClient } from '../lib/do-client/index.js';
 import { PasskeyService } from '../lib/passkey/index.js';
 import { EmailService } from './utils/email-service.js';
+import { ChatClient } from '../lib/chat-client/index.js';
 import setupAuthRoutes from './routes/auth.js';
+import setupChatRoutes from './routes/chat.js';
 
 dotenv.config();
 
@@ -72,6 +74,12 @@ const passkeyService = new PasskeyService({
   origin: process.env.PASSKEY_ORIGIN || `http://localhost:${PORT}`
 });
 
+const chatClient = new ChatClient({
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY
+  }
+});
+
 // Middleware
 app.use(cors({
   origin: 'http://localhost:5173',
@@ -103,6 +111,9 @@ app.get('/health', (req, res) => {
 // Passkey routes
 setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, emailService);
 
+// Chat routes
+setupChatRoutes(app, chatClient);
+
 // Serve static files from dist in production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../dist')));
@@ -117,6 +128,11 @@ app.listen(PORT, () => {
   console.log(`User app server running on port ${PORT}`);
   console.log(`Passkey rpID: ${passkeyService.rpID}`);
   console.log(`Passkey origin: ${passkeyService.origin}`);
+  console.log(`\n📊 Available Chat Providers:`);
+  chatClient.getAvailableProviders().forEach(provider => {
+    console.log(`   ✅ ${provider}`);
+  });
+  console.log(`\n🤖 Anthropic Model: claude-sonnet-4-5-20250929 (Claude Sonnet 4.5)`);
 });
 
 export default app;

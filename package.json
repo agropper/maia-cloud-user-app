@@ -11,6 +11,7 @@
     "dev:server": "nodemon server/index.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
     "@aws-sdk/client-s3": "^3.879.0",
     "@quasar/extras": "^1.16.12",
     "@simplewebauthn/browser": "^13.1.2",

@@ -1,19 +1,9 @@
 <template>
   <q-layout view="hHh lpR fFf">
-    <q-header elevated>
-      <q-toolbar>
-        <q-toolbar-title>MAIA User App</q-toolbar-title>
-        <div v-if="user">
-          <q-btn flat :label="user.displayName" />
-          <q-btn flat label="Sign Out" @click="handleSignOut" />
-        </div>
-      </q-toolbar>
-    </q-header>
-
-    <q-page-container>
-      <q-page padding>
+    <q-page-container class="full-width">
+      <q-page>
         <!-- Not authenticated - show auth dialog -->
-        <div v-if="!authenticated" class="flex flex-center" style="height: 80vh">
+        <div v-if="!authenticated" class="flex flex-center" style="height: 100vh">
           <q-card style="min-width: 400px">
             <q-card-section>
               <div class="text-h6 text-center q-mb-md">
@@ -42,33 +32,8 @@
         </div>
 
         <!-- Authenticated - show main interface -->
-        <div v-else>
-          <div class="text-h4 q-mb-md">Welcome, {{ user?.displayName }}</div>
-          <div class="text-body1 q-mb-lg">
-            You are successfully authenticated with a passkey!
-          </div>
-
-          <q-card>
-            <q-card-section>
-              <div class="text-h6 q-mb-md">User Information</div>
-              <div>
-                <p><strong>User ID:</strong> {{ user?.userId }}</p>
-                <p><strong>Display Name:</strong> {{ user?.displayName }}</p>
-                <p><strong>Type:</strong> Authenticated User</p>
-              </div>
-            </q-card-section>
-          </q-card>
-
-          <q-card class="q-mt-md">
-            <q-card-section>
-              <div class="text-h6 q-mb-md">Next Steps</div>
-              <ul>
-                <li>Build chat interface</li>
-                <li>Add knowledge base management</li>
-                <li>Implement agent interaction</li>
-              </ul>
-            </q-card-section>
-          </q-card>
+        <div v-else class="full-width full-height">
+          <ChatInterface :user="user" @sign-out="handleSignOut" />
         </div>
       </q-page>
     </q-page-container>
@@ -78,6 +43,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import PasskeyAuth from './components/PasskeyAuth.vue';
+import ChatInterface from './components/ChatInterface.vue';
 
 interface User {
   userId: string;
@@ -127,4 +93,18 @@ onMounted(async () => {
   }
 });
 </script>
+
+<style>
+.q-layout {
+  padding: 0 !important;
+}
+
+.q-page-container {
+  padding: 0 !important;
+}
+
+.q-page {
+  padding: 0 !important;
+}
+</style>
 
