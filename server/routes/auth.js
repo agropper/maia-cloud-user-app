@@ -2,7 +2,15 @@
  * Authentication routes for user app
  */
 
-export default function setupAuthRoutes(app, passkeyService, cloudant, doClient) {
+// Helper to get client info for audit logging
+function getClientInfo(req) {
+  return {
+    ip: req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0] || 'unknown',
+    userAgent: req.headers['user-agent'] || 'unknown'
+  };
+}
+
+export default function setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog) {
   // Check if user exists and has passkey
   app.get('/api/passkey/check-user', async (req, res) => {
     try {
@@ -116,6 +124,15 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient)
       req.session.authenticatedAt = new Date().toISOString();
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
+      // Log passkey registration
+      const clientInfo = getClientInfo(req);
+      await auditLog.logEvent({
+        type: 'passkey_registered',
+        userId: updatedUser.userId,
+        ip: clientInfo.ip,
+        userAgent: clientInfo.userAgent
+      });
+
       res.json({ 
         success: true, 
         user: {
@@ -183,7 +200,17 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient)
         userDoc
       });
 
+      const clientInfo = getClientInfo(req);
+
       if (!result.verified) {
+        // Log failed login attempt
+        await auditLog.logEvent({
+          type: 'login_failure',
+          userId: userId,
+          ip: clientInfo.ip,
+          userAgent: clientInfo.userAgent,
+          details: 'Passkey verification failed'
+        });
         return res.status(400).json({ error: 'Authentication verification failed' });
       }
 
@@ -198,6 +225,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient)
       req.session.displayName = updatedUser.displayName;
       req.session.authenticatedAt = new Date().toISOString();
       req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      // Log successful login
+      await auditLog.logEvent({
+        type: 'login_success',
+        userId: updatedUser.userId,
+        ip: clientInfo.ip,
+        userAgent: clientInfo.userAgent
+      });
 
       res.json({ 
         success: true, 
@@ -214,10 +249,24 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient)
 
   // Sign out
   app.post('/api/sign-out', async (req, res) => {
-    req.session.destroy((err) => {
+    const userId = req.session?.userId;
+    const clientInfo = getClientInfo(req);
+    
+    req.session.destroy(async (err) => {
       if (err) {
         return res.status(500).json({ error: 'Failed to sign out' });
       }
+      
+      // Log logout
+      if (userId) {
+        await auditLog.logEvent({
+          type: 'logout',
+          userId: userId,
+          ip: clientInfo.ip,
+          userAgent: clientInfo.userAgent
+        });
+      }
+      
       res.json({ success: true });
     });
   });

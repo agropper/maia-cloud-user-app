@@ -11,7 +11,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { CloudantClient, CloudantSessionStore } from '../lib/cloudant/index.js';
+import { CloudantClient, CloudantSessionStore, AuditLogService } from '../lib/cloudant/index.js';
 import { DigitalOceanClient } from '../lib/do-client/index.js';
 import { PasskeyService } from '../lib/passkey/index.js';
 import setupAuthRoutes from './routes/auth.js';
@@ -45,7 +45,15 @@ const cloudant = new CloudantClient({
   } catch (error) {
     // Already exists, that's fine
   }
+  try {
+    await cloudant.createDatabase('maia_audit_log');
+    console.log('✅ Created maia_audit_log database');
+  } catch (error) {
+    // Already exists, that's fine
+  }
 })();
+
+const auditLog = new AuditLogService(cloudant, 'maia_audit_log');
 
 const doClient = new DigitalOceanClient(process.env.DIGITALOCEAN_TOKEN, {
   region: process.env.DO_REGION || 'tor1'
@@ -85,7 +93,7 @@ app.get('/health', (req, res) => {
 });
 
 // Passkey routes
-setupAuthRoutes(app, passkeyService, cloudant, doClient);
+setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog);
 
 // Serve static files from dist in production
 if (process.env.NODE_ENV === 'production') {
