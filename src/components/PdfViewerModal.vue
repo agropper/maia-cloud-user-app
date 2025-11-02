@@ -90,9 +90,9 @@ import { computed, ref, watch } from 'vue';
 import { VuePDF } from '@tato30/vue-pdf';
 import * as pdfjsLib from 'pdfjs-dist';
 
-// Configure PDF.js worker
+// Configure PDF.js worker - use CDN to avoid version mismatch
 if (typeof window !== 'undefined') {
-  pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.394/pdf.worker.min.js`;
 }
 
 interface Props {
