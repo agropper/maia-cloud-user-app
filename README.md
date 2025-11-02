@@ -14,6 +14,7 @@ Simplified, maintainable user-facing app with passkey authentication, chat inter
 - npm
 - Cloudant credentials
 - DigitalOcean API token (optional for basic testing)
+- Resend API key (for registration email notifications)
 
 ### Setup
 
@@ -91,6 +92,12 @@ http://localhost:5173
 - < 2,000 lines of code total
 - No legacy complexity or debug messages
 
+✅ **Registration Email Notifications**
+- Automatic admin notification when new users register
+- Provisioning deep link with secure token for user setup
+- Email sent via Resend API service
+- Graceful fallback if email service is not configured
+
 ✅ **Production Ready**
 - Tested with real Cloudant and DigitalOcean APIs
 - Session management with Cloudant (sessions stored by userId for easy viewing)
@@ -122,6 +129,12 @@ DO_REGION=tor1
 PORT=3001
 SESSION_SECRET=change-this-in-production
 NODE_ENV=development
+PUBLIC_APP_URL=http://localhost:3001
+
+# Email Service (Resend) - for admin notifications
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=noreply@yourdomain.com
+RESEND_ADMIN_EMAIL=admin@yourdomain.com
 ```
 
 **Note**: The server automatically creates `maia_sessions`, `maia_users`, and `maia_audit_log` databases on startup if they don't exist.
@@ -138,6 +151,13 @@ NODE_ENV=development
 - Event types: `login_success`, `login_failure`, `logout`, `passkey_registered`
 - Each log includes: userId, timestamp, IP address, user agent
 - Queryable in Cloudant dashboard for security audits
+
+### Email Notifications
+- When a new user registers with passkey, an email notification is sent to the admin
+- Email contains user info and a secure provisioning deep link
+- Provisioning token is stored in the user document for secure access
+- Email service uses Resend API with graceful fallback if not configured
+- Admin can click the deep link to provision the user (create agent, Spaces folder, etc.)
 
 ### Libraries Used
 - `lib-maia-do-client`: DigitalOcean GenAI API client
