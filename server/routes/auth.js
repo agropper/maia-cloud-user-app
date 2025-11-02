@@ -1,0 +1,213 @@
+/**
+ * Authentication routes for user app
+ */
+
+export default function setupAuthRoutes(app, passkeyService, cloudant, doClient) {
+  // Passkey registration - generate options
+  app.post('/api/passkey/register', async (req, res) => {
+    try {
+      const { userId, displayName } = req.body;
+
+      if (!userId || !displayName) {
+        return res.status(400).json({ error: 'User ID and display name required' });
+      }
+
+      // Check if user already exists
+      const existingUser = await cloudant.getDocument('maia_users', userId);
+      if (existingUser && existingUser.credentialID) {
+        return res.status(400).json({ 
+          error: 'User already has a passkey',
+          hasExistingPasskey: true
+        });
+      }
+
+      // Generate registration options
+      const options = await passkeyService.generateRegistrationOptions({
+        userId,
+        displayName
+      });
+
+      // Store challenge in user document
+      const userDoc = existingUser || {
+        _id: userId,
+        userId,
+        displayName,
+        domain: passkeyService.rpID,
+        type: 'user',
+        workflowStage: 'no_request_yet',
+        createdAt: new Date().toISOString()
+      };
+
+      userDoc.challenge = options.challenge;
+      userDoc.updatedAt = new Date().toISOString();
+
+      await cloudant.saveDocument('maia_users', userDoc);
+
+      res.json(options);
+    } catch (error) {
+      console.error('Registration options error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Passkey registration - verify
+  app.post('/api/passkey/register-verify', async (req, res) => {
+    try {
+      const { userId, response } = req.body;
+
+      if (!userId || !response) {
+        return res.status(400).json({ error: 'User ID and response required' });
+      }
+
+      // Get user document with challenge
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc || !userDoc.challenge) {
+        return res.status(400).json({ error: 'No registration challenge found' });
+      }
+
+      // Verify registration
+      const result = await passkeyService.verifyRegistration({
+        response,
+        expectedChallenge: userDoc.challenge,
+        userDoc
+      });
+
+      if (!result.verified) {
+        return res.status(400).json({ error: 'Registration verification failed' });
+      }
+
+      // Update user with credential info
+      const updatedUser = result.userDoc;
+      updatedUser.challenge = undefined; // Remove challenge
+      await cloudant.saveDocument('maia_users', updatedUser);
+
+      // Set session
+      req.session.userId = updatedUser.userId;
+      req.session.username = updatedUser.userId;
+      req.session.displayName = updatedUser.displayName;
+      req.session.authenticatedAt = new Date().toISOString();
+      req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      res.json({ 
+        success: true, 
+        user: {
+          userId: updatedUser.userId,
+          displayName: updatedUser.displayName
+        }
+      });
+    } catch (error) {
+      console.error('Registration verify error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Passkey authentication - generate options
+  app.post('/api/passkey/authenticate', async (req, res) => {
+    try {
+      const { userId } = req.body;
+
+      if (!userId) {
+        return res.status(400).json({ error: 'User ID required' });
+      }
+
+      // Get user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc || !userDoc.credentialID) {
+        return res.status(404).json({ error: 'User not found or no passkey registered' });
+      }
+
+      // Generate authentication options
+      const options = await passkeyService.generateAuthenticationOptions({
+        userId,
+        userDoc
+      });
+
+      // Store challenge
+      userDoc.challenge = options.challenge;
+      await cloudant.saveDocument('maia_users', userDoc);
+
+      res.json(options);
+    } catch (error) {
+      console.error('Authentication options error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Passkey authentication - verify
+  app.post('/api/passkey/authenticate-verify', async (req, res) => {
+    try {
+      const { userId, response } = req.body;
+
+      if (!userId || !response) {
+        return res.status(400).json({ error: 'User ID and response required' });
+      }
+
+      // Get user document with challenge
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc || !userDoc.challenge) {
+        return res.status(400).json({ error: 'No authentication challenge found' });
+      }
+
+      // Verify authentication
+      const result = await passkeyService.verifyAuthentication({
+        response,
+        expectedChallenge: userDoc.challenge,
+        userDoc
+      });
+
+      if (!result.verified) {
+        return res.status(400).json({ error: 'Authentication verification failed' });
+      }
+
+      // Update counter
+      const updatedUser = result.userDoc;
+      updatedUser.challenge = undefined; // Remove challenge
+      await cloudant.saveDocument('maia_users', updatedUser);
+
+      // Set session
+      req.session.userId = updatedUser.userId;
+      req.session.username = updatedUser.userId;
+      req.session.displayName = updatedUser.displayName;
+      req.session.authenticatedAt = new Date().toISOString();
+      req.session.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      res.json({ 
+        success: true, 
+        user: {
+          userId: updatedUser.userId,
+          displayName: updatedUser.displayName
+        }
+      });
+    } catch (error) {
+      console.error('Authentication verify error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Sign out
+  app.post('/api/sign-out', async (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to sign out' });
+      }
+      res.json({ success: true });
+    });
+  });
+
+  // Current user
+  app.get('/api/current-user', (req, res) => {
+    if (!req.session || !req.session.userId) {
+      return res.json({ authenticated: false });
+    }
+
+    res.json({
+      authenticated: true,
+      user: {
+        userId: req.session.userId,
+        username: req.session.username,
+        displayName: req.session.displayName
+      }
+    });
+  });
+}
+
