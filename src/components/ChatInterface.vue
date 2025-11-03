@@ -231,6 +231,23 @@ const sendMessage = async () => {
   isStreaming.value = true;
 
   try {
+    // Build messages with file context
+    const messagesWithContext = uploadedFiles.value.length > 0
+      ? messages.value.map((msg, index) => {
+          // Add file context to the last user message
+          if (index === messages.value.length - 1 && msg.role === 'user') {
+            const filesContext = uploadedFiles.value.map(file => 
+              `File: ${file.name} (${file.type})\nContent:\n${file.type === 'pdf' ? file.content : file.content}`
+            ).join('\n\n');
+            return {
+              ...msg,
+              content: `${filesContext}\n\nUser query: ${msg.content}`
+            };
+          }
+          return msg;
+        })
+      : messages.value;
+    
     // Convert displayed label to API key
     const providerKey = getProviderKey(selectedProvider.value);
     const response = await fetch(
@@ -242,7 +259,7 @@ const sendMessage = async () => {
           'Accept': 'text/event-stream'
         },
         body: JSON.stringify({
-          messages: messages.value,
+          messages: messagesWithContext,
           options: {
             stream: true
           }
