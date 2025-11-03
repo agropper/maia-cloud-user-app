@@ -419,6 +419,7 @@ const sendMessage = async () => {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream'
         },
+        credentials: 'include', // Include session cookie
         body: JSON.stringify({
           messages: messagesWithContext,
           options: {
