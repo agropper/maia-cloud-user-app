@@ -38,14 +38,18 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
         if (userId) {
           const userDoc = await cloudant.getDocument('maia_users', userId);
           
-          if (userDoc.assignedAgentId && userDoc.agentEndpoint) {
+          if (userDoc.assignedAgentId && userDoc.agentEndpoint && userDoc.assignedAgentName) {
             // Get or create agent API key
             const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
             
             // Create provider with agent-specific endpoint and key
+            // Use agent name as model (DigitalOcean GenAI agents require this)
             userAgentProvider = new DigitalOceanProvider(apiKey, {
               baseURL: userDoc.agentEndpoint
             });
+            
+            // Set the agent name as the model in options
+            options.model = userDoc.assignedAgentName;
           }
         }
       }
