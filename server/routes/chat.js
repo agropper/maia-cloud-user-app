@@ -34,14 +34,11 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       // For DigitalOcean provider, check if user has a specific agent
       if (provider === 'digitalocean' && cloudant && doClient) {
         const userId = req.session?.userId;
-        console.log(`[CHAT] DigitalOcean provider, userId: ${userId}`);
         
         if (userId) {
           const userDoc = await cloudant.getDocument('maia_users', userId);
-          console.log(`[CHAT] User doc retrieved, assignedAgentId: ${userDoc.assignedAgentId}, agentEndpoint: ${userDoc.agentEndpoint}`);
           
           if (userDoc.assignedAgentId && userDoc.agentEndpoint) {
-            console.log(`[CHAT] User has agent config, getting/creating API key...`);
             // Get or create agent API key
             const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
             
@@ -49,9 +46,6 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
             userAgentProvider = new DigitalOceanProvider(apiKey, {
               baseURL: userDoc.agentEndpoint
             });
-            console.log(`Using user-specific agent for ${userId}: ${userDoc.assignedAgentId}`);
-          } else {
-            console.log(`[CHAT] User does not have agent config, using default provider`);
           }
         }
       }

@@ -7,62 +7,33 @@ import { AgentClient } from '../../lib/do-client/agent.js';
 /**
  * Get agent API key from user document
  * If missing, create a new one
+ * If invalid, recreate it
  */
 export async function getOrCreateAgentApiKey(doClient, cloudant, userId, agentId) {
-  console.log(`[API KEY] getOrCreateAgentApiKey called for user ${userId}, agent ${agentId}`);
-  
   try {
     // Get user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
-    console.log(`[API KEY] User doc retrieved, has agentApiKey: ${!!userDoc.agentApiKey}`);
     
     // Check if user has a stored API key
     if (userDoc.agentApiKey) {
-      console.log(`[API KEY] ✅ Using existing API key for agent ${agentId}`);
-      console.log(`[API KEY] API key preview: ${userDoc.agentApiKey.substring(0, 15)}...`);
+      // Validate that the key exists in DO API
+      const agentClient = new AgentClient(doClient);
+      const apiKeys = await agentClient.listApiKeys(agentId);
+      const keyExists = apiKeys.some(key => key.secret_key === userDoc.agentApiKey || key.name === `agent-${agentId}-api-key`);
+      
+      if (!keyExists) {
+        console.log(`Stored API key not found in DO API for agent ${agentId}, recreating...`);
+        // Key doesn't exist in DO - recreate it
+        const apiKey = await agentClient.createApiKey(agentId, `agent-${agentId}-api-key`);
+        userDoc.agentApiKey = apiKey;
+        await cloudant.saveDocument('maia_users', userDoc);
+        return apiKey;
+      }
+      
       return userDoc.agentApiKey;
     }
     
     // No API key stored - create one
-    console.log(`[API KEY] No API key found in database for agent ${agentId}, creating one...`);
-    
-    try {
-      const agentClient = new AgentClient(doClient);
-      const apiKey = await agentClient.createApiKey(agentId, `agent-${agentId}-api-key`);
-      
-      if (!apiKey) {
-        throw new Error('API key was null/undefined after creation');
-      }
-      
-      // Save the new API key to the user document
-      userDoc.agentApiKey = apiKey;
-      await cloudant.saveDocument('maia_users', userDoc);
-      
-      console.log(`[API KEY] ✅ Created and saved new API key for agent ${agentId}`);
-      return apiKey;
-    } catch (createError) {
-      console.error(`[API KEY] ❌ Failed to create API key for agent ${agentId}:`, createError.message);
-      console.error(`[API KEY] Error stack:`, createError.stack);
-      throw new Error(`Failed to create API key for agent: ${createError.message}`);
-    }
-    
-  } catch (error) {
-    console.error(`[API KEY] Error in getOrCreateAgentApiKey for user ${userId}:`, error.message);
-    throw error;
-  }
-}
-
-/**
- * Recreate agent API key (used when existing key is invalid)
- */
-export async function recreateAgentApiKey(doClient, cloudant, userId, agentId) {
-  console.log(`[API KEY] recreateAgentApiKey called for user ${userId}, agent ${agentId}`);
-  
-  try {
-    // Get user document
-    const userDoc = await cloudant.getDocument('maia_users', userId);
-    
-    console.log(`[API KEY] Creating new API key for agent ${agentId}...`);
     const agentClient = new AgentClient(doClient);
     const apiKey = await agentClient.createApiKey(agentId, `agent-${agentId}-api-key`);
     
@@ -74,10 +45,35 @@ export async function recreateAgentApiKey(doClient, cloudant, userId, agentId) {
     userDoc.agentApiKey = apiKey;
     await cloudant.saveDocument('maia_users', userDoc);
     
-    console.log(`[API KEY] ✅ Recreated and saved new API key for agent ${agentId}`);
     return apiKey;
   } catch (error) {
-    console.error(`[API KEY] ❌ Failed to recreate API key for agent ${agentId}:`, error.message);
+    console.error(`Error in getOrCreateAgentApiKey for user ${userId}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Recreate agent API key (used when existing key is invalid)
+ */
+export async function recreateAgentApiKey(doClient, cloudant, userId, agentId) {
+  try {
+    // Get user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    const agentClient = new AgentClient(doClient);
+    const apiKey = await agentClient.createApiKey(agentId, `agent-${agentId}-api-key`);
+    
+    if (!apiKey) {
+      throw new Error('API key was null/undefined after creation');
+    }
+    
+    // Save the new API key to the user document
+    userDoc.agentApiKey = apiKey;
+    await cloudant.saveDocument('maia_users', userDoc);
+    
+    return apiKey;
+  } catch (error) {
+    console.error(`Error recreating API key for agent ${agentId}:`, error.message);
     throw error;
   }
 }
@@ -100,4 +96,3 @@ export async function findUserAgent(doClient, userId) {
     return null;
   }
 }
-
