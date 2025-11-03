@@ -790,6 +790,9 @@ const saveToGroup = async () => {
     const result = await response.json();
     
     alert(`Chat saved successfully! Share ID: ${result.shareId}`);
+    
+    // Refresh the saved chat count
+    loadSavedChatCount();
   } catch (error) {
     console.error('Error saving to group:', error);
     alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
