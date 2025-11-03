@@ -4,7 +4,7 @@
 
 import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
-import { getOrCreateAgentApiKey } from '../utils/agent-helper.js';
+import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 
 export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
   /**
