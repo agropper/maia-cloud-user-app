@@ -897,13 +897,16 @@ const deleteMessageConfirmed = () => {
 const scrollToBottom = async () => {
   await nextTick();
   await nextTick(); // Double nextTick to ensure DOM is fully updated
+  console.log('[SCROLL] Attempting to scroll, ref:', chatMessagesRef.value);
   if (chatMessagesRef.value) {
+    console.log('[SCROLL] Scrolling from', chatMessagesRef.value.scrollTop, 'to', chatMessagesRef.value.scrollHeight);
     chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
   }
 };
 
 // Watch for specific changes and trigger scroll with flush: 'post'
 watch(() => [messages.value.length, messages.value[messages.value.length - 1]?.content], () => {
+  console.log('[SCROLL] Watcher triggered, messages.length:', messages.value.length);
   scrollToBottom();
 }, { flush: 'post' });
 
