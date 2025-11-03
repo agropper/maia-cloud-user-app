@@ -578,6 +578,8 @@ const uploadPDFFile = async (file: File) => {
   }
 
   const parseResult = await parseResponse.json();
+  
+  console.log(`[*] PDF parsed: ${file.name}, ${file.size} bytes → ${parseResult.text.length} chars (${parseResult.pages} pages)`);
 
   // Upload to bucket
   const uploadFormData = new FormData();
@@ -894,6 +896,7 @@ const deleteMessageConfirmed = () => {
 // Auto-scroll chat to bottom when messages change
 const scrollToBottom = async () => {
   await nextTick();
+  await nextTick(); // Double nextTick to ensure DOM is fully updated
   if (chatMessagesRef.value) {
     chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
   }
