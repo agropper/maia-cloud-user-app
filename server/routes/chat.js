@@ -68,6 +68,10 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
 
         // Handle streaming updates
         if (userAgentProvider) {
+          // Log request details for debugging
+          const totalChars = messages.reduce((sum, msg) => sum + (msg.content?.length || 0), 0);
+          console.log(`[AGENT REQUEST] Model: ${options.model}, Messages: ${messages.length}, Total chars: ${totalChars}`);
+          
           await userAgentProvider.chat(messages, { ...options, stream: true }, 
             (update) => {
               res.write(`data: ${JSON.stringify(update)}\n\n`);
