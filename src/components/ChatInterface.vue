@@ -899,8 +899,13 @@ const scrollToBottom = async () => {
   await nextTick(); // Double nextTick to ensure DOM is fully updated
   console.log('[SCROLL] Attempting to scroll, ref:', chatMessagesRef.value);
   if (chatMessagesRef.value) {
-    console.log('[SCROLL] Scrolling from', chatMessagesRef.value.scrollTop, 'to', chatMessagesRef.value.scrollHeight);
-    chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
+    // Use setTimeout to ensure DOM has fully updated
+    setTimeout(() => {
+      if (chatMessagesRef.value) {
+        console.log('[SCROLL] Scrolling from', chatMessagesRef.value.scrollTop, 'to', chatMessagesRef.value.scrollHeight);
+        chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
+      }
+    }, 0);
   }
 };
 
