@@ -156,6 +156,7 @@ import html2pdf from 'html2pdf.js';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  name?: string;
 }
 
 interface User {
@@ -172,6 +173,7 @@ interface UploadedFile {
   transcript?: string;
   originalFile: File;
   bucketKey?: string;
+  bucketPath?: string;
   fileUrl?: string;
   uploadedAt: Date;
 }
@@ -250,7 +252,8 @@ const sendMessage = async () => {
 
   const userMessage: Message = {
     role: 'user',
-    content: inputMessage.value
+    content: inputMessage.value,
+    name: getUserLabel()
   };
 
   messages.value.push(userMessage);
@@ -305,7 +308,8 @@ const sendMessage = async () => {
     // Create assistant message
     const assistantMessage: Message = {
       role: 'assistant',
-      content: ''
+      content: '',
+      name: getProviderLabel()
     };
     messages.value.push(assistantMessage);
 
@@ -343,7 +347,8 @@ const sendMessage = async () => {
     console.error('Chat error:', error);
     messages.value.push({
       role: 'assistant',
-      content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`
+      content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`,
+      name: getProviderLabel()
     });
     isStreaming.value = false;
   }
@@ -473,6 +478,7 @@ const uploadPDFFile = async (file: File) => {
     content: parseResult.text,
     originalFile: file,
     bucketKey: uploadResult.fileInfo.bucketKey,
+    bucketPath: uploadResult.fileInfo.userFolder,
     fileUrl: uploadResult.fileInfo.fileUrl,
     uploadedAt: new Date()
   };
@@ -601,8 +607,38 @@ const saveLocally = async () => {
 };
 
 const saveToGroup = async () => {
-  alert('Save to Group functionality coming soon!');
-  // TODO: Implement group chat saving
+  try {
+    if (!props.user?.userId) {
+      alert('You must be logged in to save chats to a group');
+      return;
+    }
+
+    const response = await fetch('http://localhost:3001/api/save-group-chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chatHistory: messages.value,
+        uploadedFiles: uploadedFiles.value,
+        currentUser: props.user.userId,
+        connectedKB: getProviderKey(selectedProvider.value)
+      }),
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to save chat');
+    }
+
+    const result = await response.json();
+    
+    alert(`Chat saved successfully! Share ID: ${result.shareId}`);
+  } catch (error) {
+    console.error('Error saving to group:', error);
+    alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 };
 
 onMounted(() => {

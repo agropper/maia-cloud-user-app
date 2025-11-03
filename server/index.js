@@ -55,6 +55,12 @@ const cloudant = new CloudantClient({
   } catch (error) {
     // Already exists, that's fine
   }
+  try {
+    await cloudant.createDatabase('maia_chats');
+    console.log('✅ Created maia_chats database');
+  } catch (error) {
+    // Already exists, that's fine
+  }
 })();
 
 const auditLog = new AuditLogService(cloudant, 'maia_audit_log');
@@ -117,6 +123,82 @@ setupChatRoutes(app, chatClient);
 
 // File routes
 setupFileRoutes(app);
+
+// Save group chat endpoint
+app.post('/api/save-group-chat', async (req, res) => {
+  try {
+    const { chatHistory, uploadedFiles, currentUser, connectedKB } = req.body;
+    
+    if (!chatHistory || chatHistory.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'No chat history to save',
+        error: 'MISSING_CHAT_HISTORY'
+      });
+    }
+
+    // Generate a secure, random share ID
+    const generateShareId = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      let result = '';
+      for (let i = 0; i < 12; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    };
+
+    const shareId = generateShareId();
+    
+    // Process uploadedFiles - only store metadata, not large content
+    const processedFiles = (uploadedFiles || []).map(file => ({
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      bucketKey: file.bucketKey,
+      bucketPath: file.bucketPath,
+      uploadedAt: file.uploadedAt?.toISOString ? file.uploadedAt.toISOString() : file.uploadedAt
+    }));
+    
+    // Generate _id starting with username
+    const userName = currentUser || 'anonymous';
+    const randomId = Math.random().toString(36).substr(2, 9);
+    const chatId = `${userName}-chat_${Date.now()}_${randomId}`;
+    
+    const groupChatDoc = {
+      _id: chatId,
+      type: 'group_chat',
+      shareId: shareId,
+      currentUser: currentUser,
+      patientOwner: currentUser,
+      connectedKB: connectedKB || 'No KB connected',
+      chatHistory,
+      uploadedFiles: processedFiles,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      participantCount: chatHistory.filter(msg => msg.role === 'user').length,
+      messageCount: chatHistory.length,
+      isShared: true
+    };
+
+    // Save to maia_chats database
+    const result = await cloudant.saveDocument('maia_chats', groupChatDoc);
+    
+    res.json({ 
+      success: true, 
+      chatId: result.id,
+      shareId: shareId,
+      message: 'Group chat saved successfully' 
+    });
+  } catch (error) {
+    console.error('❌ Save group chat error:', error);
+    res.status(500).json({ 
+      success: false,
+      message: `Failed to save group chat: ${error.message}`,
+      error: 'SAVE_CHAT_ERROR'
+    });
+  }
+});
 
 // User file metadata endpoint - updates user document with file info
 app.post('/api/user-file-metadata', async (req, res) => {
