@@ -36,7 +36,7 @@
         </div>
 
         <!-- Chat Area -->
-        <div class="chat-messages q-pa-md" style="flex: 1; overflow-y: auto; min-height: 0;">
+        <div ref="chatMessagesRef" class="chat-messages q-pa-md" style="flex: 1; overflow-y: auto; min-height: 0;">
           <template v-for="(msg, idx) in messages" :key="idx">
             <!-- Normal Chat Message -->
             <div 
@@ -304,6 +304,7 @@ const editingMessageIdx = ref<number[]>([]);
 const showDeleteDialog = ref(false);
 const messageToDelete = ref<Message | null>(null);
 const precedingUserMessage = ref<Message | null>(null);
+const chatMessagesRef = ref<HTMLElement | null>(null);
 
 // Provider labels map
 const providerLabels: Record<string, string> = {
@@ -891,9 +892,8 @@ const deleteMessageConfirmed = () => {
 // Auto-scroll chat to bottom when messages change
 const scrollToBottom = async () => {
   await nextTick();
-  const chatMessages = document.querySelector('.chat-messages');
-  if (chatMessages) {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+  if (chatMessagesRef.value) {
+    chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
   }
 };
 
