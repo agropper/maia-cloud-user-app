@@ -53,7 +53,7 @@
                 :class="msg.role === 'user' ? 'bg-blue-1' : 'bg-grey-2'"
                 style="display: inline-block; max-width: 80%;"
               >
-                {{ msg.content }}
+                <vue-markdown :source="msg.content" />
                 <div class="q-mt-sm">
                   <q-btn
                     flat
@@ -251,6 +251,7 @@ import { ref, onMounted, computed } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import html2pdf from 'html2pdf.js';
+import VueMarkdown from 'vue-markdown-render';
 
 interface Message {
   role: 'user' | 'assistant';
