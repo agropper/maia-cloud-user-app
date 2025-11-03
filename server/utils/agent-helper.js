@@ -90,6 +90,10 @@ export async function findUserAgent(doClient, userId) {
     const agentPattern = new RegExp(`^${userId}-agent-`);
     const userAgent = agents.find(agent => agentPattern.test(agent.name));
     
+    if (userAgent) {
+      console.log(`Found agent for ${userId}:`, JSON.stringify(userAgent, null, 2));
+    }
+    
     return userAgent || null;
   } catch (error) {
     console.error(`Error finding agent for user ${userId}:`, error.message);
