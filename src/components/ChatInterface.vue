@@ -405,7 +405,7 @@ const sendMessage = async () => {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(errorData.error || `HTTP ${response.status}`);
+      throw { message: errorData.error || `HTTP ${response.status}`, status: response.status };
     }
 
     const reader = response.body?.getReader();
@@ -451,9 +451,25 @@ const sendMessage = async () => {
     isStreaming.value = false;
   } catch (error) {
     console.error('Chat error:', error);
+    
+    // Build error message
+    let errorMessage = '';
+    if (typeof error === 'object' && error !== null && 'status' in error) {
+      errorMessage = error.message || 'Failed to get response';
+      
+      // Add special message for 429 rate limit errors
+      if (error.status === 429) {
+        errorMessage += `\n\n**Your Private AI may be able to handle larger contexts than the ${getProviderLabel()} model.**`;
+      }
+    } else if (error instanceof Error) {
+      errorMessage = error.message;
+    } else {
+      errorMessage = 'Failed to get response';
+    }
+    
     messages.value.push({
       role: 'assistant',
-      content: `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`,
+      content: `Error: ${errorMessage}`,
       name: getProviderLabel()
     });
     isStreaming.value = false;
