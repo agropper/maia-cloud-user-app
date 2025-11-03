@@ -32,15 +32,21 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       }
 
       // For DigitalOcean provider, check if user has a specific agent
+      let userId = null;
+      let userDoc = null;
+      let agentId = null;
+      
       if (provider === 'digitalocean' && cloudant && doClient) {
-        const userId = req.session?.userId;
+        userId = req.session?.userId;
         
         if (userId) {
-          const userDoc = await cloudant.getDocument('maia_users', userId);
+          userDoc = await cloudant.getDocument('maia_users', userId);
           
           if (userDoc.assignedAgentId && userDoc.agentEndpoint && userDoc.assignedAgentName) {
+            agentId = userDoc.assignedAgentId;
+            
             // Get or create agent API key
-            const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+            const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId);
             
             // Create provider with agent-specific endpoint and key
             userAgentProvider = new DigitalOceanProvider(apiKey, {
@@ -124,10 +130,23 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       
       let errorMessage = error.message || 'Chat request failed';
       
-      // Provide helpful error message for 401 on agent endpoints
-      if (statusCode === 401 && userAgentProvider) {
+      // Handle 401 Unauthorized on agent endpoints - recreate the API key
+      if (statusCode === 401 && userAgentProvider && userId && agentId && cloudant && doClient) {
+        console.error(`401 Unauthorized on agent endpoint for agent ${agentId}. Attempting to recreate API key...`);
+        
+        try {
+          // Recreate the API key (already imported at top of file)
+          const newApiKey = await recreateAgentApiKey(doClient, cloudant, userId, agentId);
+          console.log(`✅ Successfully recreated API key for agent ${agentId}`);
+          
+          errorMessage = 'Authentication failed for your Private AI agent. The API key has been automatically recreated. Please try your request again.';
+        } catch (recreateError) {
+          console.error(`Failed to recreate API key for agent ${agentId}:`, recreateError.message);
+          errorMessage = 'Authentication failed for your Private AI agent. Please contact support if this issue persists.';
+        }
+      } else if (statusCode === 401 && userAgentProvider) {
         errorMessage = 'Authentication failed for your Private AI agent. The API key may need to be recreated.';
-        console.error('401 Unauthorized on agent endpoint');
+        console.error('401 Unauthorized on agent endpoint (could not recreate key - missing info)');
       }
       
       // Enhance error messages for token limit errors (400 status with token limit message)
