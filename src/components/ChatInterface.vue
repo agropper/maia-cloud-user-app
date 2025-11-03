@@ -352,9 +352,17 @@ const loadProviders = async () => {
   }
 };
 
+// Token estimation helper
+const estimateTokenCount = (text: string) => {
+  const averageTokenLength = 2.75;
+  return Math.ceil((text.length / averageTokenLength) * 1.15);
+};
+
 // Send message (streaming)
 const sendMessage = async () => {
   if (!inputMessage.value || isStreaming.value) return;
+
+  const startTime = Date.now();
 
   const userMessage: Message = {
     role: 'user',
@@ -384,6 +392,14 @@ const sendMessage = async () => {
           return msg;
         })
       : messages.value;
+    
+    // Calculate tokens and context size for logging
+    const allMessagesText = messagesWithContext.map(msg => msg.content).join('\n');
+    const totalTokens = estimateTokenCount(allMessagesText);
+    const contextSizeKB = Math.round(allMessagesText.length / 1024 * 100) / 100;
+    const uploadedFilesCount = uploadedFiles.value.length;
+    
+    console.log(`[*] AI Query: ${totalTokens} tokens, ${contextSizeKB}KB context, ${uploadedFilesCount} files`);
     
     // Convert displayed label to API key
     const providerKey = getProviderKey(selectedProvider.value);
@@ -440,6 +456,8 @@ const sendMessage = async () => {
             
             if (data.isComplete) {
               isStreaming.value = false;
+              const responseTime = Date.now() - startTime;
+              console.log(`[*] AI Response time: ${responseTime}ms`);
               return;
             }
           } catch (e) {
@@ -450,6 +468,8 @@ const sendMessage = async () => {
     }
 
     isStreaming.value = false;
+    const responseTime = Date.now() - startTime;
+    console.log(`[*] AI Response time: ${responseTime}ms`);
   } catch (error) {
     console.error('Chat error:', error);
     
