@@ -37,9 +37,43 @@
 
         <!-- Chat Area -->
         <div class="chat-messages q-pa-md" style="flex: 1; overflow-y: auto; min-height: 0;">
+          <!-- Normal Chat Message -->
           <div 
             v-for="(msg, idx) in messages" 
             :key="idx"
+            v-if="!editingMessageIdx.includes(idx)"
+            class="q-mb-md"
+            :class="msg.role === 'user' ? 'text-right' : 'text-left'"
+          >
+            <q-badge 
+              :color="msg.role === 'user' ? 'primary' : 'secondary'"
+              :label="msg.role === 'assistant' ? getProviderLabel() : getUserLabel()"
+            />
+            <div 
+              class="q-mt-xs q-pa-sm rounded-borders message-container"
+              :class="msg.role === 'user' ? 'bg-blue-1' : 'bg-grey-2'"
+              style="display: inline-block; max-width: 80%; position: relative;"
+            >
+              {{ msg.content }}
+              <q-btn
+                flat
+                dense
+                round
+                size="xs"
+                icon="edit"
+                color="grey-8"
+                class="edit-button"
+                @click="startEditing(idx)"
+                title="Edit message"
+              />
+            </div>
+          </div>
+          
+          <!-- Editable Chat Message -->
+          <div 
+            v-for="(msg, idx) in messages" 
+            :key="idx"
+            v-if="editingMessageIdx.includes(idx)"
             class="q-mb-md"
             :class="msg.role === 'user' ? 'text-right' : 'text-left'"
           >
@@ -52,7 +86,28 @@
               :class="msg.role === 'user' ? 'bg-blue-1' : 'bg-grey-2'"
               style="display: inline-block; max-width: 80%"
             >
-              {{ msg.content }}
+              <textarea 
+                v-model="msg.content" 
+                rows="8"
+                class="full-width q-pa-sm"
+                style="border: 1px solid #ccc; border-radius: 4px; resize: vertical;"
+              />
+              <div class="edit-buttons q-mt-sm">
+                <q-btn
+                  size="sm"
+                  icon="save"
+                  color="primary"
+                  label="Save"
+                  @click="saveEditedMessage(idx)"
+                />
+                <q-btn
+                  size="sm"
+                  icon="delete"
+                  color="negative"
+                  label="Delete Question and Response"
+                  @click="confirmDeleteMessage(idx)"
+                />
+              </div>
             </div>
           </div>
           
@@ -60,6 +115,33 @@
             Thinking... <q-spinner-dots size="sm" />
           </div>
         </div>
+        
+        <!-- Delete Confirmation Dialog -->
+        <q-dialog v-model="showDeleteDialog" persistent>
+          <q-card style="min-width: 350px">
+            <q-card-section>
+              <div class="text-h6">Delete Messages</div>
+            </q-card-section>
+
+            <q-card-section>
+              <div class="text-body1">
+                <p>Are you sure you want to delete this message?</p>
+                <div class="message-preview q-mt-md">
+                  <strong>{{ messageToDelete?.role === 'user' ? getUserLabel() : getProviderLabel() }}:</strong>
+                  <div class="message-content">{{ messageToDelete?.content?.substring(0, 100) }}{{ messageToDelete?.content?.length > 100 ? '...' : '' }}</div>
+                </div>
+                <p v-if="precedingUserMessage" class="text-caption text-grey q-mt-sm">
+                  <strong>Note:</strong> This will also delete the preceding user question.
+                </p>
+              </div>
+            </q-card-section>
+
+            <q-card-actions align="right">
+              <q-btn flat label="Cancel" color="primary" @click="showDeleteDialog = false" />
+              <q-btn flat label="Delete" color="negative" @click="deleteMessageConfirmed" />
+            </q-card-actions>
+          </q-card>
+        </q-dialog>
 
         <!-- Input Area with Provider Selector -->
         <div class="q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
@@ -218,6 +300,10 @@ const showPdfViewer = ref(false);
 const viewingFile = ref<UploadedFile | null>(null);
 const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
+const editingMessageIdx = ref<number[]>([]);
+const showDeleteDialog = ref(false);
+const messageToDelete = ref<Message | null>(null);
+const precedingUserMessage = ref<Message | null>(null);
 
 // Provider labels map
 const providerLabels: Record<string, string> = {
@@ -703,6 +789,62 @@ const handleChatSelected = (chat: any) => {
   }
 };
 
+const startEditing = (idx: number) => {
+  if (!editingMessageIdx.value.includes(idx)) {
+    editingMessageIdx.value.push(idx);
+  }
+};
+
+const saveEditedMessage = (idx: number) => {
+  const editIndex = editingMessageIdx.value.indexOf(idx);
+  if (editIndex > -1) {
+    editingMessageIdx.value.splice(editIndex, 1);
+  }
+};
+
+const confirmDeleteMessage = (idx: number) => {
+  const message = messages.value[idx];
+  messageToDelete.value = message;
+  
+  // Check if deleting an assistant message with a preceding user message
+  if (message.role === 'assistant' && idx > 0 && messages.value[idx - 1].role === 'user') {
+    precedingUserMessage.value = messages.value[idx - 1];
+  } else {
+    precedingUserMessage.value = null;
+  }
+  
+  showDeleteDialog.value = true;
+};
+
+const deleteMessageConfirmed = () => {
+  if (!messageToDelete.value) return;
+  
+  const idx = messages.value.findIndex(msg => msg === messageToDelete.value);
+  if (idx === -1) return;
+  
+  // Remove the message
+  messages.value.splice(idx, 1);
+  
+  // If there was a preceding user message, remove it too
+  if (precedingUserMessage.value && idx > 0) {
+    const userIdx = idx - 1;
+    if (messages.value[userIdx]?.role === 'user') {
+      messages.value.splice(userIdx, 1);
+    }
+  }
+  
+  // Remove from editing if it was being edited
+  const editIndex = editingMessageIdx.value.indexOf(idx);
+  if (editIndex > -1) {
+    editingMessageIdx.value.splice(editIndex, 1);
+  }
+  
+  // Close modal and reset
+  showDeleteDialog.value = false;
+  messageToDelete.value = null;
+  precedingUserMessage.value = null;
+};
+
 onMounted(() => {
   loadProviders();
   loadSavedChatCount();
@@ -721,6 +863,43 @@ onMounted(() => {
 
 .chat-messages {
   background-color: #fafafa;
+}
+
+.message-container {
+  position: relative;
+}
+
+.edit-button {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.message-container:hover .edit-button {
+  opacity: 1;
+}
+
+.edit-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.message-preview {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 10px;
+  margin: 10px 0;
+}
+
+.message-content {
+  margin-top: 5px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>
 
