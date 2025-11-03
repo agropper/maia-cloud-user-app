@@ -63,6 +63,33 @@
 
         <!-- Input Area with Provider Selector -->
         <div class="q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
+          <!-- Save Buttons -->
+          <div class="row q-gutter-sm q-mb-sm" v-if="messages.length > 0">
+            <div class="col"></div>
+            <div class="col-auto">
+              <q-btn 
+                flat 
+                dense 
+                size="sm"
+                color="primary" 
+                label="SAVE LOCALLY"
+                icon="save"
+                @click="saveLocally"
+                :disable="isStreaming"
+              />
+              <q-btn 
+                flat 
+                dense 
+                size="sm"
+                color="secondary" 
+                label="SAVE TO GROUP"
+                icon="group"
+                @click="saveToGroup"
+                :disable="isStreaming"
+              />
+            </div>
+          </div>
+          
           <div class="row q-gutter-sm">
             <div class="col-auto">
               <q-select
@@ -124,6 +151,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
+import html2pdf from 'html2pdf.js';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -487,6 +515,57 @@ const removeFile = (file: UploadedFile) => {
   if (index !== -1) {
     uploadedFiles.value.splice(index, 1);
   }
+};
+
+const saveLocally = async () => {
+  try {
+    // Get the chat area element to capture
+    const chatAreaElement = document.querySelector('.chat-messages');
+    
+    if (!chatAreaElement) {
+      alert('Chat area not found');
+      return;
+    }
+    
+    // Generate filename with date and time
+    const now = new Date();
+    const dateStr = now.toISOString().replace(/T/, ' ').replace(/\..+/, '').replace(/:/g, '-');
+    const filename = `MAIA chat ${dateStr}.pdf`;
+    
+    // Configure html2pdf options
+    const opt = {
+      margin: 0.5,
+      filename: filename,
+      image: { 
+        type: 'jpeg', 
+        quality: 0.98 
+      },
+      html2canvas: { 
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff'
+      },
+      jsPDF: { 
+        unit: 'in', 
+        format: 'a4', 
+        orientation: 'portrait' 
+      }
+    };
+    
+    // Generate and save PDF
+    await html2pdf().from(chatAreaElement).set(opt).save();
+    
+    alert('Chat saved successfully!');
+  } catch (error) {
+    console.error('Error saving chat:', error);
+    alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};
+
+const saveToGroup = async () => {
+  alert('Save to Group functionality coming soon!');
+  // TODO: Implement group chat saving
 };
 
 onMounted(() => {
