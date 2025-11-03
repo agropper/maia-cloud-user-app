@@ -479,7 +479,9 @@ const sendMessage = async () => {
     const responseTime = Date.now() - startTime;
     console.log(`[*] AI Response time: ${responseTime}ms`);
   } catch (error) {
+    const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
+    console.log(`[*] AI Response time: ${responseTime}ms (failed)`);
     
     // Build error message
     let errorMessage = '';
