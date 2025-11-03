@@ -247,7 +247,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, computed, watch, nextTick } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import html2pdf from 'html2pdf.js';
@@ -880,6 +880,19 @@ const deleteMessageConfirmed = () => {
   messageToDelete.value = null;
   precedingUserMessage.value = null;
 };
+
+// Auto-scroll chat to bottom when messages change
+const scrollToBottom = async () => {
+  await nextTick();
+  const chatMessages = document.querySelector('.chat-messages');
+  if (chatMessages) {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+};
+
+watch(messages, () => {
+  scrollToBottom();
+}, { deep: true });
 
 onMounted(() => {
   loadProviders();
