@@ -156,7 +156,7 @@
                 label="SAVE LOCALLY"
                 icon="save"
                 @click="saveLocally"
-                :disable="isStreaming"
+                :disable="isStreaming || !hasChatChanged"
               />
               <q-btn 
                 flat 
@@ -166,7 +166,7 @@
                 label="SAVE TO GROUP"
                 icon="group"
                 @click="saveToGroup"
-                :disable="isStreaming"
+                :disable="isStreaming || !hasChatChanged"
               />
               <q-btn 
                 flat 
@@ -211,7 +211,7 @@
           </div>
           
           <!-- Status Bar -->
-          <div class="row q-gutter-sm q-mt-sm q-pt-sm" style="border-top: 1px solid #eee; align-items: center">
+          <div class="row q-gutter-sm q-mt-sm q-pt-sm" style="border-top: 1px solid #eee; align-items: center;">
             <div class="col-auto">
               <q-btn flat dense round icon="attach_file" class="text-grey-6" @click="triggerFileInput" />
               <input
@@ -221,11 +221,23 @@
                 @change="handleFileSelect"
               />
             </div>
-            <div class="col text-center text-body2 text-grey-7">
-              User: {{ props.user?.userId || 'Guest' }}
-              <q-btn flat dense label="SIGN OUT" color="grey-8" @click="handleSignOut" class="q-ml-sm" />
+            <div class="col" style="display: flex; align-items: center; justify-content: center;">
+              <q-btn flat dense round icon="settings" class="text-grey-6 q-mr-xs" @click="showMyStuffDialog = true" />
+              <span class="text-body2 text-grey-7">{{ contextualTip }}</span>
             </div>
-            <div class="col-auto"></div>
+            <div class="col-auto" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
+              <span class="text-body2 text-grey-7">User: {{ props.user?.userId || 'Guest' }}</span>
+              <q-btn flat dense label="SIGN OUT" color="grey-8" @click="handleSignOut" />
+              <q-btn 
+                flat 
+                dense 
+                round 
+                icon="email" 
+                class="text-grey-6" 
+                @click="openAdminEmail"
+                title="Email admin"
+              />
+            </div>
           </div>
         </div>
       </q-card-section>
@@ -243,6 +255,12 @@
       :currentUser="props.user?.userId || ''"
       @chat-selected="handleChatSelected"
     />
+
+    <!-- My Stuff Dialog -->
+    <MyStuffDialog
+      v-model="showMyStuffDialog"
+      :userId="props.user?.userId || ''"
+    />
   </div>
 </template>
 
@@ -250,6 +268,7 @@
 import { ref, onMounted, computed, watch, nextTick } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
+import MyStuffDialog from './MyStuffDialog.vue';
 import html2pdf from 'html2pdf.js';
 import VueMarkdown from 'vue-markdown-render';
 
@@ -300,11 +319,48 @@ const showPdfViewer = ref(false);
 const viewingFile = ref<UploadedFile | null>(null);
 const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
+const showMyStuffDialog = ref(false);
+const contextualTip = ref('Loading...');
 const editingMessageIdx = ref<number[]>([]);
 const showDeleteDialog = ref(false);
 const messageToDelete = ref<Message | null>(null);
 const precedingUserMessage = ref<Message | null>(null);
 const chatMessagesRef = ref<HTMLElement | null>(null);
+
+// Track initial chat state for change detection
+const initialMessages = ref<Message[]>([]);
+const initialUploadedFiles = ref<UploadedFile[]>([]);
+
+// Computed property to check if chat has changed
+const hasChatChanged = computed(() => {
+  if (messages.value.length !== initialMessages.value.length) {
+    return true;
+  }
+  
+  // Compare messages
+  for (let i = 0; i < messages.value.length; i++) {
+    const current = messages.value[i];
+    const initial = initialMessages.value[i];
+    if (!initial || current.role !== initial.role || current.content !== initial.content) {
+      return true;
+    }
+  }
+  
+  // Compare uploaded files
+  if (uploadedFiles.value.length !== initialUploadedFiles.value.length) {
+    return true;
+  }
+  
+  for (let i = 0; i < uploadedFiles.value.length; i++) {
+    const current = uploadedFiles.value[i];
+    const initial = initialUploadedFiles.value[i];
+    if (!initial || current.id !== initial.id) {
+      return true;
+    }
+  }
+  
+  return false;
+});
 
 // Provider labels map
 const providerLabels: Record<string, string> = {
@@ -371,10 +427,11 @@ const sendMessage = async () => {
     name: getUserLabel()
   };
 
-  messages.value.push(userMessage);
-  inputMessage.value = '';
-  
-  isStreaming.value = true;
+    messages.value.push(userMessage);
+    inputMessage.value = '';
+    // Don't update initialMessages here - wait until after save
+    
+    isStreaming.value = true;
 
   try {
     // Build messages with file context
@@ -510,6 +567,30 @@ const sendMessage = async () => {
 
 const handleSignOut = () => {
   emit('sign-out');
+};
+
+const openAdminEmail = async () => {
+  try {
+    // Try to get admin email from server
+    const response = await fetch('http://localhost:3001/api/admin-email', {
+      credentials: 'include'
+    });
+    let adminEmail = 'admin@yourdomain.com'; // Default fallback
+    if (response.ok) {
+      const data = await response.json();
+      adminEmail = data.email || adminEmail;
+    }
+    
+    const subject = encodeURIComponent(`Question from ${props.user?.userId || 'User'}`);
+    const body = encodeURIComponent(`Hello,\n\nI have a question about my MAIA account.\n\nThank you!`);
+    window.location.href = `mailto:${adminEmail}?subject=${subject}&body=${body}`;
+  } catch (error) {
+    // Fallback to default email if endpoint fails
+    const adminEmail = 'admin@yourdomain.com';
+    const subject = encodeURIComponent(`Question from ${props.user?.userId || 'User'}`);
+    const body = encodeURIComponent(`Hello,\n\nI have a question about my MAIA account.\n\nThank you!`);
+    window.location.href = `mailto:${adminEmail}?subject=${subject}&body=${body}`;
+  }
 };
 
 const triggerFileInput = () => {
@@ -721,6 +802,9 @@ const saveLocally = async () => {
         await writable.close();
         
         alert('Chat saved successfully!');
+        // Reset initial state after save
+        initialMessages.value = JSON.parse(JSON.stringify(messages.value));
+        initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
         return;
       } catch (err: any) {
         // User cancelled or error - fall through to regular download
@@ -756,6 +840,9 @@ const saveLocally = async () => {
     await html2pdf().from(chatAreaElement).set(opt).save();
     
     alert('Chat saved successfully!');
+    // Reset initial state after save
+    initialMessages.value = JSON.parse(JSON.stringify(messages.value));
+    initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
   } catch (error) {
     console.error('Error saving chat:', error);
     alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -794,6 +881,9 @@ const saveToGroup = async () => {
     
     // Refresh the saved chat count
     loadSavedChatCount();
+    // Reset initial state after save
+    initialMessages.value = JSON.parse(JSON.stringify(messages.value));
+    initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
   } catch (error) {
     console.error('Error saving to group:', error);
     alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -823,6 +913,8 @@ const handleChatSelected = (chat: any) => {
   // Load the chat history
   if (chat.chatHistory) {
     messages.value = chat.chatHistory;
+    // Update initial state after loading chat
+    initialMessages.value = JSON.parse(JSON.stringify(chat.chatHistory));
   }
   
   // Load the uploaded files
@@ -838,7 +930,20 @@ const handleChatSelected = (chat: any) => {
       bucketPath: file.bucketPath,
       uploadedAt: file.uploadedAt ? new Date(file.uploadedAt) : new Date()
     }));
+    // Update initial state after loading files
+    initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
+  } else {
+    uploadedFiles.value = [];
+    initialUploadedFiles.value = [];
   }
+};
+
+// Reset initial state when chat is cleared
+const clearChat = () => {
+  messages.value = [];
+  uploadedFiles.value = [];
+  initialMessages.value = [];
+  initialUploadedFiles.value = [];
 };
 
 const startEditing = (idx: number) => {
@@ -895,6 +1000,7 @@ const deleteMessageConfirmed = () => {
   showDeleteDialog.value = false;
   messageToDelete.value = null;
   precedingUserMessage.value = null;
+  // Don't update initialMessages here - deletion is a change that should enable save buttons
 };
 
 // Auto-scroll chat to bottom when messages change
@@ -940,10 +1046,52 @@ const syncAgent = async () => {
   }
 };
 
+const updateContextualTip = async () => {
+  if (!props.user?.userId) {
+    contextualTip.value = 'User not logged in';
+    return;
+  }
+
+  try {
+    // Fetch user document to get workflowStage and other info
+    const userResponse = await fetch(`http://localhost:3001/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, {
+      credentials: 'include'
+    });
+
+    if (!userResponse.ok) {
+      contextualTip.value = 'Unable to load status';
+      return;
+    }
+
+    const userData = await userResponse.json();
+    const workflowStage = userData.workflowStage || 'unknown';
+    const hasAgent = userData.hasAgent ? 'yes' : 'no';
+    const fileCount = userData.fileCount || 0;
+    const hasKB = userData.hasKB ? 'yes' : 'no';
+    const chatCount = savedChatCount.value;
+
+    contextualTip.value = `Workflow: ${workflowStage}, Agent: ${hasAgent}, Files: ${fileCount}, KB: ${hasKB}, Chats: ${chatCount}`;
+  } catch (error) {
+    console.error('Failed to update contextual tip:', error);
+    contextualTip.value = 'Error loading status';
+  }
+};
+
 onMounted(() => {
   loadProviders();
   loadSavedChatCount();
   syncAgent();
+  updateContextualTip();
+  
+  // Update tip periodically and when saved chat count changes
+  watch(() => savedChatCount.value, () => {
+    updateContextualTip();
+  });
+  
+  // Update tip every 30 seconds to pick up changes
+  setInterval(() => {
+    updateContextualTip();
+  }, 30000);
 });
 </script>
 

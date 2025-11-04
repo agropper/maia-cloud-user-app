@@ -460,6 +460,10 @@ app.get('/api/admin/provision', async (req, res) => {
       `);
     }
 
+    // Set workflowStage to approved when admin starts provisioning
+    userDoc.workflowStage = 'approved';
+    await cloudant.saveDocument('maia_users', userDoc);
+
     // Check if user already has an agent
     if (userDoc.assignedAgentId) {
       // User already provisioned - return success
@@ -622,6 +626,10 @@ Format section headings so they are not too large.`;
 
     updateStatus('Agent created', { agentId: newAgent.uuid, agentName });
 
+    // Set workflowStage to agent_named after agent is successfully created
+    userDoc.workflowStage = 'agent_named';
+    await cloudant.saveDocument('maia_users', userDoc);
+
     // Step 2: Wait for Deployment
     updateStatus('Waiting for agent deployment...');
     
@@ -669,6 +677,10 @@ Format section headings so they are not too large.`;
       endpoint: agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null,
       attempts
     });
+
+    // Set workflowStage to agent_deployed when deployment reaches STATUS_RUNNING
+    userDoc.workflowStage = 'agent_deployed';
+    await cloudant.saveDocument('maia_users', userDoc);
 
     // Step 3: Update Agent (to ensure all config is set)
     updateStatus('Updating agent configuration...');
@@ -989,6 +1001,11 @@ app.post('/api/user-file-metadata', async (req, res) => {
       });
     }
 
+    // Set workflowStage to files_stored if files exist
+    if (userDoc.files.length > 0) {
+      userDoc.workflowStage = 'files_stored';
+    }
+
     // Save the updated user document
     await cloudant.saveDocument('maia_users', userDoc);
     
@@ -1005,6 +1022,307 @@ app.post('/api/user-file-metadata', async (req, res) => {
       success: false, 
       message: `Failed to update file metadata: ${error.message}`,
       error: 'UPDATE_FAILED'
+    });
+  }
+});
+
+// Get user files
+app.get('/api/user-files', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    const files = userDoc.files || [];
+    
+    res.json({
+      success: true,
+      files: files
+    });
+  } catch (error) {
+    console.error('❌ Error fetching user files:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to fetch files: ${error.message}`,
+      error: 'FETCH_FAILED'
+    });
+  }
+});
+
+// Toggle file knowledge base status
+app.post('/api/toggle-file-knowledge-base', async (req, res) => {
+  try {
+    const { userId, bucketKey, inKnowledgeBase } = req.body;
+    
+    if (!userId || !bucketKey || typeof inKnowledgeBase !== 'boolean') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID, bucketKey, and inKnowledgeBase are required',
+        error: 'MISSING_REQUIRED_FIELDS'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    if (!userDoc.files) {
+      userDoc.files = [];
+    }
+
+    // Find the file
+    const fileIndex = userDoc.files.findIndex(f => f.bucketKey === bucketKey);
+    
+    if (fileIndex === -1) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'File not found',
+        error: 'FILE_NOT_FOUND'
+      });
+    }
+
+    // Update knowledge base status
+    if (inKnowledgeBase) {
+      // Add to knowledge base (for now, just mark it - actual KB assignment will be done later)
+      if (!userDoc.files[fileIndex].knowledgeBases) {
+        userDoc.files[fileIndex].knowledgeBases = [];
+      }
+      // Mark as in knowledge base by having a non-empty array
+      if (userDoc.files[fileIndex].knowledgeBases.length === 0) {
+        userDoc.files[fileIndex].knowledgeBases.push('default'); // Placeholder - will be replaced with actual KB ID
+      }
+    } else {
+      // Remove from knowledge base
+      userDoc.files[fileIndex].knowledgeBases = [];
+    }
+
+    userDoc.files[fileIndex].updatedAt = new Date().toISOString();
+
+    // Save the updated user document
+    await cloudant.saveDocument('maia_users', userDoc);
+    
+    res.json({
+      success: true,
+      message: 'Knowledge base status updated',
+      inKnowledgeBase: inKnowledgeBase
+    });
+  } catch (error) {
+    console.error('❌ Error toggling file knowledge base:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to update knowledge base status: ${error.message}`,
+      error: 'UPDATE_FAILED'
+    });
+  }
+});
+
+// Get agent instructions
+app.get('/api/agent-instructions', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc || !userDoc.assignedAgentId) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User agent not found',
+        error: 'AGENT_NOT_FOUND'
+      });
+    }
+
+    // Get agent from DigitalOcean
+    const agent = await doClient.agent.get(userDoc.assignedAgentId);
+    
+    if (!agent) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Agent not found in DigitalOcean',
+        error: 'AGENT_NOT_FOUND'
+      });
+    }
+
+    res.json({
+      success: true,
+      instructions: agent.instruction || ''
+    });
+  } catch (error) {
+    console.error('❌ Error fetching agent instructions:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to fetch agent instructions: ${error.message}`,
+      error: 'FETCH_FAILED'
+    });
+  }
+});
+
+// Update agent instructions
+app.put('/api/agent-instructions', async (req, res) => {
+  try {
+    const { userId, instructions } = req.body;
+    
+    if (!userId || typeof instructions !== 'string') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID and instructions are required',
+        error: 'MISSING_REQUIRED_FIELDS'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc || !userDoc.assignedAgentId) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User agent not found',
+        error: 'AGENT_NOT_FOUND'
+      });
+    }
+
+    // Update agent instructions
+    await doClient.agent.update(userDoc.assignedAgentId, {
+      instruction: instructions
+    });
+    
+    res.json({
+      success: true,
+      message: 'Agent instructions updated'
+    });
+  } catch (error) {
+    console.error('❌ Error updating agent instructions:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to update agent instructions: ${error.message}`,
+      error: 'UPDATE_FAILED'
+    });
+  }
+});
+
+// Get shared group chats
+app.get('/api/shared-group-chats', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get all chats for this user from maia_chats
+    const allChats = await cloudant.getAllDocuments('maia_chats');
+    
+    // Filter to only shared group chats owned by this user
+    const sharedChats = allChats.filter(chat => 
+      chat._id.startsWith(`${userId}-`) && 
+      chat.type === 'group_chat' && 
+      chat.isShared === true
+    );
+    
+    res.json({
+      success: true,
+      chats: sharedChats,
+      count: sharedChats.length
+    });
+  } catch (error) {
+    console.error('❌ Error fetching shared group chats:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to fetch chats: ${error.message}`,
+      error: 'FETCH_FAILED'
+    });
+  }
+});
+
+// Get admin email (for email link)
+app.get('/api/admin-email', (req, res) => {
+  res.json({
+    email: process.env.RESEND_ADMIN_EMAIL || 'admin@yourdomain.com'
+  });
+});
+
+// Get user status (for contextual tip)
+app.get('/api/user-status', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    const workflowStage = userDoc.workflowStage || 'unknown';
+    const hasAgent = !!(userDoc.assignedAgentId && userDoc.assignedAgentName);
+    const fileCount = userDoc.files ? userDoc.files.length : 0;
+    
+    // Check if user has any knowledge bases (any file with knowledgeBases array that's not empty)
+    const hasKB = userDoc.files ? userDoc.files.some(file => 
+      file.knowledgeBases && Array.isArray(file.knowledgeBases) && file.knowledgeBases.length > 0
+    ) : false;
+
+    res.json({
+      success: true,
+      workflowStage,
+      hasAgent,
+      fileCount,
+      hasKB
+    });
+  } catch (error) {
+    console.error('❌ Error fetching user status:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to fetch user status: ${error.message}`,
+      error: 'FETCH_FAILED'
     });
   }
 });

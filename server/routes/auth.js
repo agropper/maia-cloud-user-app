@@ -74,7 +74,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         email: email || null,
         domain: passkeyService.rpID,
         type: 'user',
-        workflowStage: 'no_request_yet',
+        workflowStage: null,
         createdAt: new Date().toISOString()
       };
 
@@ -124,6 +124,9 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       const provisionToken = emailService.generateProvisionToken(updatedUser.userId);
       updatedUser.provisionToken = provisionToken;
       updatedUser.provisionTokenCreatedAt = new Date().toISOString();
+      
+      // Set workflowStage to request_sent (admin has been notified and can provision)
+      updatedUser.workflowStage = 'request_sent';
       
       await cloudant.saveDocument('maia_users', updatedUser);
 
