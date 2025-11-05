@@ -428,13 +428,40 @@ const sendMessage = async () => {
     name: getUserLabel()
   };
 
-    messages.value.push(userMessage);
-    inputMessage.value = '';
-    // Don't update initialMessages here - wait until after save
-    
-    isStreaming.value = true;
+  // Check if this is a patient summary request
+  const isPatientSummaryRequest = /patient\s+summary/i.test(inputMessage.value);
+  messages.value.push(userMessage);
+  inputMessage.value = '';
+  // Don't update initialMessages here - wait until after save
+  
+  isStreaming.value = true;
 
   try {
+    // If this is a patient summary request, check for existing summary first
+    if (isPatientSummaryRequest && props.user?.userId) {
+      try {
+        const summaryResponse = await fetch(`http://localhost:3001/api/patient-summary?userId=${encodeURIComponent(props.user.userId)}`, {
+          credentials: 'include'
+        });
+        
+        if (summaryResponse.ok) {
+          const summaryData = await summaryResponse.json();
+          if (summaryData.summary && summaryData.summary.trim()) {
+            // Use existing summary
+            messages.value.push({
+              role: 'assistant',
+              content: summaryData.summary,
+              name: getProviderLabel()
+            });
+            isStreaming.value = false;
+            return;
+          }
+        }
+      } catch (err) {
+        // If fetching summary fails, continue with normal chat flow
+        console.log('Could not fetch existing summary, generating new one:', err);
+      }
+    }
     // Build messages with file context
     const messagesWithContext = uploadedFiles.value.length > 0
       ? messages.value.map((msg, index) => {
@@ -525,6 +552,12 @@ const sendMessage = async () => {
               isStreaming.value = false;
               const responseTime = Date.now() - startTime;
               console.log(`[*] AI Response time: ${responseTime}ms`);
+              
+              // Save patient summary if this was a summary request
+              if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
+                savePatientSummary(assistantMessage.content);
+              }
+              
               return;
             }
           } catch (e) {
@@ -537,6 +570,11 @@ const sendMessage = async () => {
     isStreaming.value = false;
     const responseTime = Date.now() - startTime;
     console.log(`[*] AI Response time: ${responseTime}ms`);
+    
+    // Save patient summary if this was a summary request
+    if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
+      savePatientSummary(assistantMessage.content);
+    }
   } catch (error) {
     const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
@@ -591,6 +629,32 @@ const openAdminEmail = async () => {
     const subject = encodeURIComponent(`Question from ${props.user?.userId || 'User'}`);
     const body = encodeURIComponent(`Hello,\n\nI have a question about my MAIA account.\n\nThank you!`);
     window.location.href = `mailto:${adminEmail}?subject=${subject}&body=${body}`;
+  }
+};
+
+const savePatientSummary = async (summary: string) => {
+  if (!props.user?.userId || !summary) return;
+  
+  try {
+    const response = await fetch('http://localhost:3001/api/patient-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.user.userId,
+        summary: summary
+      })
+    });
+    
+    if (response.ok) {
+      console.log('Patient summary saved successfully');
+    } else {
+      console.error('Failed to save patient summary');
+    }
+  } catch (error) {
+    console.error('Error saving patient summary:', error);
   }
 };
 

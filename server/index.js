@@ -1572,6 +1572,97 @@ app.get('/api/user-status', async (req, res) => {
   }
 });
 
+// Patient Summary endpoints
+app.get('/api/patient-summary', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    const summary = userDoc.patientSummary || '';
+    
+    res.json({ 
+      success: true, 
+      summary 
+    });
+  } catch (error) {
+    console.error('Error fetching patient summary:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch patient summary',
+      error: error.message 
+    });
+  }
+});
+
+app.post('/api/patient-summary', async (req, res) => {
+  try {
+    const { userId, summary } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    if (!summary) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Summary is required',
+        error: 'MISSING_SUMMARY'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    // Update the patient summary
+    userDoc.patientSummary = summary;
+    userDoc.updatedAt = new Date().toISOString();
+    
+    await cloudant.updateDocument('maia_users', userDoc);
+    
+    res.json({ 
+      success: true, 
+      message: 'Patient summary saved successfully'
+    });
+  } catch (error) {
+    console.error('Error saving patient summary:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to save patient summary',
+      error: error.message 
+    });
+  }
+});
+
 // Serve static files from dist in production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../dist')));

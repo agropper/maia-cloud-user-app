@@ -8,13 +8,20 @@
       </q-card-section>
 
       <q-card-section style="flex: 1; overflow-y: auto; min-height: 0;">
-        <q-tabs v-model="currentTab" class="text-grey" active-color="primary" indicator-color="primary" align="justify" style="flex-shrink: 0;">
+        <q-tabs 
+          v-model="currentTab" 
+          class="text-grey bg-grey-3 rounded-borders"
+          active-color="primary" 
+          indicator-color="primary" 
+          align="justify" 
+          style="flex-shrink: 0;"
+          dense
+        >
           <q-tab name="files" label="Saved Files" icon="description" />
           <q-tab name="agent" label="My AI Agent" icon="smart_toy" />
           <q-tab name="chats" label="Saved Chats" icon="chat" />
+          <q-tab name="summary" label="Patient Summary" icon="description" />
         </q-tabs>
-
-        <q-separator />
 
         <q-tab-panels v-model="currentTab" animated>
           <!-- Saved Files Tab -->
@@ -227,6 +234,47 @@
               </q-list>
             </div>
           </q-tab-panel>
+
+          <!-- Patient Summary Tab -->
+          <q-tab-panel name="summary">
+            <div v-if="loadingSummary" class="text-center q-pa-md">
+              <q-spinner size="2em" />
+              <div class="q-mt-sm">Loading patient summary...</div>
+            </div>
+
+            <div v-else-if="summaryError" class="text-center q-pa-md">
+              <q-icon name="error" color="negative" size="40px" />
+              <div class="text-negative q-mt-sm">{{ summaryError }}</div>
+              <q-btn label="Retry" color="primary" @click="loadPatientSummary" class="q-mt-md" />
+            </div>
+
+            <div v-else-if="patientSummary" class="q-mt-md">
+              <div class="text-body1 q-pa-md bg-grey-1 rounded-borders" style="white-space: pre-wrap;">
+                {{ patientSummary }}
+              </div>
+              <div class="q-mt-md">
+                <q-btn 
+                  label="Request New Summary" 
+                  color="primary" 
+                  @click="requestNewSummary"
+                  icon="refresh"
+                />
+              </div>
+            </div>
+
+            <div v-else class="text-center q-pa-md text-grey">
+              <q-icon name="description" size="3em" />
+              <div class="q-mt-sm">No patient summary found</div>
+              <div class="q-mt-md">
+                <q-btn 
+                  label="Request Summary" 
+                  color="primary" 
+                  @click="requestNewSummary"
+                  icon="add"
+                />
+              </div>
+            </div>
+          </q-tab-panel>
         </q-tab-panels>
       </q-card-section>
     </q-card>
@@ -296,6 +344,11 @@ const savingInstructions = ref(false);
 const loadingChats = ref(false);
 const chatsError = ref('');
 const sharedChats = ref<SavedChat[]>([]);
+
+// Patient Summary
+const loadingSummary = ref(false);
+const summaryError = ref('');
+const patientSummary = ref('');
 
 // PDF Viewer
 const showPdfViewer = ref(false);
@@ -708,6 +761,40 @@ const deleteChat = async (chat: SavedChat) => {
   }
 };
 
+// Patient Summary methods
+const loadPatientSummary = async () => {
+  loadingSummary.value = true;
+  summaryError.value = '';
+
+  try {
+    const response = await fetch(`http://localhost:3001/api/patient-summary?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch patient summary: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    patientSummary.value = result.summary || '';
+  } catch (err) {
+    summaryError.value = err instanceof Error ? err.message : 'Failed to load patient summary';
+  } finally {
+    loadingSummary.value = false;
+  }
+};
+
+const requestNewSummary = () => {
+  // Close the dialog and emit an event to trigger summary request
+  // This will be handled by ChatInterface
+  emit('update:modelValue', false);
+  // The actual summary request will be handled by ChatInterface when user types "patient summary"
+  $q.notify({
+    type: 'info',
+    message: 'Type "patient summary" in the chat to generate a new summary'
+  });
+};
+
 const sortedSharedChats = computed(() => {
   return [...sharedChats.value].sort((a, b) => {
     const dateA = new Date(a.updatedAt || a.createdAt);
@@ -746,6 +833,8 @@ watch(currentTab, (newTab) => {
       loadAgent();
     } else if (newTab === 'chats') {
       loadSharedChats();
+    } else if (newTab === 'summary') {
+      loadPatientSummary();
     }
   }
 });
