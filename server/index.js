@@ -875,11 +875,11 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
         try {
           const { GetObjectCommand } = await import('@aws-sdk/client-s3');
           
-          // Check archived folder
-          const archivedKeep = `${userId}/archived/.keep`;
-          const archivedCheck = await s3Client.send(new GetObjectCommand({
+          // Check root folder (for new imports)
+          const rootKeep = `${userId}/.keep`;
+          const rootCheck = await s3Client.send(new GetObjectCommand({
             Bucket: bucketName,
-            Key: archivedKeep
+            Key: rootKeep
           }));
           
           // Check KB folder
@@ -889,9 +889,9 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
             Key: kbKeep
           }));
           
-          if (archivedCheck && kbCheck) {
+          if (rootCheck && kbCheck) {
             verificationResults.bucketFolders.passed = true;
-            verificationResults.bucketFolders.message = `Bucket folders created and verified: ${userId}/archived/ and ${userId}/${kbName}/`;
+            verificationResults.bucketFolders.message = `Bucket folders created and verified: ${userId}/ (root) and ${userId}/${kbName}/ (KB)`;
             logProvisioning(userId, `✅ Bucket folders verified`, 'success');
           } else {
             verificationResults.bucketFolders.message = `Bucket folders missing .keep files`;
@@ -902,11 +902,11 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
           try {
             const listResult = await s3Client.send(new ListObjectsV2Command({
               Bucket: bucketName,
-              Prefix: `${userId}/archived/`,
+              Prefix: `${userId}/`,
               MaxKeys: 1
             }));
             verificationResults.bucketFolders.passed = true;
-            verificationResults.bucketFolders.message = `Bucket folders accessible (via listing): ${userId}/archived/ and ${userId}/${kbName}/`;
+            verificationResults.bucketFolders.message = `Bucket folders accessible (via listing): ${userId}/ (root) and ${userId}/${kbName}/ (KB)`;
             logProvisioning(userId, `✅ Bucket folders verified via listing`, 'success');
           } catch (listErr) {
             verificationResults.bucketFolders.message = `Bucket access check failed: ${err.message}`;
@@ -1377,13 +1377,14 @@ async function provisionUserAsync(userId, token) {
         
         // Create placeholder files to make folders visible in dashboard
         // In S3/Spaces, folders are just prefixes, so we need at least one object
-        const archivedPlaceholder = `${userId}/archived/.keep`;
+        // Note: /archived/ folder will be created automatically when files are archived
+        const rootPlaceholder = `${userId}/.keep`;
         const kbPlaceholder = `${userId}/${kbName}/.keep`;
         
-        // Create archived folder placeholder
+        // Create root userId folder placeholder (for new imports)
         await s3Client.send(new PutObjectCommand({
           Bucket: bucketName,
-          Key: archivedPlaceholder,
+          Key: rootPlaceholder,
           Body: '',
           ContentType: 'text/plain',
           Metadata: {
@@ -1404,9 +1405,9 @@ async function provisionUserAsync(userId, token) {
           }
         }));
         
-        logProvisioning(userId, `✅ Bucket folders created: ${userId}/archived/ and ${userId}/${kbName}/`, 'success');
+        logProvisioning(userId, `✅ Bucket folders created: ${userId}/ (root) and ${userId}/${kbName}/ (KB)`, 'success');
         updateStatus('Bucket folders created', { 
-          archived: `${userId}/archived/`,
+          root: `${userId}/`,
           kb: `${userId}/${kbName}/`
         });
       } else {
@@ -1809,6 +1810,139 @@ app.post('/api/user-file-metadata', async (req, res) => {
   }
 });
 
+// Auto-archive files at root level (move from userId/ to userId/archived/)
+app.post('/api/archive-user-files', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    // Import S3 client operations
+    const { S3Client, ListObjectsV2Command, CopyObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+
+    // Setup S3/Spaces client
+    const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
+    if (!bucketUrl) {
+      return res.status(500).json({
+        success: false,
+        error: 'BUCKET_NOT_CONFIGURED',
+        message: 'DigitalOcean bucket not configured'
+      });
+    }
+
+    const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
+
+    const s3Client = new S3Client({
+      endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
+      region: 'us-east-1',
+      forcePathStyle: false,
+      credentials: {
+        accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+      }
+    });
+
+    // List all files at root level (userId/ but not in subfolders)
+    // Note: We list all files with userId/ prefix, then filter for root-level files
+    const listCommand = new ListObjectsV2Command({
+      Bucket: bucketName,
+      Prefix: `${userId}/`
+    });
+
+    const listResult = await s3Client.send(listCommand);
+    
+    // Find files at root level (exactly userId/filename, not in subfolders)
+    const rootFiles = (listResult.Contents || []).filter(file => {
+      const key = file.Key || '';
+      // Only files at exactly userId/filename (not userId/archived/filename or userId/kb/filename)
+      // Check that key has exactly 2 parts when split by '/' (userId and filename)
+      const parts = key.split('/').filter(p => p !== ''); // Filter empty parts
+      return parts.length === 2 && 
+             parts[0] === userId && 
+             !key.endsWith('.keep') &&
+             parts[1] !== '.keep'; // Exclude .keep files
+    });
+
+    let archivedCount = 0;
+    const archivedFiles = [];
+
+    // Move each root-level file to archived
+    for (const file of rootFiles) {
+      const fileName = file.Key?.split('/').pop() || '';
+      if (!fileName || fileName === '.keep') continue;
+
+      const sourceKey = file.Key;
+      const destKey = `${userId}/archived/${fileName}`;
+
+      try {
+        // Copy to archived
+        const copyCommand = new CopyObjectCommand({
+          Bucket: bucketName,
+          CopySource: `${bucketName}/${sourceKey}`,
+          Key: destKey
+        });
+        await s3Client.send(copyCommand);
+
+        // Delete from root
+        const deleteCommand = new DeleteObjectCommand({
+          Bucket: bucketName,
+          Key: sourceKey
+        });
+        await s3Client.send(deleteCommand);
+
+        // Update file metadata in user document
+        if (userDoc.files) {
+          const fileIndex = userDoc.files.findIndex(f => f.bucketKey === sourceKey);
+          if (fileIndex >= 0) {
+            userDoc.files[fileIndex].bucketKey = destKey;
+            archivedFiles.push(fileName);
+          }
+        }
+
+        archivedCount++;
+      } catch (err) {
+        console.error(`❌ Error archiving file ${fileName}:`, err);
+      }
+    }
+
+    // Save updated user document if files were moved
+    if (archivedCount > 0 && userDoc.files) {
+      await cloudant.saveDocument('maia_users', userDoc);
+    }
+
+    res.json({
+      success: true,
+      message: `Archived ${archivedCount} file(s)`,
+      archivedCount,
+      archivedFiles
+    });
+  } catch (error) {
+    console.error('❌ Error archiving user files:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to archive files: ${error.message}`,
+      error: 'ARCHIVE_FAILED'
+    });
+  }
+});
+
 // Get user files
 app.get('/api/user-files', async (req, res) => {
   try {
@@ -1835,9 +1969,13 @@ app.get('/api/user-files', async (req, res) => {
 
     const files = userDoc.files || [];
     
+    // Get indexed files from user document (tracks which files were actually indexed)
+    const indexedFiles = userDoc.kbIndexedFiles || [];
+    
     res.json({
       success: true,
-      files: files
+      files: files,
+      indexedFiles: indexedFiles
     });
   } catch (error) {
     console.error('❌ Error fetching user files:', error);
@@ -1918,12 +2056,59 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
 
     // Determine source and destination paths
     const fileName = bucketKey.split('/').pop();
-    const sourceKey = bucketKey;
-    const destKey = inKnowledgeBase 
-      ? `${userId}/${kbName}/${fileName}`
-      : `${userId}/archived/${fileName}`;
+    let sourceKey = bucketKey;
+    
+    // Check if file is at root level (not archived yet)
+    const isRootLevel = sourceKey.startsWith(`${userId}/`) && 
+                        !sourceKey.startsWith(`${userId}/archived/`) && 
+                        !sourceKey.startsWith(`${userId}/${kbName}/`) &&
+                        sourceKey.split('/').length === 2; // Only userId/filename
+    
+    let destKey;
+    let intermediateKey = null;
+    
+    if (inKnowledgeBase) {
+      // Adding to KB
+      if (isRootLevel) {
+        // File is at root level - archive it first, then move to KB
+        intermediateKey = `${userId}/archived/${fileName}`;
+        destKey = `${userId}/${kbName}/${fileName}`;
+      } else {
+        // File is already archived, move directly to KB
+        destKey = `${userId}/${kbName}/${fileName}`;
+      }
+    } else {
+      // Removing from KB - always move to archived
+      destKey = `${userId}/archived/${fileName}`;
+    }
 
-    // Only move if source and destination are different
+    // Handle intermediate step (root -> archived) if needed
+    if (intermediateKey && sourceKey !== intermediateKey) {
+      console.log(`[KB Management] Archiving file first: ${sourceKey} -> ${intermediateKey}`);
+      
+      // Copy from root to archived
+      const archiveCopy = new CopyObjectCommand({
+        Bucket: bucketName,
+        CopySource: `${bucketName}/${sourceKey}`,
+        Key: intermediateKey
+      });
+      await s3Client.send(archiveCopy);
+      
+      // Delete from root
+      const archiveDelete = new DeleteObjectCommand({
+        Bucket: bucketName,
+        Key: sourceKey
+      });
+      await s3Client.send(archiveDelete);
+      
+      // Update sourceKey for next step
+      sourceKey = intermediateKey;
+      
+      // Update file's bucketKey in user document
+      userDoc.files[fileIndex].bucketKey = intermediateKey;
+    }
+
+    // Move file to final destination if different from source
     if (sourceKey !== destKey) {
       console.log(`[KB Management] Moving file: ${sourceKey} -> ${destKey} (KB: ${inKnowledgeBase ? 'ADD' : 'REMOVE'})`);
       
@@ -1961,6 +2146,13 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
     } else {
       // Remove from knowledge base
       userDoc.files[fileIndex].knowledgeBases = [];
+      
+      // Also remove from indexed files if it was indexed (check both old and new bucketKey)
+      if (userDoc.kbIndexedFiles && Array.isArray(userDoc.kbIndexedFiles)) {
+        userDoc.kbIndexedFiles = userDoc.kbIndexedFiles.filter(
+          indexedKey => indexedKey !== bucketKey && indexedKey !== destKey && indexedKey !== sourceKey
+        );
+      }
     }
 
     userDoc.files[fileIndex].updatedAt = new Date().toISOString();
@@ -2254,6 +2446,20 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       }
     }
 
+    // Get list of files currently in KB folder (after moves)
+    const filesInKB = userDoc.files
+      .filter(file => {
+        const kbName = userDoc.connectedKB || userId;
+        return file.bucketKey && file.bucketKey.startsWith(`${userId}/${kbName}/`);
+      })
+      .map(file => file.bucketKey);
+    
+    // Update indexed files tracking - will be confirmed after indexing completes
+    // For now, mark that indexing is needed (files in KB don't match indexed files)
+    // The indexed files list will be updated when indexing actually completes
+    userDoc.kbIndexingNeeded = true;
+    userDoc.kbPendingFiles = filesInKB; // Track which files should be indexed
+
     // Save updated user document
     await cloudant.saveDocument('maia_users', userDoc);
 
@@ -2264,13 +2470,15 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     // 2. Updating the KB data source
     // 3. Starting an indexing job
     // 4. Returning the job ID
+    // 5. When indexing completes, update userDoc.kbIndexedFiles = filesInKB
 
     const jobId = `kb-index-${Date.now()}`;
 
     res.json({
       success: true,
       message: 'Knowledge base updated, indexing started',
-      jobId: jobId
+      jobId: jobId,
+      filesInKB: filesInKB // Return list of files that should be indexed
     });
   } catch (error) {
     console.error('❌ Error updating knowledge base:', error);
@@ -2286,6 +2494,15 @@ app.post('/api/update-knowledge-base', async (req, res) => {
 app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
     
     // TODO: Implement actual KB indexing status check
     // This would involve:
@@ -2294,13 +2511,34 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
     // 3. Getting files indexed count
     // 4. Checking if indexing is complete
 
+    // For now, check if jobId indicates completion (placeholder logic)
+    // In real implementation, this would query the actual indexing job
+    const isCompleted = jobId.includes('completed') || false; // Placeholder
+    
+    // If indexing completed, update indexed files in user document
+    if (isCompleted && userId) {
+      try {
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (userDoc && userDoc.kbPendingFiles) {
+          // Update indexed files to match pending files (indexing completed)
+          userDoc.kbIndexedFiles = userDoc.kbPendingFiles;
+          userDoc.kbIndexingNeeded = false;
+          userDoc.kbPendingFiles = undefined;
+          userDoc.kbLastIndexedAt = new Date().toISOString();
+          await cloudant.saveDocument('maia_users', userDoc);
+        }
+      } catch (err) {
+        console.error('Error updating indexed files:', err);
+      }
+    }
+
     // Placeholder response
     res.json({
       success: true,
       kb: 'My Knowledge Base',
       tokens: '0',
       filesIndexed: 0,
-      completed: false
+      completed: isCompleted
     });
   } catch (error) {
     console.error('❌ Error getting indexing status:', error);

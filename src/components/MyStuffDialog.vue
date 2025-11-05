@@ -65,6 +65,7 @@
                   </q-item-section>
                   <q-item-section side>
                     <div class="row items-center q-gutter-xs">
+                      <!-- Not in KB - show amber "Add to Knowledge Base" -->
                       <q-chip
                         v-if="!file.inKnowledgeBase"
                         color="amber"
@@ -75,6 +76,18 @@
                       >
                         Add to Knowledge Base
                       </q-chip>
+                      <!-- In KB but not indexed - show warning "Needs Indexing" -->
+                      <q-chip
+                        v-else-if="file.inKnowledgeBase && !indexedFiles.includes(file.bucketKey)"
+                        color="orange"
+                        text-color="white"
+                        size="sm"
+                        clickable
+                        @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
+                      >
+                        Needs Indexing
+                      </q-chip>
+                      <!-- In KB and indexed - show primary "Indexed in Knowledge Base" -->
                       <q-chip
                         v-else
                         color="primary"
@@ -83,7 +96,7 @@
                         clickable
                         @click="file.inKnowledgeBase = false; onCheckboxChange(file)"
                       >
-                        In My Knowledge Base
+                        Indexed in Knowledge Base
                       </q-chip>
                       <q-btn
                         flat
@@ -99,7 +112,10 @@
                 </q-item>
               </q-list>
               
-              <div v-if="hasCheckboxChanges" class="q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+              <div v-if="hasCheckboxChanges || kbIndexingOutOfSync" class="q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+                <div v-if="kbIndexingOutOfSync && !hasCheckboxChanges" class="q-mb-md text-body2 text-amber-9">
+                  You have changed the files to be indexed into your knowledge base. Click to index when ready.
+                </div>
                 <q-btn
                   label="Update and index knowledge base"
                   color="primary"
@@ -356,12 +372,28 @@ const viewingFile = ref<any>(null);
 
 // KB management
 const originalFiles = ref<UserFile[]>([]);
+const indexedFiles = ref<string[]>([]); // Track which files are actually indexed
 const hasCheckboxChanges = computed(() => {
   if (originalFiles.value.length !== userFiles.value.length) return true;
   return userFiles.value.some((file, index) => {
     const original = originalFiles.value[index];
     return !original || file.inKnowledgeBase !== original.inKnowledgeBase;
   });
+});
+// Check if KB folder contents match indexed files
+const kbIndexingOutOfSync = computed(() => {
+  // Get all files currently in KB folder (inKnowledgeBase = true)
+  const currentKBFiles = userFiles.value
+    .filter(file => file.inKnowledgeBase)
+    .map(file => file.bucketKey);
+  
+  // Sort both arrays for comparison
+  const currentSorted = [...currentKBFiles].sort();
+  const indexedSorted = [...indexedFiles.value].sort();
+  
+  // Compare arrays
+  if (currentSorted.length !== indexedSorted.length) return true;
+  return currentSorted.some((key, index) => key !== indexedSorted[index]);
 });
 const indexingKB = ref(false);
 const indexingStatus = ref({
@@ -378,6 +410,25 @@ const loadFiles = async () => {
   filesError.value = '';
 
   try {
+    // First, auto-archive any files at root level (userId/)
+    // This ensures files imported via paper clip are moved to archived when opening SAVED FILES tab
+    try {
+      await fetch('http://localhost:3001/api/archive-user-files', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId
+        })
+      });
+      // Don't fail if archiving fails - just continue to load files
+    } catch (archiveErr) {
+      console.warn('Failed to auto-archive files:', archiveErr);
+    }
+
+    // Then load files as normal
     const response = await fetch(`http://localhost:3001/api/user-files?userId=${encodeURIComponent(props.userId)}`, {
       credentials: 'include'
     });
@@ -390,6 +441,16 @@ const loadFiles = async () => {
       inKnowledgeBase: file.knowledgeBases && file.knowledgeBases.length > 0
     }));
     originalFiles.value = JSON.parse(JSON.stringify(userFiles.value));
+    
+    // Load indexed files from user document (if available)
+    if (result.indexedFiles && Array.isArray(result.indexedFiles)) {
+      indexedFiles.value = result.indexedFiles;
+    } else {
+      // Initialize with current KB files if no indexed files tracked yet
+      indexedFiles.value = userFiles.value
+        .filter(file => file.inKnowledgeBase)
+        .map(file => file.bucketKey);
+    }
   } catch (err) {
     filesError.value = err instanceof Error ? err.message : 'Failed to load files';
   } finally {
@@ -580,14 +641,17 @@ const onCheckboxChange = async (file: UserFile) => {
       console.log(`[KB Management] ✅ File bucketKey updated: ${oldBucketKey} -> ${result.newBucketKey}`);
     }
     
-    // Update original files to reflect the change
-    const originalIndex = originalFiles.value.findIndex(f => f.bucketKey === oldBucketKey);
+    // Update original files to reflect the change (but don't update indexed files - that happens after indexing)
+    const originalIndex = originalFiles.value.findIndex(f => f.bucketKey === oldBucketKey || f.bucketKey === result.newBucketKey);
     if (originalIndex >= 0) {
       originalFiles.value[originalIndex].inKnowledgeBase = newStatus;
       if (result.newBucketKey) {
         originalFiles.value[originalIndex].bucketKey = result.newBucketKey;
       }
     }
+    
+    // Note: indexedFiles is NOT updated here - it will be updated when indexing completes
+    // This ensures kbIndexingOutOfSync will detect the mismatch
     
     console.log(`[KB Management] ✅ File ${file.fileName} successfully ${newStatus ? 'added to' : 'removed from'} knowledge base`);
   } catch (err) {
@@ -696,6 +760,11 @@ const updateAndIndexKB = async () => {
 
     // Update original files
     originalFiles.value = JSON.parse(JSON.stringify(userFiles.value));
+    
+    // Update indexed files to match current KB files after successful indexing
+    indexedFiles.value = userFiles.value
+      .filter(file => file.inKnowledgeBase)
+      .map(file => file.bucketKey);
   } catch (err) {
     indexingKB.value = false;
     $q.notify({
@@ -708,7 +777,7 @@ const updateAndIndexKB = async () => {
 const pollIndexingProgress = async (jobId: string) => {
   const pollInterval = setInterval(async () => {
     try {
-      const response = await fetch(`http://localhost:3001/api/kb-indexing-status/${jobId}`, {
+      const response = await fetch(`http://localhost:3001/api/kb-indexing-status/${jobId}?userId=${encodeURIComponent(props.userId)}`, {
         credentials: 'include'
       });
 
@@ -726,6 +795,7 @@ const pollIndexingProgress = async (jobId: string) => {
       if (result.completed) {
         clearInterval(pollInterval);
         indexingKB.value = false;
+        // Reload files to get updated indexed files from server
         await loadFiles();
         $q.notify({
           type: 'positive',

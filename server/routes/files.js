@@ -67,7 +67,8 @@ export default function setupFileRoutes(app) {
       }
 
       const userId = req.session?.userId || 'public';
-      const userFolder = userId !== 'public' ? `${userId}/archived/` : 'public/';
+      // New imports go to root userId level (not archived yet)
+      const userFolder = userId !== 'public' ? `${userId}/` : 'public/';
       const fileName = req.file.originalname;
       
       // Generate a unique key for the file
