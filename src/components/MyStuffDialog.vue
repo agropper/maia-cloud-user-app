@@ -99,34 +99,7 @@
 
               <div v-else>
                 <div class="q-mb-md">
-                  <div class="text-body1" style="white-space: pre-wrap;">{{ agentInstructions }}</div>
-                </div>
-
-                <q-separator class="q-my-md" />
-
-                <div class="q-mb-md">
-                  <div class="text-subtitle2 q-mb-sm">Agent's Perspective</div>
-                  <div class="text-body2 text-grey-7">
-                    <em>Content to be added later</em>
-                  </div>
-                </div>
-
-                <q-separator class="q-my-md" />
-
-                <div class="q-mb-md">
-                  <div class="text-subtitle2 q-mb-sm">Errors and Redactions</div>
-                  <div class="text-body2 text-grey-7">
-                    <em>Content to be added later</em>
-                  </div>
-                </div>
-
-                <q-separator class="q-my-md" />
-
-                <div class="q-mb-md">
-                  <div class="text-subtitle2 q-mb-sm">Format and Language</div>
-                  <div class="text-body2 text-grey-7">
-                    <em>Content to be added later</em>
-                  </div>
+                  <vue-markdown :source="agentInstructions" />
                 </div>
               </div>
             </div>
@@ -186,6 +159,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue';
+import VueMarkdown from 'vue-markdown-render';
 
 interface UserFile {
   fileName: string;
