@@ -185,8 +185,10 @@
                 <q-item
                   v-for="chat in sortedSharedChats"
                   :key="chat._id"
+                  clickable
                   class="q-pa-md q-mb-sm"
                   style="border: 1px solid #e0e0e0; border-radius: 8px;"
+                  @click="selectChat(chat)"
                 >
                   <q-item-section>
                     <q-item-label class="text-weight-medium">
@@ -199,7 +201,7 @@
                       Group Participants: {{ getGroupParticipants(chat) }}
                     </q-item-label>
                   </q-item-section>
-                  <q-item-section side>
+                  <q-item-section side @click.stop>
                     <div class="row items-center q-gutter-xs">
                       <q-btn
                         flat
@@ -274,6 +276,7 @@ const props = defineProps<Props>();
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
+  'chat-selected': [chat: SavedChat];
 }>();
 
 const isOpen = ref(props.modelValue);
@@ -631,6 +634,28 @@ const pollIndexingProgress = async (jobId: string) => {
 };
 
 // Chat management methods
+const selectChat = async (chat: SavedChat) => {
+  try {
+    // Fetch full chat data first
+    const response = await fetch(`http://localhost:3001/api/load-chat/${chat._id}`, {
+      credentials: 'include'
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to load chat: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    emit('chat-selected', result.chat);
+    closeDialog();
+  } catch (err) {
+    console.error('Failed to load full chat data:', err);
+    // Fallback: emit the chat we have
+    emit('chat-selected', chat);
+    closeDialog();
+  }
+};
+
 const copyChatLink = (chat: SavedChat) => {
   const baseUrl = window.location.origin;
   const link = `${baseUrl}/chat/${chat.shareId}`;

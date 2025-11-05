@@ -260,6 +260,7 @@
     <MyStuffDialog
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
+      @chat-selected="handleChatSelected"
     />
   </div>
 </template>
