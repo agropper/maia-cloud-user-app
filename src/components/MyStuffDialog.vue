@@ -662,14 +662,16 @@ const loadFiles = async () => {
     }));
     originalFiles.value = JSON.parse(JSON.stringify(userFiles.value));
     
-    // Load indexed files from user document (if available)
+    // Load indexed files from user document (single source of truth)
+    // Do NOT derive from userFiles - that creates a mismatch with server state
     if (result.indexedFiles && Array.isArray(result.indexedFiles)) {
       indexedFiles.value = result.indexedFiles;
+      console.log('[KB Files] Loaded indexedFiles from server:', indexedFiles.value);
     } else {
-      // Initialize with current KB files if no indexed files tracked yet
-      indexedFiles.value = userFiles.value
-        .filter(file => file.inKnowledgeBase)
-        .map(file => file.bucketKey);
+      // If server doesn't provide indexedFiles, initialize as empty array
+      // This indicates files haven't been indexed yet, not that they should match userFiles
+      indexedFiles.value = [];
+      console.log('[KB Files] No indexedFiles from server - initializing as empty (files not indexed yet)');
     }
   } catch (err) {
     filesError.value = err instanceof Error ? err.message : 'Failed to load files';
@@ -1236,13 +1238,16 @@ const pollIndexingProgress = async (jobId: string) => {
           indexingStatus.value.phase = 'complete';
           indexingStatus.value.message = 'Knowledge base indexed successfully!';
           
-          // Reload files to get updated indexed files from server
-          await loadFiles();
-          
-          // Update indexed files to match current KB files
-          indexedFiles.value = userFiles.value
-            .filter(file => file.inKnowledgeBase)
-            .map(file => file.bucketKey);
+          // Use kbIndexedFiles from server response (single source of truth)
+          // Do NOT derive from userFiles - that creates a mismatch
+          if (result.kbIndexedFiles && Array.isArray(result.kbIndexedFiles)) {
+            indexedFiles.value = result.kbIndexedFiles;
+            console.log('[KB Polling] ✅ Using kbIndexedFiles from server response:', result.kbIndexedFiles);
+          } else {
+            // Fallback: reload from server if not in response
+            console.warn('[KB Polling] ⚠️ kbIndexedFiles not in response, reloading from server...');
+            await loadFiles();
+          }
           
           emit('indexing-finished', { jobId, phase: 'complete' });
           

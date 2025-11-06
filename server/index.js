@@ -3350,41 +3350,73 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
     }
     
     // If indexing completed successfully, update indexed files in user document
+    // Use retry logic for atomic state transition (pending -> indexed)
+    let finalIndexedFiles = null;
     if (completed && status === 'INDEX_JOB_STATUS_COMPLETED' && userId) {
-      try {
-        const updatedUserDoc = await cloudant.getDocument('maia_users', userId);
-        if (updatedUserDoc) {
-          // If kbPendingFiles exists, use it to set kbIndexedFiles
-          // Otherwise, if kbIndexedFiles doesn't exist, derive from files in KB folder
-          if (updatedUserDoc.kbPendingFiles && Array.isArray(updatedUserDoc.kbPendingFiles) && updatedUserDoc.kbPendingFiles.length > 0) {
-            // Update indexed files to match pending files (indexing completed)
-            updatedUserDoc.kbIndexedFiles = [...updatedUserDoc.kbPendingFiles]; // Create a copy
-            updatedUserDoc.kbPendingFiles = undefined;
-            console.log(`[KB Indexing Status] ✅ Updated kbIndexedFiles with ${updatedUserDoc.kbIndexedFiles.length} files:`, updatedUserDoc.kbIndexedFiles);
-          } else if (!updatedUserDoc.kbIndexedFiles || updatedUserDoc.kbIndexedFiles.length === 0) {
-            // Fallback: derive from files in KB folder if kbPendingFiles was already cleared
-            const kbNameForFiles = getKBNameFromUserDoc(updatedUserDoc, userId);
-            const kbFiles = (updatedUserDoc.files || []).filter(file => 
-              file.bucketKey && file.bucketKey.startsWith(`${userId}/${kbNameForFiles}/`)
-            ).map(file => file.bucketKey);
-            if (kbFiles.length > 0) {
-              updatedUserDoc.kbIndexedFiles = kbFiles;
-              console.log(`[KB Indexing Status] ✅ Derived kbIndexedFiles from KB folder (${kbFiles.length} files):`, kbFiles);
+      const maxRetries = 3;
+      let retryCount = 0;
+      let success = false;
+      
+      while (retryCount < maxRetries && !success) {
+        try {
+          const updatedUserDoc = await cloudant.getDocument('maia_users', userId);
+          if (updatedUserDoc) {
+            // Check if kbPendingFiles exists - this is our source of truth for what was indexed
+            if (updatedUserDoc.kbPendingFiles && Array.isArray(updatedUserDoc.kbPendingFiles) && updatedUserDoc.kbPendingFiles.length > 0) {
+              // Atomic update: set kbIndexedFiles from kbPendingFiles in one operation
+              updatedUserDoc.kbIndexedFiles = [...updatedUserDoc.kbPendingFiles]; // Create a copy
+              updatedUserDoc.kbPendingFiles = undefined; // Clear pending
+              updatedUserDoc.kbIndexingNeeded = false;
+              updatedUserDoc.kbLastIndexedAt = new Date().toISOString();
+              
+              // Save with retry on conflict
+              try {
+                await cloudant.saveDocument('maia_users', updatedUserDoc);
+                finalIndexedFiles = updatedUserDoc.kbIndexedFiles;
+                filesIndexed = finalIndexedFiles.length;
+                success = true;
+                console.log(`[KB Indexing Status] ✅ Updated kbIndexedFiles with ${finalIndexedFiles.length} files:`, finalIndexedFiles);
+              } catch (saveErr) {
+                if (saveErr.statusCode === 409 && retryCount < maxRetries - 1) {
+                  // Document conflict - retry
+                  retryCount++;
+                  console.log(`[KB Indexing Status] ⚠️ Document conflict, retrying (${retryCount}/${maxRetries})...`);
+                  await new Promise(resolve => setTimeout(resolve, 100 * retryCount)); // Exponential backoff
+                  continue;
+                } else {
+                  throw saveErr;
+                }
+              }
+            } else {
+              // No kbPendingFiles - check if kbIndexedFiles already exists (might have been set by another request)
+              if (updatedUserDoc.kbIndexedFiles && Array.isArray(updatedUserDoc.kbIndexedFiles) && updatedUserDoc.kbIndexedFiles.length > 0) {
+                finalIndexedFiles = updatedUserDoc.kbIndexedFiles;
+                filesIndexed = finalIndexedFiles.length;
+                console.log(`[KB Indexing Status] ℹ️ kbIndexedFiles already set (${finalIndexedFiles.length} files)`);
+                success = true;
+              } else {
+                // This is an error condition - indexing completed but we have no record of what was indexed
+                console.error(`[KB Indexing Status] ❌ ERROR: Indexing completed but kbPendingFiles is empty and kbIndexedFiles is not set for user ${userId}`);
+                console.error(`[KB Indexing Status] This indicates a state synchronization issue. User document:`, {
+                  kbId: updatedUserDoc.kbId,
+                  kbPendingFiles: updatedUserDoc.kbPendingFiles,
+                  kbIndexedFiles: updatedUserDoc.kbIndexedFiles,
+                  kbLastIndexingJobId: updatedUserDoc.kbLastIndexingJobId
+                });
+                success = true; // Don't retry - this is a data issue, not a race condition
+              }
             }
           }
-          
-          // Update metadata
-          updatedUserDoc.kbIndexingNeeded = false;
-          updatedUserDoc.kbLastIndexedAt = new Date().toISOString();
-          await cloudant.saveDocument('maia_users', updatedUserDoc);
-          
-          // Update filesIndexed count from actual indexed files
-          if (updatedUserDoc.kbIndexedFiles && Array.isArray(updatedUserDoc.kbIndexedFiles)) {
-            filesIndexed = updatedUserDoc.kbIndexedFiles.length;
+        } catch (err) {
+          if (retryCount < maxRetries - 1) {
+            retryCount++;
+            console.log(`[KB Indexing Status] ⚠️ Error updating indexed files, retrying (${retryCount}/${maxRetries}):`, err.message);
+            await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+          } else {
+            console.error('[KB Indexing Status] ❌ Error updating indexed files after retries:', err);
+            throw err;
           }
         }
-      } catch (err) {
-        console.error('Error updating indexed files:', err);
       }
     }
     
@@ -3402,6 +3434,10 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       });
     }
 
+    // Include kbIndexedFiles in response if available (from update or from userDoc)
+    // This allows frontend to always have the latest state
+    const responseIndexedFiles = finalIndexedFiles || (userDoc.kbIndexedFiles && Array.isArray(userDoc.kbIndexedFiles) ? userDoc.kbIndexedFiles : undefined);
+    
     res.json({
       success: true,
       phase: phase,
@@ -3410,7 +3446,9 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       tokens: tokens,
       filesIndexed: filesIndexed,
       completed: completed,
-      progress: jobStatus.progress || (completed ? 1.0 : 0.0)
+      progress: jobStatus.progress || (completed ? 1.0 : 0.0),
+      // Include kbIndexedFiles in response so frontend can use it directly (single source of truth)
+      kbIndexedFiles: responseIndexedFiles
     });
   } catch (error) {
     console.error('❌ Error getting indexing status:', error);

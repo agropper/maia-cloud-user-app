@@ -217,3 +217,4 @@ Use this to:
    - Key name: "agent-{agent_uuid}-api-key"
    - Store secret_key in user document
 
+GET /v2/gen-ai/knowledge_bases/{knowledge_base_uuid}/indexing_jobs
