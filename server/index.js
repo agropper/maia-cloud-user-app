@@ -486,12 +486,16 @@ const distPathForCors = path.join(__dirname, '../dist');
 const distExistsForCors = existsSync(distPathForCors);
 const isProductionForCors = process.env.NODE_ENV === 'production' || distExistsForCors;
 
-const allowedOrigins = [
-  'http://localhost:5173', // Local development
-  'https://maia.agropper.xyz', // Production
-  process.env.PUBLIC_APP_URL, // From environment variable
-  process.env.PASSKEY_ORIGIN // From environment variable
-].filter(Boolean); // Remove undefined values
+// CORS allowed origins - can be set via CORS_ALLOWED_ORIGINS (comma-separated) or use defaults
+const corsOriginsEnv = process.env.CORS_ALLOWED_ORIGINS;
+const allowedOrigins = corsOriginsEnv 
+  ? corsOriginsEnv.split(',').map(origin => origin.trim())
+  : [
+      'http://localhost:5173', // Local development
+      'https://maia.agropper.xyz', // Production (hardcoded fallback)
+      process.env.PUBLIC_APP_URL, // From environment variable
+      process.env.PASSKEY_ORIGIN // From environment variable (should be set in production)
+    ].filter(Boolean); // Remove undefined values
 
 app.use(cors({
   origin: (origin, callback) => {
