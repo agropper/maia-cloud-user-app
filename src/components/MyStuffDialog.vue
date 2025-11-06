@@ -386,8 +386,8 @@
             </div>
 
             <div v-else-if="patientSummary" class="q-mt-md">
-              <div class="text-body1 q-pa-md bg-grey-1 rounded-borders" style="white-space: pre-wrap;">
-                {{ patientSummary }}
+              <div class="text-body1 q-pa-md bg-grey-1 rounded-borders">
+                <vue-markdown :source="patientSummary" />
               </div>
               <div class="q-mt-md">
                 <q-btn 
@@ -467,8 +467,8 @@
         </q-card-section>
 
         <q-card-section style="max-height: 60vh; overflow-y: auto;">
-          <div v-if="!editingSummary" class="text-body2" style="white-space: pre-wrap;">
-            {{ summaryViewText }}
+          <div v-if="!editingSummary" class="text-body2">
+            <vue-markdown :source="summaryViewText" />
           </div>
           <q-input
             v-else

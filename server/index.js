@@ -2940,9 +2940,6 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     // Save updated user document
     await cloudant.saveDocument('maia_users', userDoc);
     
-    // Log KB details to check for datasource
-    console.log(`[KB AUTO] KB details after creation:`, JSON.stringify(kbDetails, null, 2));
-    console.log(`[KB AUTO] KB datasources:`, kbDetails?.datasources || 'none');
     
     // Return success immediately - polling happens in background
     res.json({
@@ -2968,27 +2965,6 @@ app.post('/api/update-knowledge-base', async (req, res) => {
         const apiEndpoint = `GET /v2/gen-ai/knowledge_bases/${kbId}/indexing_jobs`;
         const indexingJobs = await doClient.indexing.listForKB(kbId);
         
-        // Also check KB details to see if there's any indexing status there
-        if (pollCount === 1) {
-          const kbDetailsCheck = await doClient.kb.get(kbId);
-          console.log(`[KB AUTO] First poll - KB details check:`, JSON.stringify({
-            uuid: kbDetailsCheck.uuid,
-            name: kbDetailsCheck.name,
-            datasources: kbDetailsCheck.datasources,
-            total_tokens: kbDetailsCheck.total_tokens,
-            indexing_status: kbDetailsCheck.indexing_status,
-            last_indexed_at: kbDetailsCheck.last_indexed_at
-          }, null, 2));
-        }
-        
-        // On first poll, log full API details and result
-        if (pollCount === 1) {
-          console.log(`[KB AUTO] First poll - API: ${apiEndpoint}`);
-          console.log(`[KB AUTO] First poll - Result:`, JSON.stringify(indexingJobs, null, 2));
-        }
-        
-        // Log result for all polls
-        console.log(`[KB AUTO] Poll ${pollCount}/${maxPolls} - Result:`, JSON.stringify(indexingJobs, null, 2));
         
         // listForKB already returns the jobs array, so indexingJobs should be an array
         // But handle case where it might still be wrapped
@@ -3024,20 +3000,23 @@ app.post('/api/update-knowledge-base', async (req, res) => {
           
           // Get KB details for tokens and files
           const kbDetails = await doClient.kb.get(kbId);
-          const tokens = String(kbDetails.total_tokens || kbDetails.token_count || kbDetails.tokens || 0);
+          const tokens = String(kbDetails.total_tokens || kbDetails.token_count || kbDetails.tokens || job.tokens || job.total_tokens || 0);
           
-          // Get files from user document
+          // Get files from user document or from job data
           const updatedUserDoc = await cloudant.getDocument('maia_users', userId);
           const indexedFiles = updatedUserDoc?.kbPendingFiles || filesInKB;
+          const fileCount = job.data_source_jobs?.[0]?.indexed_file_count || indexedFiles.length;
           
-          console.log(`[KB AUTO] Poll ${pollCount}/${maxPolls} - Job found: ${activeJobId}, Status: ${status}, Files: ${indexedFiles.length}, Tokens: ${tokens}`);
+          // Log essential poll info only
+          console.log(`[KB AUTO] Poll ${pollCount}/180, Files: ${fileCount}, Tokens: ${tokens}`);
           
           // Check if indexing completed (handle various status formats)
           const isCompleted = status === 'INDEX_JOB_STATUS_COMPLETED' || 
                             status === 'completed' ||
                             status === 'COMPLETED' ||
                             (job.completed === true) ||
-                            (job.phase === 'BATCH_JOB_PHASE_COMPLETED');
+                            (job.phase === 'BATCH_JOB_PHASE_COMPLETED') ||
+                            (job.phase === 'BATCH_JOB_PHASE_SUCCEEDED');
           
           if (isCompleted) {
             clearInterval(pollInterval);
@@ -3045,7 +3024,11 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             const elapsedMinutes = Math.floor(elapsedTime / 60);
             const elapsedSeconds = elapsedTime % 60;
             
-            console.log(`[KB AUTO] ✅ Indexing completed! Files: ${indexedFiles.length}, Tokens: ${tokens}, Elapsed: ${elapsedMinutes}m ${elapsedSeconds}s`);
+            // Get final token count from job (more accurate than KB details)
+            const finalTokens = String(job.tokens || job.total_tokens || tokens);
+            const finalFileCount = job.data_source_jobs?.[0]?.indexed_file_count || indexedFiles.length;
+            
+            console.log(`[KB AUTO] ✅ Indexing completed! Files: ${finalFileCount}, Tokens: ${finalTokens}, Elapsed: ${elapsedMinutes}m ${elapsedSeconds}s`);
             
             // Update user document with indexed files
             const finalUserDoc = await cloudant.getDocument('maia_users', userId);
@@ -3061,16 +3044,11 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             // Attach KB to agent
             try {
               if (finalUserDoc && finalUserDoc.assignedAgentId) {
-                console.log(`[KB AUTO] Attaching KB ${kbId} to agent ${finalUserDoc.assignedAgentId}...`);
                 await doClient.agent.attachKB(finalUserDoc.assignedAgentId, kbId);
-                console.log(`[KB AUTO] ✅ KB attached to agent successfully`);
-              } else {
-                console.log(`[KB AUTO] ⚠️ No agent found for user ${userId}, skipping KB attachment`);
               }
             } catch (attachError) {
-              if (attachError.message && attachError.message.includes('already')) {
-                console.log(`[KB AUTO] ℹ️ KB already attached to agent`);
-              } else {
+              // Ignore "already attached" errors, log others
+              if (!attachError.message || !attachError.message.includes('already')) {
                 console.error(`[KB AUTO] ❌ Error attaching KB to agent:`, attachError.message);
               }
             }
@@ -3078,7 +3056,6 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             // Generate patient summary
             try {
               if (finalUserDoc && finalUserDoc.assignedAgentId && finalUserDoc.agentEndpoint && finalUserDoc.agentApiKey) {
-                console.log(`[KB AUTO] Generating patient summary for user ${userId}...`);
                 const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
                 const agentProvider = new DigitalOceanProvider(finalUserDoc.agentApiKey, {
                   baseURL: finalUserDoc.agentEndpoint
@@ -3086,10 +3063,12 @@ app.post('/api/update-knowledge-base', async (req, res) => {
                 
                 const summaryPrompt = 'Please generate a comprehensive patient summary based on all available medical records and documents in the knowledge base. Include key medical history, diagnoses, medications, allergies, and important notes.';
                 
-                const summaryResponse = await agentProvider.chat({
-                  messages: [{ role: 'user', content: summaryPrompt }],
-                  model: finalUserDoc.agentModelName || 'openai-gpt-oss-120b'
-                });
+                // chat() method expects: chat(messages, options, onUpdate)
+                // messages is an array, options is an object
+                const summaryResponse = await agentProvider.chat(
+                  [{ role: 'user', content: summaryPrompt }],
+                  { model: finalUserDoc.agentModelName || 'openai-gpt-oss-120b' }
+                );
                 
                 const summary = summaryResponse.content || summaryResponse.text || '';
                 
@@ -3099,10 +3078,7 @@ app.post('/api/update-knowledge-base', async (req, res) => {
                   summaryUserDoc.patientSummary = summary;
                   summaryUserDoc.patientSummaryGeneratedAt = new Date().toISOString();
                   await cloudant.saveDocument('maia_users', summaryUserDoc);
-                  console.log(`[KB AUTO] ✅ Patient summary generated and saved`);
                 }
-              } else {
-                console.log(`[KB AUTO] ⚠️ Agent not properly configured, skipping patient summary generation`);
               }
             } catch (summaryError) {
               console.error(`[KB AUTO] ❌ Error generating patient summary:`, summaryError.message);
@@ -3121,18 +3097,10 @@ app.post('/api/update-knowledge-base', async (req, res) => {
                             status === 'PENDING' ||
                             job.phase === 'BATCH_JOB_PHASE_PENDING';
             
-            if (isRunning || isPending) {
-              // Log every 6 polls (once per minute) to reduce noise
-              if (pollCount % 6 === 0) {
-                console.log(`[KB AUTO] Poll ${pollCount}/${maxPolls} - Job ${activeJobId} still ${status}...`);
-              }
-            }
+            // No logging needed for running jobs - already logged above
           }
         } else {
-          // No job found in this poll
-          if (pollCount === 1 || pollCount % 6 === 0) {
-            console.log(`[KB AUTO] Poll ${pollCount}/${maxPolls} - No indexing job found yet (jobs array length: ${jobsArray.length})`);
-          }
+          // No job found - no logging needed
           
           // Check for failed status in any job
           const failedJob = jobsArray.find(j => {
