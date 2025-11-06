@@ -33,11 +33,11 @@ The following workflow stages are used to track user progress through the provis
 6. **files_stored** - User has uploaded files to their account
 7. **unknown** - Fallback/default value when workflowStage is not set
 8. **files_archived** - User has imported at least one file
-9. ##indexing** - KB creatio and indexing in progress
-10. ##patient_summary** - A patient summary has been saved in My Stuff
-11. ##public_llm** - The AI dropdown is not set to "Private AI"
-12. ##chat_modified** - The chat save locally and to group buttons are shown.
-13. ##link_stored** - The chat has been added to a group.
+9. **indexing** - KB creation and indexing in progress
+10. **patient_summary** - A patient summary has been saved in My Stuff
+11. **public_llm** - The AI dropdown is not set to "Private AI"
+12. **chat_modified** - The chat save locally and to group buttons are shown
+13. **link_stored** - The chat has been added to a group
 
 
 
