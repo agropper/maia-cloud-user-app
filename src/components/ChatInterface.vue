@@ -182,30 +182,23 @@
           </div>
           
           <div class="row q-gutter-sm">
-            <div class="col-auto">
+            <div class="col-auto" title="Select AI provider: Private AI uses your knowledge base, Public AIs see only chat content">
               <q-select
                 v-model="selectedProvider"
                 :options="providerOptions"
                 dense
                 outlined
                 style="min-width: 150px"
-              >
-                <q-tooltip>Select AI provider: Private AI uses your knowledge base, Public AIs see only chat content</q-tooltip>
-              </q-select>
+              />
             </div>
-            <div class="col">
-              <div style="position: relative; display: inline-block; width: 100%;">
-                <q-input
-                  v-model="inputMessage"
-                  label="Type your message"
-                  outlined
-                  dense
-                  @keyup.enter="sendMessage"
-                />
-                <q-tooltip>
-                  Ask for Patient Summary to add it to the chat context and make it available to public AIs.
-                </q-tooltip>
-              </div>
+            <div class="col" title="Ask for Patient Summary to add it to the chat context and make it available to public AIs.">
+              <q-input
+                v-model="inputMessage"
+                label="Type your message"
+                outlined
+                dense
+                @keyup.enter="sendMessage"
+              />
             </div>
             <div class="col-auto">
               <q-btn 
@@ -220,9 +213,15 @@
           <!-- Status Bar -->
           <div class="row q-gutter-sm q-mt-sm q-pt-sm" style="border-top: 1px solid #eee; align-items: center;">
             <div class="col-auto">
-              <q-btn flat dense round icon="attach_file" class="text-grey-6" @click="triggerFileInput">
-                <q-tooltip>Attach files to add them to the chat context</q-tooltip>
-              </q-btn>
+              <q-btn 
+                flat 
+                dense 
+                round 
+                icon="attach_file" 
+                class="text-grey-6" 
+                @click="triggerFileInput"
+                title="Attach files to add them to the chat context"
+              />
               <input
                 ref="fileInput"
                 type="file"
@@ -231,9 +230,15 @@
               />
             </div>
             <div class="col" style="display: flex; align-items: center; justify-content: center;">
-              <q-btn flat dense round icon="settings" class="text-grey-6 q-mr-xs" @click="showMyStuffDialog = true">
-                <q-tooltip>My Stuff: Manage files, knowledge base, agent settings, and patient summary</q-tooltip>
-              </q-btn>
+              <q-btn 
+                flat 
+                dense 
+                round 
+                icon="settings" 
+                class="text-grey-6 q-mr-xs" 
+                @click="showMyStuffDialog = true"
+                title="My Stuff: Manage files, knowledge base, agent settings, and patient summary"
+              />
               <span class="text-body2 text-grey-7" :title="contextualTip">{{ contextualTip }}</span>
             </div>
             <div class="col-auto" style="display: flex; align-items: center; justify-content: flex-end; gap: 8px;">
@@ -246,9 +251,8 @@
                 icon="email" 
                 class="text-grey-6" 
                 @click="openAdminEmail"
-              >
-                <q-tooltip>Email admin for support or questions</q-tooltip>
-              </q-btn>
+                title="Email admin for suggestions, support or questions"
+              />
             </div>
           </div>
         </div>
