@@ -1200,19 +1200,7 @@ const updateContextualTip = async () => {
   }
 
   try {
-    // Priority 2: Check UI state (public_llm, chat_modified)
-    // These are computed, not saved to database
-    if (selectedProvider.value !== 'Private AI') {
-      contextualTip.value = 'Public AIs see only what you see in the chat, including any paperclip documents.';
-      return;
-    }
-    
-    if (messages.value.length > 0) {
-      contextualTip.value = 'You can save the chat to your computer or save it online.';
-      return;
-    }
-
-    // Priority 3: Fetch user document to get workflowStage
+    // Priority 2: Fetch user document to get workflowStage
     const userResponse = await fetch(`http://localhost:3001/api/user-status?userId=${encodeURIComponent(props.user.userId)}`, {
       credentials: 'include'
     });
@@ -1225,7 +1213,25 @@ const updateContextualTip = async () => {
     const userData = await userResponse.json();
     const workflowStage = userData.workflowStage || null;
     
-    // Get tip for workflow stage
+    // Check if workflowStage is 'indexing' (even if frontend polling isn't active)
+    if (workflowStage === 'indexing') {
+      contextualTip.value = 'Knowledge base being indexed. This can take up to 30 minutes.';
+      return;
+    }
+    
+    // Priority 3: Check UI state (public_llm, chat_modified)
+    // These are computed, not saved to database
+    if (selectedProvider.value !== 'Private AI') {
+      contextualTip.value = 'Public AIs see only what you see in the chat, including any paperclip documents.';
+      return;
+    }
+    
+    if (messages.value.length > 0) {
+      contextualTip.value = 'You can save the chat to your computer or save it online.';
+      return;
+    }
+
+    // Priority 4: Get tip for workflow stage
     const tip = getWorkflowTip(workflowStage);
     if (tip) {
       contextualTip.value = tip;
