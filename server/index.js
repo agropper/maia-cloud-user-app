@@ -3967,7 +3967,6 @@ if (isProduction) {
   const indexExists = existsSync(indexPath);
   
   console.log(`📁 [STATIC] Serving static files from: ${distPath}`);
-  console.log(`📁 [STATIC] dist folder exists: ${distExists}`);
   console.log(`📁 [STATIC] index.html exists: ${indexExists}`);
   
   if (distExists) {
