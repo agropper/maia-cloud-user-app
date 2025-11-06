@@ -98,7 +98,7 @@ const email = ref('');
 const loading = ref(false);
 const error = ref('');
 const action = ref(''); // 'signin' or 'register'
-const userIdInputRef = ref(null);
+const userIdInputRef = ref<HTMLInputElement | null>(null);
 
 const startSignInFlow = async () => {
   action.value = 'signin';

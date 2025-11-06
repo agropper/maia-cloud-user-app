@@ -127,7 +127,7 @@
                 <p>Are you sure you want to delete this message?</p>
                 <div class="message-preview q-mt-md">
                   <strong>{{ messageToDelete?.role === 'user' ? getUserLabel() : getProviderLabel() }}:</strong>
-                  <div class="message-content">{{ messageToDelete?.content?.substring(0, 100) }}{{ messageToDelete?.content?.length > 100 ? '...' : '' }}</div>
+                  <div class="message-content">{{ messageToDelete?.content?.substring(0, 100) }}{{ (messageToDelete?.content?.length ?? 0) > 100 ? '...' : '' }}</div>
                 </div>
                 <p v-if="precedingUserMessage" class="text-caption text-grey q-mt-sm">
                   <strong>Note:</strong> This will also delete the preceding user question.
@@ -269,7 +269,7 @@
     <!-- PDF Viewer Modal -->
     <PdfViewerModal
       v-model="showPdfViewer"
-      :file="viewingFile"
+      :file="viewingFile || undefined"
     />
 
     <!-- Saved Chats Modal -->
@@ -609,10 +609,11 @@ const sendMessage = async () => {
     // Build error message
     let errorMessage = '';
     if (typeof error === 'object' && error !== null && 'status' in error) {
-      errorMessage = error.message || 'Failed to get response';
+      const errorObj = error as { status?: unknown; message?: string };
+      errorMessage = errorObj.message || 'Failed to get response';
       
       // Add special message for 429 rate limit errors
-      if (error.status === 429) {
+      if (errorObj.status === 429) {
         errorMessage += `\n\n**Your Private AI may be able to handle larger contexts than the ${getProviderLabel()} model.**`;
       }
     } else if (error instanceof Error) {
@@ -885,7 +886,7 @@ const saveLocally = async () => {
         });
         
         // Generate PDF as blob
-        const blob = await html2pdf().from(chatAreaElement).output('blob');
+        const blob = await html2pdf().from(chatAreaElement as HTMLElement).output('blob');
         
         // Write to file
         const writable = await fileHandle.createWritable();
@@ -910,7 +911,7 @@ const saveLocally = async () => {
       margin: 0.5,
       filename: filename,
       image: { 
-        type: 'jpeg', 
+        type: 'jpeg' as const, 
         quality: 0.98 
       },
       html2canvas: { 
@@ -923,12 +924,12 @@ const saveLocally = async () => {
       jsPDF: { 
         unit: 'in', 
         format: 'a4', 
-        orientation: 'portrait' 
+        orientation: 'portrait' as const
       }
     };
     
     // Generate and save PDF
-    await html2pdf().from(chatAreaElement).set(opt).save();
+    await html2pdf().from(chatAreaElement as HTMLElement).set(opt).save();
     
     alert('Chat saved successfully!');
     // Reset initial state after save
@@ -1030,12 +1031,12 @@ const handleChatSelected = (chat: any) => {
 };
 
 // Reset initial state when chat is cleared
-const clearChat = () => {
-  messages.value = [];
-  uploadedFiles.value = [];
-  initialMessages.value = [];
-  initialUploadedFiles.value = [];
-};
+// const _clearChat = () => {
+//   messages.value = [];
+//   uploadedFiles.value = [];
+//   initialMessages.value = [];
+//   initialUploadedFiles.value = [];
+// };
 
 const startEditing = (idx: number) => {
   if (!editingMessageIdx.value.includes(idx)) {
@@ -1171,7 +1172,7 @@ const handleIndexingStatusUpdate = (data: { jobId: string; phase: string; tokens
   }
 };
 
-const handleIndexingFinished = (data: { jobId: string; phase: string; error?: string }) => {
+const handleIndexingFinished = (_data: { jobId: string; phase: string; error?: string }) => {
   indexingStatus.value = null;
   // Update status tip to show normal status
   updateContextualTip();

@@ -511,7 +511,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 import PdfViewerModal from './PdfViewerModal.vue';
 import { useQuasar } from 'quasar';
@@ -695,37 +695,37 @@ const loadFiles = async () => {
   }
 };
 
-const toggleKnowledgeBase = async (file: UserFile) => {
-  updatingFiles.value.add(file.bucketKey);
-
-  try {
-    const response = await fetch('http://localhost:3001/api/toggle-file-knowledge-base', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId,
-        bucketKey: file.bucketKey,
-        inKnowledgeBase: file.inKnowledgeBase
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to update knowledge base status');
-    }
-
-    // Reload files to get updated state
-    await loadFiles();
-  } catch (err) {
-    filesError.value = err instanceof Error ? err.message : 'Failed to update knowledge base status';
-    // Revert checkbox on error
-    file.inKnowledgeBase = !file.inKnowledgeBase;
-  } finally {
-    updatingFiles.value.delete(file.bucketKey);
-  }
-};
+// const _toggleKnowledgeBase = async (file: UserFile) => {
+//   updatingFiles.value.add(file.bucketKey);
+//
+//   try {
+//     const response = await fetch('http://localhost:3001/api/toggle-file-knowledge-base', {
+//       method: 'POST',
+//       headers: {
+//         'Content-Type': 'application/json'
+//       },
+//       credentials: 'include',
+//       body: JSON.stringify({
+//         userId: props.userId,
+//         bucketKey: file.bucketKey,
+//         inKnowledgeBase: file.inKnowledgeBase
+//       })
+//     });
+//
+//     if (!response.ok) {
+//       throw new Error('Failed to update knowledge base status');
+//     }
+//
+//     // Reload files to get updated state
+//     await loadFiles();
+//   } catch (err) {
+//     filesError.value = err instanceof Error ? err.message : 'Failed to update knowledge base status';
+//     // Revert checkbox on error
+//     file.inKnowledgeBase = !file.inKnowledgeBase;
+//   } finally {
+//     updatingFiles.value.delete(file.bucketKey);
+//   }
+// };
 
 const loadAgent = async () => {
   loadingAgent.value = true;
@@ -1329,7 +1329,9 @@ const pollIndexingProgress = async (jobId: string) => {
 
       // Handle completion - check both result.completed and result.phase
       if (result.completed || result.phase === 'complete' || result.status === 'INDEX_JOB_STATUS_COMPLETED') {
-        clearInterval(pollingInterval.value);
+        if (pollingInterval.value !== null) {
+          clearInterval(pollingInterval.value);
+        }
         pollingInterval.value = null;
         
         if (result.phase === 'complete') {

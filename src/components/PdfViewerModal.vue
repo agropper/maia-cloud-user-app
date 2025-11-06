@@ -182,7 +182,7 @@ const onPdfLoaded = (pdf: any) => {
   }
 };
 
-const onPdfError = (err: any) => {
+const onPdfError = (_err: any) => {
   totalPages.value = 0;
 };
 
@@ -210,7 +210,7 @@ const zoomOut = () => {
 };
 
 const goToPage = () => {
-  const targetPage = pageInput.value;
+  const targetPage = Number(pageInput.value);
   
   if (targetPage >= 1 && targetPage <= totalPages.value) {
     currentPage.value = targetPage;
