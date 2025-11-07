@@ -3847,16 +3847,16 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     console.log(`📝 Generating patient summary for user ${userId} using agent ${userDoc.assignedAgentId}`);
     
     try {
-      const summaryResponse = await agentProvider.chat({
-        messages: [
-          {
-            role: 'user',
-            content: summaryPrompt
-          }
-        ],
-        model: userDoc.agentModelName || 'openai-gpt-oss-120b',
-        stream: false
-      });
+      // chat() method signature: chat(messages, options, onUpdate)
+      // messages: array of message objects
+      // options: object with model, stream, etc.
+      const summaryResponse = await agentProvider.chat(
+        [{ role: 'user', content: summaryPrompt }], // messages array
+        { 
+          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
+          stream: false
+        } // options object
+      );
 
       const summary = summaryResponse.content || summaryResponse.text || '';
       
