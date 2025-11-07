@@ -298,6 +298,7 @@ import PdfViewerModal from './PdfViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
 import { jsPDF } from 'jspdf';
+import MarkdownIt from 'markdown-it';
 import VueMarkdown from 'vue-markdown-render';
 
 interface Message {
@@ -954,6 +955,12 @@ const removeFile = (file: UploadedFile) => {
   }
 };
 
+const markdownParser = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true
+});
+
 const formatBytes = (bytes: number) => {
   if (!bytes && bytes !== 0) return 'unknown size';
   if (bytes < 1024) return `${bytes} B`;
@@ -967,13 +974,46 @@ const formatBytes = (bytes: number) => {
   return `${size.toFixed(1)} ${units[unitIndex]}`;
 };
 
-const stripBasicMarkdown = (text: string) =>
-  text
-    .replace(/!\[[^\]]*]\([^)]*\)/g, '') // images
-    .replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1 ($2)') // links to text (url)
-    .replace(/[`*_~>#]/g, '') // simple formatting marks
-    .replace(/\s+\n/g, '\n')
+const markdownToPlainText = (markdown: string) => {
+  const html = markdownParser.render(markdown || '');
+  const container = document.createElement('div');
+  container.innerHTML = html;
+
+  container.querySelectorAll('br').forEach(br => {
+    br.replaceWith('\n');
+  });
+
+  container.querySelectorAll('p, div').forEach(block => {
+    block.insertAdjacentText('afterend', '\n\n');
+  });
+
+  container.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
+    heading.insertAdjacentText('afterend', '\n');
+  });
+
+  container.querySelectorAll('ul').forEach(ul => {
+    ul.querySelectorAll('li').forEach(li => {
+      li.insertAdjacentText('afterbegin', '• ');
+      li.insertAdjacentText('afterend', '\n');
+    });
+  });
+
+  container.querySelectorAll('ol').forEach(ol => {
+    Array.from(ol.children).forEach((child, index) => {
+      if (child instanceof HTMLElement) {
+        child.insertAdjacentText('afterbegin', `${index + 1}. `);
+        child.insertAdjacentText('afterend', '\n');
+      }
+    });
+  });
+
+  const textContent = container.textContent ?? '';
+  return textContent
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r\n|\r/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+};
 
 const generateChatTranscriptPdf = () => {
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
@@ -981,10 +1021,13 @@ const generateChatTranscriptPdf = () => {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const usableWidth = pageWidth - margin * 2;
-  const lineHeight = 16;
+  const headingFontSize = 14;
+  const bodyFontSize = 11;
+  const headingLineHeight = headingFontSize * 1.4;
+  const bodyLineHeight = bodyFontSize * 1.6;
   let cursorY = margin;
 
-  const ensureSpace = (height = lineHeight) => {
+  const ensureSpace = (height = bodyLineHeight) => {
     if (cursorY + height > pageHeight - margin) {
       doc.addPage();
       cursorY = margin;
@@ -993,49 +1036,35 @@ const generateChatTranscriptPdf = () => {
 
   const writeParagraph = (text = '', options: { bold?: boolean; extraGap?: number } = {}) => {
     const { bold = false, extraGap = 0 } = options;
+    const fontSize = bold ? headingFontSize : bodyFontSize;
+    const lineHeight = bold ? headingLineHeight : bodyLineHeight;
+    doc.setFont('Helvetica', bold ? 'bold' : 'normal');
+    doc.setFontSize(fontSize);
     const content = text ? doc.splitTextToSize(text, usableWidth) : [''];
     ensureSpace(content.length * lineHeight + extraGap);
-    doc.setFont('Helvetica', bold ? 'bold' : 'normal');
     content.forEach((line: string) => {
       doc.text(line, margin, cursorY);
       cursorY += lineHeight;
     });
-    doc.setFont('Helvetica', 'normal');
     cursorY += extraGap;
   };
 
-  const now = new Date();
-  writeParagraph('MAIA Chat Transcript', { bold: true, extraGap: 8 });
-  writeParagraph(`Saved at: ${now.toLocaleString()}`);
-  if (props.user?.userId) {
-    writeParagraph(`User: ${props.user.userId}`);
-  }
-  if (currentSavedChatShareId.value) {
-    writeParagraph(`Shared deep link: /chat/${currentSavedChatShareId.value}`);
-  }
-  writeParagraph();
-
   messages.value.forEach((msg, index) => {
-    const label = msg.authorLabel || (msg.role === 'user' ? getUserLabel() : getProviderLabelFromKey(msg.providerKey));
-    const heading = `${index + 1}. ${label}`;
-    writeParagraph(heading, { bold: true });
-    const cleanedContent = stripBasicMarkdown(msg.content || '');
-    if (cleanedContent) {
-      writeParagraph(cleanedContent);
+    const label =
+      msg.authorLabel ||
+      (msg.role === 'user' ? getUserLabel() : getProviderLabelFromKey(msg.providerKey));
+    writeParagraph(label, { bold: true });
+
+    const bodyText = markdownToPlainText(msg.content || '');
+    if (bodyText) {
+      writeParagraph(bodyText);
     } else {
       writeParagraph('[No content]');
     }
-    writeParagraph(); // blank line between messages
+    if (index < messages.value.length - 1) {
+      cursorY += 8;
+    }
   });
-
-  if (uploadedFiles.value.length > 0) {
-    writeParagraph('Attached Files:', { bold: true, extraGap: 4 });
-    uploadedFiles.value.forEach(file => {
-      const details = `• ${file.name || 'Unnamed file'} (${formatBytes(file.size)}${file.bucketPath ? ` – ${file.bucketPath}` : ''})`;
-      writeParagraph(details);
-    });
-    writeParagraph();
-  }
 
   return doc;
 };
