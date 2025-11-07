@@ -996,7 +996,7 @@ const generateChatTranscriptPdf = () => {
     const content = text ? doc.splitTextToSize(text, usableWidth) : [''];
     ensureSpace(content.length * lineHeight + extraGap);
     doc.setFont('Helvetica', bold ? 'bold' : 'normal');
-    content.forEach(line => {
+    content.forEach((line: string) => {
       doc.text(line, margin, cursorY);
       cursorY += lineHeight;
     });

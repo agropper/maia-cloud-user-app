@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Authenticated User app for MAIA (Medical AI Assistant) - user.agropper.xyz",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build",
