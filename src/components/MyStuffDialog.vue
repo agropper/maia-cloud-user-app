@@ -117,13 +117,13 @@
                   You have changed the files to be indexed into your knowledge base. Click to index when ready.
                 </div>
                 <div class="row q-gutter-sm">
-                  <q-btn
-                    label="Update and index knowledge base"
-                    color="primary"
-                    @click="updateAndIndexKB"
+                <q-btn
+                  label="Update and index knowledge base"
+                  color="primary"
+                  @click="updateAndIndexKB"
                     :disable="indexingKB || resettingKB"
-                    :loading="indexingKB"
-                  />
+                  :loading="indexingKB"
+                />
                   <q-btn
                     label="RESET KB"
                     color="negative"
@@ -390,15 +390,64 @@
             </div>
 
             <div v-else-if="patientSummary" class="q-mt-md">
-              <div class="text-body1 q-pa-md bg-grey-1 rounded-borders">
+              <div class="row items-center justify-between q-gutter-sm q-mb-sm">
+                <div class="text-caption text-grey-7">
+                  <!-- Patient summary editing -->
+              </div>
+                <div class="row q-gutter-sm">
+                  <q-btn
+                    v-if="!isEditingSummaryTab"
+                    outline
+                    label="Edit"
+                    color="primary"
+                    icon="edit"
+                    @click="startSummaryEdit"
+                  />
+                  <q-btn
+                    v-else
+                    flat
+                    label="Cancel"
+                    color="grey-8"
+                    icon="close"
+                    @click="cancelSummaryEdit"
+                    :disable="isSavingSummary"
+                  />
+                </div>
+              </div>
+
+              <div v-if="isEditingSummaryTab">
+                <q-input
+                  v-model="summaryEditText"
+                  type="textarea"
+                  autogrow
+                  filled
+                  class="bg-grey-1 rounded-borders"
+                  :disable="isSavingSummary"
+                  placeholder="Enter patient summary..."
+                />
+              </div>
+              <div v-else class="text-body1 q-pa-md bg-grey-1 rounded-borders">
                 <vue-markdown :source="patientSummary" />
               </div>
-              <div class="q-mt-md">
+
+              <div class="row items-center q-gutter-sm q-mt-md">
+                <q-btn
+                  v-if="isEditingSummaryTab"
+                  label="Save"
+                  color="primary"
+                  icon="save"
+                  @click="saveSummaryFromTab"
+                  :loading="isSavingSummary"
+                  :disable="isSavingSummary"
+                />
+                <q-space />
                 <q-btn 
                   label="Request New Summary" 
                   color="primary" 
                   @click="requestNewSummary"
                   icon="refresh"
+                  :disable="isEditingSummaryTab || isSavingSummary"
+                  :loading="loadingSummary"
                 />
               </div>
             </div>
@@ -637,6 +686,15 @@ const showSummaryViewModal = ref(false);
 const newPatientSummary = ref('');
 const editingSummary = ref(false);
 const summaryViewText = ref('');
+const isEditingSummaryTab = ref(false);
+const summaryEditText = ref('');
+const isSavingSummary = ref(false);
+
+watch(patientSummary, (newValue) => {
+  if (!isEditingSummaryTab.value) {
+    summaryEditText.value = newValue || '';
+  }
+});
 
 const $q = useQuasar();
 
@@ -977,10 +1035,10 @@ const onCheckboxChange = async (file: UserFile) => {
     // Revert checkbox on error
     file.inKnowledgeBase = !newStatus;
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: err instanceof Error ? err.message : 'Failed to update knowledge base status'
-      });
+    $q.notify({
+      type: 'negative',
+      message: err instanceof Error ? err.message : 'Failed to update knowledge base status'
+    });
     }
   } finally {
     updatingFiles.value.delete(oldBucketKey);
@@ -1027,17 +1085,17 @@ const deleteFile = async (file: UserFile) => {
     // Reload files
     await loadFiles();
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'positive',
-        message: 'File deleted successfully'
-      });
+    $q.notify({
+      type: 'positive',
+      message: 'File deleted successfully'
+    });
     }
   } catch (err) {
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: err instanceof Error ? err.message : 'Failed to delete file'
-      });
+    $q.notify({
+      type: 'negative',
+      message: err instanceof Error ? err.message : 'Failed to delete file'
+    });
     }
   }
 };
@@ -1354,7 +1412,7 @@ const pollIndexingProgress = async (jobId: string) => {
           } else {
             // Fallback: reload from server if not in response
             console.warn('[KB Polling] ⚠️ kbIndexedFiles not in response, reloading from server...');
-            await loadFiles();
+        await loadFiles();
           }
           
           emit('indexing-finished', { jobId, phase: 'complete' });
@@ -1405,8 +1463,8 @@ const selectChat = async (chat: SavedChat) => {
     // If chat has a shareId, load it via shareId endpoint (for deep links)
     if (chat.shareId) {
       response = await fetch(`/api/load-chat-by-share/${chat.shareId}`, {
-        credentials: 'include'
-      });
+      credentials: 'include'
+    });
     } else {
       // Otherwise, load chat via chatId
       response = await fetch(`/api/load-chat/${chat._id}`, {
@@ -1434,17 +1492,17 @@ const copyChatLink = (chat: SavedChat) => {
   const link = `${baseUrl}/chat/${chat.shareId}`;
   navigator.clipboard.writeText(link).then(() => {
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'positive',
-        message: 'Deep link copied to clipboard'
-      });
+    $q.notify({
+      type: 'positive',
+      message: 'Deep link copied to clipboard'
+    });
     }
   }).catch(() => {
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'negative',
-        message: 'Failed to copy link'
-      });
+    $q.notify({
+      type: 'negative',
+      message: 'Failed to copy link'
+    });
     }
   });
 };
@@ -1602,6 +1660,8 @@ const handleSaveSummary = async () => {
 
     // Update local summary
     patientSummary.value = newPatientSummary.value;
+    summaryEditText.value = newPatientSummary.value;
+    isEditingSummaryTab.value = false;
     
     showSummaryAvailableModal.value = false;
     if (showSummaryViewModal.value) {
@@ -1656,6 +1716,8 @@ const handleSaveEditedSummary = async () => {
     // Update local values
     newPatientSummary.value = summaryToSave;
     patientSummary.value = summaryToSave;
+    summaryEditText.value = summaryToSave;
+    isEditingSummaryTab.value = false;
     editingSummary.value = false;
     showSummaryViewModal.value = false;
     
@@ -1700,7 +1762,12 @@ const loadPatientSummary = async () => {
     }
     
     const result = await response.json();
-    patientSummary.value = result.summary || '';
+    const loadedSummary = result.summary || '';
+    patientSummary.value = loadedSummary;
+    summaryEditText.value = loadedSummary;
+    if (!loadedSummary) {
+      isEditingSummaryTab.value = false;
+    }
   } catch (err) {
     summaryError.value = err instanceof Error ? err.message : 'Failed to load patient summary';
   } finally {
@@ -1736,10 +1803,15 @@ const requestNewSummary = async () => {
     console.log('[Summary] Patient summary generated:', result);
     
     // Update the displayed summary
-    patientSummary.value = result.summary || '';
+    const generatedSummary = (result.summary || '').trim();
+    patientSummary.value = generatedSummary;
+    newPatientSummary.value = generatedSummary;
+    summaryViewText.value = generatedSummary;
+    summaryEditText.value = generatedSummary;
+    isEditingSummaryTab.value = false;
     
     if ($q && typeof $q.notify === 'function') {
-      $q.notify({
+  $q.notify({
         type: 'positive',
         message: 'Patient summary generated successfully!',
         timeout: 3000
@@ -1758,6 +1830,84 @@ const requestNewSummary = async () => {
     }
   } finally {
     loadingSummary.value = false;
+  }
+};
+
+const startSummaryEdit = () => {
+  summaryEditText.value = patientSummary.value || '';
+  isEditingSummaryTab.value = true;
+};
+
+const cancelSummaryEdit = () => {
+  isEditingSummaryTab.value = false;
+  summaryEditText.value = '';
+};
+
+const saveSummaryFromTab = async () => {
+  if (!props.userId) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: 'User ID is required to save the summary'
+      });
+    }
+    return;
+  }
+
+  const summaryToSave = summaryEditText.value.trim();
+  if (!summaryToSave) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'warning',
+        message: 'Summary cannot be empty'
+      });
+    }
+    return;
+  }
+
+  isSavingSummary.value = true;
+
+  try {
+    const response = await fetch('/api/patient-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        summary: summaryToSave
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ message: response.statusText }));
+      throw new Error(errorData.message || 'Failed to save patient summary');
+    }
+
+    patientSummary.value = summaryToSave;
+    newPatientSummary.value = summaryToSave;
+    summaryViewText.value = summaryToSave;
+    summaryEditText.value = summaryToSave;
+    isEditingSummaryTab.value = false;
+
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Patient summary saved successfully!'
+      });
+    }
+  } catch (error) {
+    console.error('[Summary] Error saving summary:', error);
+    const message = error instanceof Error ? error.message : 'Failed to save patient summary';
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message
+      });
+    }
+  } finally {
+    isSavingSummary.value = false;
   }
 };
 
