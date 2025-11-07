@@ -361,6 +361,49 @@ const chatMessagesRef = ref<HTMLElement | null>(null);
 // Track initial chat state for change detection
 const initialMessages = ref<Message[]>([]);
 const initialUploadedFiles = ref<UploadedFile[]>([]);
+const currentSavedChatId = ref<string | null>(null);
+const currentSavedChatShareId = ref<string | null>(null);
+
+type UploadedFilePayload = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  bucketKey?: string;
+  bucketPath?: string;
+  uploadedAt?: string | Date;
+};
+
+const buildUploadedFilePayload = (): UploadedFilePayload[] =>
+  uploadedFiles.value.map(file => ({
+    id: file.id,
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    bucketKey: file.bucketKey,
+    bucketPath: file.bucketPath,
+    uploadedAt: file.uploadedAt instanceof Date ? file.uploadedAt.toISOString() : file.uploadedAt
+  }));
+
+const buildChatHistoryPayload = () => JSON.parse(JSON.stringify(messages.value));
+
+watch(
+  () => props.user?.userId,
+  () => {
+    currentSavedChatId.value = null;
+    currentSavedChatShareId.value = null;
+  }
+);
+
+watch(
+  () => [messages.value.length, uploadedFiles.value.length],
+  ([messageCount, fileCount]) => {
+    if (messageCount === 0 && fileCount === 0) {
+      currentSavedChatId.value = null;
+      currentSavedChatShareId.value = null;
+    }
+  }
+);
 
 // Computed property to check if chat has changed
 const hasChatChanged = computed(() => {
@@ -1009,34 +1052,79 @@ const saveToGroup = async () => {
       return;
     }
 
-    const response = await fetch('/api/save-group-chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        chatHistory: messages.value,
-        uploadedFiles: uploadedFiles.value,
-        currentUser: props.user.userId,
-        connectedKB: getProviderKey(selectedProvider.value)
-      }),
-      credentials: 'include'
-    });
+    const payload = {
+      chatHistory: buildChatHistoryPayload(),
+      uploadedFiles: buildUploadedFilePayload(),
+      currentUser: props.user.userId,
+      connectedKB: getProviderKey(selectedProvider.value)
+    };
 
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || 'Failed to save chat');
+    let attemptedUpdate = false;
+
+    if (currentSavedChatId.value) {
+      attemptedUpdate = true;
+      const updateResponse = await fetch(`/api/save-group-chat/${encodeURIComponent(currentSavedChatId.value)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          ...payload,
+          shareId: currentSavedChatShareId.value
+        })
+      });
+
+      if (updateResponse.status === 404) {
+        // Existing chat was deleted or not found; fall back to creating a new chat
+        currentSavedChatId.value = null;
+        currentSavedChatShareId.value = null;
+        attemptedUpdate = false;
+      } else if (!updateResponse.ok) {
+        const errorData = await updateResponse.json().catch(() => ({ message: updateResponse.statusText }));
+        throw new Error(errorData.message || 'Failed to update saved chat');
+      } else {
+        const result = await updateResponse.json();
+        const shareId = result.shareId || currentSavedChatShareId.value;
+
+        currentSavedChatId.value = result.chatId || currentSavedChatId.value;
+        currentSavedChatShareId.value = shareId || null;
+
+        alert(`Chat updated successfully!${shareId ? ` Share ID: ${shareId}` : ''}`);
+
+        loadSavedChatCount();
+        initialMessages.value = JSON.parse(JSON.stringify(messages.value));
+        initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
+        return;
+      }
     }
 
-    const result = await response.json();
-    
-    alert(`Chat saved successfully! Share ID: ${result.shareId}`);
-    
-    // Refresh the saved chat count
-    loadSavedChatCount();
-    // Reset initial state after save
-    initialMessages.value = JSON.parse(JSON.stringify(messages.value));
-    initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
+    if (!attemptedUpdate) {
+      const createResponse = await fetch('/api/save-group-chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify(payload)
+      });
+
+      if (!createResponse.ok) {
+        const errorData = await createResponse.json().catch(() => ({ message: createResponse.statusText }));
+        throw new Error(errorData.message || 'Failed to save chat');
+      }
+
+      const result = await createResponse.json();
+
+      currentSavedChatId.value = result.chatId || null;
+      currentSavedChatShareId.value = result.shareId || null;
+
+      alert(`Chat saved successfully!${result.shareId ? ` Share ID: ${result.shareId}` : ''}`);
+
+      loadSavedChatCount();
+      initialMessages.value = JSON.parse(JSON.stringify(messages.value));
+      initialUploadedFiles.value = JSON.parse(JSON.stringify(uploadedFiles.value));
+    }
   } catch (error) {
     console.error('Error saving to group:', error);
     alert(`Failed to save chat: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1063,6 +1151,9 @@ const loadSavedChatCount = async () => {
 };
 
 const handleChatSelected = (chat: any) => {
+  currentSavedChatId.value = chat._id || null;
+  currentSavedChatShareId.value = chat.shareId || null;
+
   // Load the chat history
   if (chat.chatHistory) {
     const normalizedHistory = chat.chatHistory.map((msg: Message) => normalizeMessage(msg));

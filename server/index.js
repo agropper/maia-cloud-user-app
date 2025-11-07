@@ -2048,6 +2048,101 @@ app.post('/api/save-group-chat', async (req, res) => {
   }
 });
 
+// Update existing group chat
+app.put('/api/save-group-chat/:chatId', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { chatHistory, uploadedFiles, currentUser, connectedKB, shareId } = req.body;
+
+    if (!chatId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Chat ID is required',
+        error: 'MISSING_CHAT_ID'
+      });
+    }
+
+    if (!chatHistory || chatHistory.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No chat history to save',
+        error: 'MISSING_CHAT_HISTORY'
+      });
+    }
+
+    if (!currentUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current user is required to update chat',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    const existingChat = await cloudant.getDocument('maia_chats', chatId);
+
+    if (!existingChat) {
+      return res.status(404).json({
+        success: false,
+        message: 'Chat not found',
+        error: 'CHAT_NOT_FOUND'
+      });
+    }
+
+    if (existingChat.currentUser && existingChat.currentUser !== currentUser) {
+      return res.status(403).json({
+        success: false,
+        message: 'You do not have permission to update this chat',
+        error: 'CHAT_UPDATE_FORBIDDEN'
+      });
+    }
+
+    const processedFiles = (uploadedFiles || []).map(file => ({
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      bucketKey: file.bucketKey,
+      bucketPath: file.bucketPath,
+      uploadedAt: file.uploadedAt?.toISOString ? file.uploadedAt.toISOString() : file.uploadedAt
+    }));
+
+    existingChat.chatHistory = chatHistory;
+    existingChat.uploadedFiles = processedFiles;
+    existingChat.connectedKB = connectedKB || existingChat.connectedKB;
+    existingChat.updatedAt = new Date().toISOString();
+    existingChat.messageCount = chatHistory.length;
+    existingChat.participantCount = chatHistory.filter(msg => msg.role === 'user').length;
+    existingChat.shareId = shareId || existingChat.shareId;
+
+    await cloudant.saveDocument('maia_chats', existingChat);
+
+    // Keep workflowStage in sync when chats are updated
+    try {
+      const userDoc = await cloudant.getDocument('maia_users', currentUser);
+      if (userDoc) {
+        userDoc.workflowStage = 'link_stored';
+        await cloudant.saveDocument('maia_users', userDoc);
+      }
+    } catch (stageError) {
+      console.warn('⚠️ Unable to update workflow stage after chat update:', stageError.message);
+    }
+
+    res.json({
+      success: true,
+      message: 'Group chat updated successfully',
+      chatId: existingChat._id,
+      shareId: existingChat.shareId
+    });
+  } catch (error) {
+    console.error('❌ Update group chat error:', error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to update group chat: ${error.message}`,
+      error: 'UPDATE_CHAT_ERROR'
+    });
+  }
+});
+
 // Get user's saved chats
 app.get('/api/user-chats', async (req, res) => {
   try {
