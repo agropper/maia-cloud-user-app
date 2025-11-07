@@ -99,6 +99,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   'update:modelValue': [value: boolean];
   'chat-selected': [chat: SavedChat];
+  'chat-deleted': [chatId: string];
 }>();
 
 const isOpen = ref(props.modelValue);
@@ -172,6 +173,7 @@ const handleDeleteChat = async (chatId: string) => {
   try {
     const response = await fetch(`/api/delete-chat/${chatId}`, {
       method: 'DELETE',
+      credentials: 'include'
     });
     
     if (!response.ok) {
@@ -179,6 +181,7 @@ const handleDeleteChat = async (chatId: string) => {
     }
     
     savedChats.value = savedChats.value.filter(chat => chat._id !== chatId);
+    emit('chat-deleted', chatId);
   } catch (err) {
     console.error("Failed to delete chat:", err);
     error.value = err instanceof Error ? err.message : 'Failed to delete chat';

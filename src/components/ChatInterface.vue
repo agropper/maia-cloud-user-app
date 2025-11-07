@@ -277,6 +277,7 @@
       v-model="showSavedChatsModal"
       :currentUser="props.user?.userId || ''"
       @chat-selected="handleChatSelected"
+      @chat-deleted="handleChatDeleted"
     />
 
     <!-- My Stuff Dialog -->
@@ -1148,6 +1149,14 @@ const loadSavedChatCount = async () => {
   } catch (error) {
     console.error('Failed to load chat count:', error);
   }
+};
+
+const handleChatDeleted = (chatId: string) => {
+  if (currentSavedChatId.value === chatId) {
+    currentSavedChatId.value = null;
+    currentSavedChatShareId.value = null;
+  }
+  loadSavedChatCount();
 };
 
 const handleChatSelected = (chat: any) => {
