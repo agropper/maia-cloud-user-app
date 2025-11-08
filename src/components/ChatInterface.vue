@@ -958,99 +958,832 @@ const removeFile = (file: UploadedFile) => {
 const markdownParser = new MarkdownIt({
   html: false,
   linkify: true,
-  breaks: true
+  breaks: true,
+  typographer: true
 });
 
-const markdownToPlainText = (markdown: string) => {
-  const html = markdownParser.render(markdown || '');
-  const container = document.createElement('div');
-  container.innerHTML = html;
+const pdfMargin = { top: 48, right: 48, bottom: 48, left: 48 };
+const bubbleWidthRatio = 0.9;
+const bubblePaddingX = 14;
+const bubblePaddingY = 12;
+const authorChipHeight = 16;
+const authorChipPaddingX = 6;
+const authorChipSpacing = 8;
+const metaChipHeight = 14;
+const metaChipPaddingX = 5;
+const metaChipSpacing = 6;
+const bubbleSpacing = 24;
+const baseFontSize = 8;
+const headingFontSizes: Record<number, number> = { 1: 14, 2: 12, 3: 10, 4: 9 };
+const lineHeight = 11;
+const bulletIndent = 14;
+const fileChipHeight = 24;
+const fileChipPaddingX = 12;
+const fileChipSpacing = 10;
+const fileIconSize = 12;
+const eyeIconSize = 12;
 
-  container.querySelectorAll('br').forEach(br => {
-    br.replaceWith('\n');
+interface MarkedToken {
+  text?: string;
+  bold?: boolean;
+  newline?: boolean;
+}
+
+interface MessageBlock {
+  type: 'paragraph' | 'heading' | 'bullet';
+  level?: number;
+  text: string;
+}
+
+type SegmentItemKind = 'padding' | 'block' | 'gap' | 'meta' | 'actions';
+
+interface MarkedSegment {
+  text: string;
+  bold: boolean;
+}
+
+interface MarkedLine {
+  segments: MarkedSegment[];
+  bullet: boolean;
+}
+
+interface BlockSegmentData {
+  fontSize: number;
+  lineHeight: number;
+  indent: number;
+  line: MarkedLine;
+}
+
+interface SegmentItem {
+  kind: SegmentItemKind;
+  height: number;
+  blockData?: BlockSegmentData;
+  chips?: string[];
+}
+
+interface RenderState {
+  cursorY: number;
+  pageWidth: number;
+  pageHeight: number;
+}
+
+interface MessageMeasurement {
+  bubbleHeight: number;
+  contentHeight: number;
+  metaHeight: number;
+  totalHeight: number;
+  items: SegmentItem[];
+  metaChips: string[];
+}
+
+const inlineToMarkedText = (inline: any): string => {
+  let result = '';
+  let bold = false;
+
+  inline?.children?.forEach((child: any) => {
+    switch (child.type) {
+      case 'strong_open':
+        bold = true;
+        break;
+      case 'strong_close':
+        bold = false;
+        break;
+      case 'text':
+      case 'code_inline':
+        if (child.content) {
+          result += bold ? `**${child.content}**` : child.content;
+        }
+        break;
+      case 'softbreak':
+      case 'hardbreak':
+        result += '\n';
+        break;
+      default:
+        break;
+    }
   });
 
-  container.querySelectorAll('p, div').forEach(block => {
-    block.insertAdjacentText('afterend', '\n\n');
-  });
+  return result.trim();
+};
 
-  container.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(heading => {
-    heading.insertAdjacentText('afterend', '\n');
-  });
+const tokenizeMarkedText = (text: string): MarkedToken[] => {
+  const tokens: MarkedToken[] = [];
+  let buffer = '';
+  let bold = false;
+  let i = 0;
 
-  container.querySelectorAll('ul').forEach(ul => {
-    ul.querySelectorAll('li').forEach(li => {
-      li.insertAdjacentText('afterbegin', '• ');
-      li.insertAdjacentText('afterend', '\n');
-    });
-  });
-
-  container.querySelectorAll('ol').forEach(ol => {
-    Array.from(ol.children).forEach((child, index) => {
-      if (child instanceof HTMLElement) {
-        child.insertAdjacentText('afterbegin', `${index + 1}. `);
-        child.insertAdjacentText('afterend', '\n');
+  while (i < text.length) {
+    if (text.startsWith('**', i)) {
+      if (buffer) {
+        tokens.push({ text: buffer, bold });
+        buffer = '';
       }
+      bold = !bold;
+      i += 2;
+      continue;
+    }
+
+    if (text[i] === '\n') {
+      if (buffer) {
+        tokens.push({ text: buffer, bold });
+        buffer = '';
+      }
+      tokens.push({ newline: true });
+      i += 1;
+      continue;
+    }
+
+    buffer += text[i];
+    i += 1;
+  }
+
+  if (buffer) {
+    tokens.push({ text: buffer, bold });
+  }
+
+  return tokens;
+};
+
+const buildMarkedLines = (
+  doc: jsPDF,
+  text: string,
+  fontSize: number,
+  maxWidth: number
+): MarkedLine[] => {
+  const tokens = tokenizeMarkedText(text);
+  const lines: MarkedLine[] = [];
+  let currentSegments: MarkedSegment[] = [];
+  let cursorWidth = 0;
+
+  const pushLine = () => {
+    const segments = [...currentSegments];
+
+    while (segments.length > 0 && segments[0].text.trim().length === 0) {
+      segments.shift();
+    }
+
+    while (segments.length > 0 && segments[segments.length - 1].text.trim().length === 0) {
+      segments.pop();
+    }
+
+    if (segments.length === 0) {
+      lines.push({ segments: [{ text: '', bold: false }], bullet: false });
+    } else {
+      lines.push({ segments, bullet: false });
+    }
+
+    currentSegments = [];
+    cursorWidth = 0;
+  };
+
+  tokens.forEach(token => {
+    if (token.newline) {
+      pushLine();
+      return;
+    }
+
+    if (!token.text) return;
+
+    const parts = token.text.split(/(\s+)/).filter(Boolean);
+
+    parts.forEach(part => {
+      doc.setFont('helvetica', token.bold ? 'bold' : 'normal');
+      doc.setFontSize(fontSize);
+      const isWhitespace = /^\s+$/.test(part);
+      const width = doc.getTextWidth(part);
+
+      if (isWhitespace) {
+        if (cursorWidth + width > maxWidth && currentSegments.length > 0) {
+          pushLine();
+        } else {
+          currentSegments.push({ text: part, bold: token.bold ?? false });
+          cursorWidth += width;
+        }
+        return;
+      }
+
+      if (width > maxWidth) {
+        const broken = doc.splitTextToSize(part, maxWidth);
+        broken.forEach((piece: string, index: number) => {
+          const pieceWidth = doc.getTextWidth(piece);
+          if (cursorWidth > 0 && cursorWidth + pieceWidth > maxWidth) {
+            pushLine();
+          }
+          currentSegments.push({ text: piece, bold: token.bold ?? false });
+          cursorWidth += pieceWidth;
+          if (index < broken.length - 1) {
+            pushLine();
+          }
+        });
+        return;
+      }
+
+      if (cursorWidth > 0 && cursorWidth + width > maxWidth) {
+        pushLine();
+      }
+
+      currentSegments.push({ text: part, bold: token.bold ?? false });
+      cursorWidth += width;
     });
   });
 
-  const textContent = container.textContent ?? '';
-  return textContent
-    .replace(/\u00a0/g, ' ')
-    .replace(/\r\n|\r/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  if (currentSegments.length > 0) {
+    pushLine();
+  }
+
+  if (lines.length === 0) {
+    lines.push({ segments: [{ text: '', bold: false }], bullet: false });
+  }
+
+  return lines;
+};
+
+const normalizeText = (text: string): string => (
+   text
+     .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+     .replace(/[\u00AD\u2010\u2011]/g, '-')
+     .replace(/[\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+     .replace(/[\u2012-\u2015\u2212]/g, '-')
+     .replace(/\u00A0/g, ' ')
+     .replace(/\s+\n/g, '\n')
+     .replace(/\n\s+/g, '\n')
+     .replace(/\s+/g, ' ')
+     .trim()
+ );
+
+const ensureRoom = (doc: jsPDF, state: RenderState, requiredHeight: number) => {
+  if (state.cursorY + requiredHeight > state.pageHeight - pdfMargin.bottom) {
+    doc.addPage();
+    state.cursorY = pdfMargin.top;
+  }
+};
+
+// @ts-ignore
+const renderMarkedText = (
+  doc: jsPDF,
+  text: string,
+  startX: number,
+  startY: number,
+  width: number,
+  options: { fontSize: number; lineSpacing: number }
+) => {
+  const tokens = tokenizeMarkedText(text);
+  const lineSpacing = options.lineSpacing;
+  let cursorX = startX;
+  let cursorY = startY;
+
+  tokens.forEach(token => {
+    if (token.newline) {
+      cursorY += lineSpacing;
+      cursorX = startX;
+      return;
+    }
+
+    if (!token.text) return;
+
+    const parts = token.text.split(/(\s+)/).filter(Boolean);
+
+    parts.forEach(part => {
+      const isWhitespace = /^\s+$/.test(part);
+      doc.setFont('helvetica', token.bold ? 'bold' : 'normal');
+      doc.setFontSize(options.fontSize);
+
+      if (isWhitespace) {
+        cursorX += doc.getTextWidth(part);
+        return;
+      }
+
+      const broken = doc.splitTextToSize(part, width);
+      broken.forEach((piece: string, index: number) => {
+        const pieceWidth = doc.getTextWidth(piece);
+        if (cursorX !== startX && cursorX - startX + pieceWidth > width) {
+          cursorY += lineSpacing;
+          cursorX = startX;
+        }
+
+        doc.text(piece, cursorX, cursorY, { baseline: 'top' });
+        cursorX += pieceWidth;
+
+        if (index < broken.length - 1) {
+          cursorY += lineSpacing;
+          cursorX = startX;
+        }
+      });
+    });
+  });
+
+  return cursorY - startY + lineSpacing;
+};
+
+const getBlocksFromMessage = (message: Message): MessageBlock[] => {
+  if (!message.content) {
+    return [{ type: 'paragraph', text: '' }];
+  }
+
+  const tokens = markdownParser.parse(message.content, {});
+  const blocks: MessageBlock[] = [];
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+
+    if (token.type === 'table_open') {
+      const tableRows: string[][] = [];
+      let j = i + 1;
+      let currentRow: string[] = [];
+
+      for (; j < tokens.length; j += 1) {
+        const tableToken = tokens[j];
+
+        if (tableToken.type === 'tr_open') {
+          currentRow = [];
+        }
+
+        if (tableToken.type === 'tr_close') {
+          if (currentRow.length > 0) {
+            tableRows.push(currentRow);
+          }
+          currentRow = [];
+        }
+
+        if (tableToken.type === 'th_open' || tableToken.type === 'td_open') {
+          const inlineCell = tokens[j + 1];
+          if (inlineCell?.type === 'inline') {
+            currentRow.push(inlineToMarkedText(inlineCell));
+          } else {
+            currentRow.push('');
+          }
+        }
+
+        if (tableToken.type === 'table_close') {
+          break;
+        }
+      }
+
+      if (tableRows.length > 0) {
+        tableRows.forEach((row, index) => {
+          const text = row.join(' | ');
+          const formatted = index === 0 ? `**${text}**` : text;
+          blocks.push({ type: 'paragraph', text: formatted });
+        });
+      }
+
+      i = j;
+      continue;
+    }
+
+    if (token.type !== 'inline') continue;
+
+    const prevToken = tokens[i - 1];
+    if (!prevToken) continue;
+
+    if (prevToken.type === 'heading_open') {
+      const level = parseInt(prevToken.tag.replace('h', ''), 10) || 3;
+      blocks.push({ type: 'heading', level, text: inlineToMarkedText(token) });
+      continue;
+    }
+
+    if (prevToken.type === 'paragraph_open') {
+      const beforeParagraph = tokens[i - 2];
+      if (beforeParagraph && beforeParagraph.type === 'list_item_open') {
+        blocks.push({ type: 'bullet', text: inlineToMarkedText(token) });
+      } else {
+        blocks.push({ type: 'paragraph', text: inlineToMarkedText(token) });
+      }
+    }
+  }
+
+  if (blocks.length === 0) {
+    blocks.push({ type: 'paragraph', text: message.content });
+  }
+
+  return blocks;
+};
+
+const drawDocumentIcon = (doc: jsPDF, x: number, y: number, width: number, height: number) => {
+   doc.setDrawColor(25, 118, 210);
+   doc.setFillColor(255, 255, 255);
+   doc.roundedRect(x, y, width, height, 2, 2, 'FD');
+   doc.setFillColor(227, 242, 253);
+   doc.setFillColor(187, 222, 251);
+   doc.rect(x + width * 0.15, y + height * 0.65, width * 0.7, height * 0.15, 'F');
+ };
+ 
+ const drawEyeIcon = (doc: jsPDF, x: number, y: number, width: number, height: number) => {
+   const centerX = x + width / 2;
+   const centerY = y + height / 2;
+   doc.setDrawColor(79, 195, 247);
+   doc.setFillColor(255, 255, 255);
+   doc.ellipse(centerX, centerY, width / 2, height / 2, 'FD');
+   doc.setFillColor(79, 195, 247);
+   doc.circle(centerX, centerY, Math.min(width, height) / 4, 'F');
+ };
+
+const renderFileChips = (doc: jsPDF, files: UploadedFile[], state: RenderState) => {
+  if (!files.length) {
+    return;
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(baseFontSize + 2);
+
+  if (state.cursorY + lineHeight > state.pageHeight - pdfMargin.bottom) {
+    doc.addPage();
+    state.cursorY = pdfMargin.top;
+  }
+
+  doc.setTextColor(62, 62, 62);
+  doc.text('Attached Files', pdfMargin.left, state.cursorY);
+  state.cursorY += lineHeight;
+
+  let rowY = state.cursorY;
+  let currentX = pdfMargin.left;
+
+  files.forEach(file => {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(baseFontSize + 1);
+    const textWidth = doc.getTextWidth(file.name);
+    const chipWidth = fileChipPaddingX * 2 + fileIconSize + 6 + textWidth + 8 + eyeIconSize;
+
+    if (currentX + chipWidth > state.pageWidth - pdfMargin.right) {
+      currentX = pdfMargin.left;
+      rowY += fileChipHeight + fileChipSpacing;
+    }
+
+    if (rowY + fileChipHeight > state.pageHeight - pdfMargin.bottom) {
+      doc.addPage();
+      state.cursorY = pdfMargin.top;
+      rowY = state.cursorY;
+      currentX = pdfMargin.left;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(baseFontSize + 2);
+      doc.text('Attached Files (cont.)', pdfMargin.left, rowY);
+      rowY += lineHeight;
+    }
+
+    doc.setDrawColor(187, 222, 251);
+    doc.setFillColor(227, 242, 253);
+    doc.roundedRect(currentX, rowY, chipWidth, fileChipHeight, 6, 6, 'FD');
+
+    const iconY = rowY + (fileChipHeight - fileIconSize) / 2;
+    drawDocumentIcon(doc, currentX + fileChipPaddingX / 2, iconY, fileIconSize, fileIconSize);
+
+    doc.setTextColor(25, 118, 210);
+    const textX = currentX + fileChipPaddingX / 2 + fileIconSize + 6;
+    const textY = rowY + fileChipHeight / 2 + 3;
+    doc.text(file.name, textX, textY, { baseline: 'middle' });
+
+    const eyeX = currentX + chipWidth - eyeIconSize - fileChipPaddingX / 2;
+    const eyeY = rowY + (fileChipHeight - eyeIconSize) / 2;
+    drawEyeIcon(doc, eyeX, eyeY, eyeIconSize, eyeIconSize);
+
+    currentX += chipWidth + fileChipSpacing;
+  });
+
+  state.cursorY = rowY + fileChipHeight + bubbleSpacing;
+  doc.setTextColor(32, 32, 32);
+};
+
+const measureMessage = (doc: jsPDF, message: Message, bubbleWidth: number): MessageMeasurement => {
+  const textWidth = bubbleWidth - bubblePaddingX * 2;
+  const blocks = getBlocksFromMessage(message);
+  const items: SegmentItem[] = [];
+
+  let contentHeight = 0;
+
+  const addItem = (item: SegmentItem) => {
+    items.push(item);
+    contentHeight += item.height;
+  };
+
+  addItem({ kind: 'padding', height: bubblePaddingY });
+
+  blocks.forEach(block => {
+    const fontSize = block.type === 'heading' ? headingFontSizes[block.level || 3] || baseFontSize : baseFontSize;
+    const blockLineHeight = block.type === 'heading' ? Math.round(fontSize * 1.4) : lineHeight;
+    const indent = block.type === 'bullet' ? bulletIndent : 0;
+
+    const normalizedText = normalizeText(block.text);
+    const lines = buildMarkedLines(doc, normalizedText, fontSize, Math.max(textWidth - indent, 24));
+
+    lines.forEach((line, index) => {
+      const lineData: MarkedLine = {
+        segments: line.segments,
+        bullet: block.type === 'bullet' && index === 0
+      };
+      addItem({
+        kind: 'block',
+        height: blockLineHeight,
+        blockData: {
+          fontSize,
+          lineHeight: blockLineHeight,
+          indent,
+          line: lineData
+        }
+      });
+    });
+  });
+
+  const metaChips = Array.isArray((message as any)?.metaChips)
+    ? ((message as any).metaChips as string[])
+    : [];
+
+  let metaHeight = 0;
+  if (metaChips.length > 0) {
+    let lineWidth = 0;
+    let lines = 1;
+    metaChips.forEach(chip => {
+      const chipTextWidth = doc.getTextWidth(chip);
+      const chipWidth = chipTextWidth + metaChipPaddingX * 2;
+      if (lineWidth > 0 && lineWidth + chipWidth > textWidth) {
+        lines += 1;
+        lineWidth = 0;
+      }
+      lineWidth += chipWidth + 6;
+    });
+    metaHeight = lines * metaChipHeight + (lines - 1) * metaChipSpacing;
+    addItem({ kind: 'gap', height: metaChipSpacing });
+    addItem({ kind: 'meta', height: metaHeight, chips: metaChips });
+  }
+
+  addItem({ kind: 'padding', height: bubblePaddingY });
+
+  const bubbleHeight = contentHeight;
+  const totalHeight = authorChipHeight + authorChipSpacing + bubbleHeight + bubbleSpacing;
+
+  return {
+    bubbleHeight,
+    contentHeight,
+    metaHeight,
+    totalHeight,
+    metaChips,
+    items
+  };
+};
+
+const drawBubbleSegmentBackground = (
+  doc: jsPDF,
+  bubbleX: number,
+  bubbleWidth: number,
+  segmentTop: number,
+  segmentHeight: number,
+  isFirst: boolean,
+  isLast: boolean,
+  bubbleFill: [number, number, number],
+  bubbleBorder: [number, number, number]
+) => {
+  const radius = 8;
+  doc.setFillColor(bubbleFill[0], bubbleFill[1], bubbleFill[2]);
+  doc.setDrawColor(bubbleBorder[0], bubbleBorder[1], bubbleBorder[2]);
+
+  if (isFirst && isLast) {
+    doc.roundedRect(bubbleX, segmentTop, bubbleWidth, segmentHeight, radius, radius, 'FD');
+    return;
+  }
+
+  if (isFirst) {
+    doc.roundedRect(bubbleX, segmentTop, bubbleWidth, segmentHeight, radius, radius, 'FD');
+    doc.setFillColor(bubbleFill[0], bubbleFill[1], bubbleFill[2]);
+    doc.rect(bubbleX, segmentTop + segmentHeight - radius, radius, radius, 'FD');
+    doc.rect(bubbleX + bubbleWidth - radius, segmentTop + segmentHeight - radius, radius, radius, 'FD');
+    return;
+  }
+
+  if (isLast) {
+    doc.roundedRect(bubbleX, segmentTop, bubbleWidth, segmentHeight, radius, radius, 'FD');
+    doc.setFillColor(bubbleFill[0], bubbleFill[1], bubbleFill[2]);
+    doc.rect(bubbleX, segmentTop, radius, radius, 'FD');
+    doc.rect(bubbleX + bubbleWidth - radius, segmentTop, radius, radius, 'FD');
+    return;
+  }
+
+  doc.rect(bubbleX, segmentTop, bubbleWidth, segmentHeight, 'FD');
+};
+
+const renderMetaChips = (
+  doc: jsPDF,
+  chips: string[] | undefined,
+  textStartX: number,
+  textWidth: number,
+  startY: number
+) => {
+  if (!chips || chips.length === 0) {
+    return 0;
+  }
+
+  let cursorY = startY;
+  let chipCursorX = textStartX;
+
+  chips.forEach(chip => {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(baseFontSize + 1);
+    const chipTextWidth = doc.getTextWidth(chip);
+    const width = chipTextWidth + metaChipPaddingX * 2;
+
+    if (chipCursorX + width > textStartX + textWidth) {
+      chipCursorX = textStartX;
+      cursorY += metaChipHeight + metaChipSpacing;
+    }
+
+    doc.setFillColor(224, 242, 241);
+    doc.setDrawColor(180, 208, 203);
+    doc.roundedRect(chipCursorX, cursorY, width, metaChipHeight, 4, 4, 'FD');
+    doc.setTextColor(46, 125, 109);
+    doc.text(
+      chip,
+      chipCursorX + metaChipPaddingX,
+      cursorY + metaChipHeight / 2 + 2,
+      { baseline: 'middle' }
+    );
+
+    chipCursorX += width + 6;
+  });
+
+  doc.setTextColor(32, 32, 32);
+
+  return (cursorY + metaChipHeight) - startY;
+};
+
+const renderMessage = (
+  doc: jsPDF,
+  message: Message,
+  state: RenderState,
+  bubbleWidth: number,
+  measurement: MessageMeasurement
+) => {
+  const isUser = message.role === 'user';
+  const bubbleX = isUser
+    ? state.pageWidth - pdfMargin.right - bubbleWidth
+    : pdfMargin.left;
+  const textStartX = bubbleX + bubblePaddingX;
+  const textWidth = bubbleWidth - bubblePaddingX * 2;
+  const bubbleFill: [number, number, number] = isUser ? [227, 242, 253] : [245, 245, 245];
+  const bubbleBorder: [number, number, number] = isUser ? [187, 222, 251] : [216, 216, 216];
+  const chipFill: [number, number, number] = isUser ? [33, 150, 243] : [232, 245, 253];
+  const chipBorder: [number, number, number] = isUser ? [25, 118, 210] : [187, 222, 251];
+  const chipText: [number, number, number] = isUser ? [255, 255, 255] : [25, 118, 210];
+
+  const authorLabel = getMessageLabel(message);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(baseFontSize + 1);
+  const chipTextWidth = doc.getTextWidth(authorLabel);
+  const chipWidth = chipTextWidth + authorChipPaddingX * 2;
+  const chipX = isUser ? bubbleX + bubbleWidth - chipWidth : bubbleX;
+  const chipY = state.cursorY;
+
+  doc.setFillColor(chipFill[0], chipFill[1], chipFill[2]);
+  doc.setDrawColor(chipBorder[0], chipBorder[1], chipBorder[2]);
+  doc.roundedRect(chipX, chipY, chipWidth, authorChipHeight, 6, 6, 'FD');
+  doc.setTextColor(chipText[0], chipText[1], chipText[2]);
+  doc.text(
+    authorLabel,
+    chipX + authorChipPaddingX,
+    chipY + authorChipHeight / 2 + 2,
+    { baseline: 'middle' }
+  );
+
+  state.cursorY += authorChipHeight + authorChipSpacing;
+  const items = measurement.items;
+  let segmentIndex = 0;
+
+  while (segmentIndex < items.length) {
+    let available = state.pageHeight - pdfMargin.bottom - state.cursorY;
+    if (available <= bubblePaddingY) {
+      doc.addPage();
+      state.cursorY = pdfMargin.top;
+      available = state.pageHeight - pdfMargin.bottom - state.cursorY;
+    }
+
+    const segmentItems: SegmentItem[] = [];
+    let segmentHeight = 0;
+    let startIndex = segmentIndex;
+
+    while (segmentIndex < items.length) {
+      const item = items[segmentIndex];
+      const nextHeight = segmentHeight + item.height;
+
+      if (segmentItems.length === 0 && item.height > available) {
+        doc.addPage();
+        state.cursorY = pdfMargin.top;
+        available = state.pageHeight - pdfMargin.bottom - state.cursorY;
+        startIndex = segmentIndex;
+        segmentHeight = 0;
+        continue;
+      }
+
+      if (segmentItems.length > 0 && nextHeight > available) {
+        break;
+      }
+
+      if (segmentItems.length === 0 && nextHeight > available) {
+        doc.addPage();
+        state.cursorY = pdfMargin.top;
+        available = state.pageHeight - pdfMargin.bottom - state.cursorY;
+        startIndex = segmentIndex;
+        segmentHeight = 0;
+        continue;
+      }
+
+      segmentItems.push(item);
+      segmentHeight = nextHeight;
+      segmentIndex += 1;
+    }
+
+    if (segmentItems.length === 0) {
+      break;
+    }
+
+    const segmentTop = state.cursorY;
+    const isFirstSegment = startIndex === 0;
+    const isLastSegment = segmentIndex >= items.length;
+
+    drawBubbleSegmentBackground(
+      doc,
+      bubbleX,
+      bubbleWidth,
+      segmentTop,
+      segmentHeight,
+      isFirstSegment,
+      isLastSegment,
+      bubbleFill,
+      bubbleBorder
+    );
+
+    doc.setTextColor(32, 32, 32);
+    let contentCursorY = segmentTop;
+
+    segmentItems.forEach(item => {
+      switch (item.kind) {
+        case 'padding':
+        case 'gap':
+          contentCursorY += item.height;
+          break;
+        case 'block': {
+          if (!item.blockData) {
+            contentCursorY += item.height;
+            break;
+          }
+          const { fontSize, lineHeight: blockLineHeight, indent, line } = item.blockData;
+          const lineY = contentCursorY;
+          let lineX = textStartX + indent;
+
+          if (line.bullet) {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(fontSize);
+            doc.text('•', textStartX, lineY, { baseline: 'top' });
+          }
+
+          line.segments.forEach(segment => {
+            if (!segment.text) return;
+            doc.setFont('helvetica', segment.bold ? 'bold' : 'normal');
+            doc.setFontSize(fontSize);
+
+            if (/^\s+$/.test(segment.text)) {
+              lineX += doc.getTextWidth(segment.text);
+            } else {
+              doc.text(segment.text, lineX, lineY, { baseline: 'top' });
+              lineX += doc.getTextWidth(segment.text);
+            }
+          });
+
+          contentCursorY += blockLineHeight;
+          break;
+        }
+        case 'meta': {
+           const rendered = renderMetaChips(doc, item.chips, textStartX, textWidth, contentCursorY);
+           contentCursorY += rendered;
+           break;
+         }
+         default:
+           contentCursorY += item.height;
+       }
+     });
+
+    state.cursorY = segmentTop + segmentHeight;
+  }
+
+  state.cursorY += bubbleSpacing;
 };
 
 const generateChatTranscriptPdf = () => {
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
-  const margin = 48;
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const usableWidth = pageWidth - margin * 2;
-  const headingFontSize = 14;
-  const bodyFontSize = 11;
-  const headingLineHeight = headingFontSize * 1.4;
-  const bodyLineHeight = bodyFontSize * 1.6;
-  let cursorY = margin;
-
-  const ensureSpace = (height = bodyLineHeight) => {
-    if (cursorY + height > pageHeight - margin) {
-      doc.addPage();
-      cursorY = margin;
-    }
+  const printableWidth = pageWidth - pdfMargin.left - pdfMargin.right;
+  const bubbleWidth = Math.min(pageWidth * bubbleWidthRatio, printableWidth);
+  const state: RenderState = {
+    cursorY: pdfMargin.top,
+    pageWidth,
+    pageHeight
   };
 
-  const writeParagraph = (text = '', options: { bold?: boolean; extraGap?: number } = {}) => {
-    const { bold = false, extraGap = 0 } = options;
-    const fontSize = bold ? headingFontSize : bodyFontSize;
-    const lineHeight = bold ? headingLineHeight : bodyLineHeight;
-    doc.setFont('Helvetica', bold ? 'bold' : 'normal');
-    doc.setFontSize(fontSize);
-    const content = text ? doc.splitTextToSize(text, usableWidth) : [''];
-    ensureSpace(content.length * lineHeight + extraGap);
-    content.forEach((line: string) => {
-      doc.text(line, margin, cursorY);
-      cursorY += lineHeight;
-    });
-    cursorY += extraGap;
-  };
+  renderFileChips(doc, uploadedFiles.value, state);
 
-  messages.value.forEach((msg, index) => {
-    const label =
-      msg.authorLabel ||
-      (msg.role === 'user' ? getUserLabel() : getProviderLabelFromKey(msg.providerKey));
-    writeParagraph(label, { bold: true });
-
-    const bodyText = markdownToPlainText(msg.content || '');
-    if (bodyText) {
-      writeParagraph(bodyText);
-    } else {
-      writeParagraph('[No content]');
-    }
-    if (index < messages.value.length - 1) {
-      cursorY += 8;
-    }
+  messages.value.forEach(msg => {
+    const normalized = normalizeMessage({ ...msg });
+    const measurement = measureMessage(doc, normalized, bubbleWidth);
+    const minHeightNeeded = authorChipHeight + authorChipSpacing + bubblePaddingY;
+    ensureRoom(doc, state, minHeightNeeded);
+    renderMessage(doc, normalized, state, bubbleWidth, measurement);
   });
 
   return doc;
