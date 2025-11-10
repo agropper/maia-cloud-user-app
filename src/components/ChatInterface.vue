@@ -664,6 +664,13 @@ const sendMessage = async () => {
     
     // Convert displayed label to API key
     const providerKey = getProviderKey(selectedProvider.value);
+    const shareIdForRequest = deepLinkShareId.value || currentSavedChatShareId.value || null;
+    const requestOptions: Record<string, unknown> = {
+      stream: true
+    };
+    if (shareIdForRequest) {
+      requestOptions.shareId = shareIdForRequest;
+    }
     const response = await fetch(
       `/api/chat/${providerKey}`,
       {
@@ -675,9 +682,7 @@ const sendMessage = async () => {
         credentials: 'include', // Include session cookie
         body: JSON.stringify({
           messages: sanitizedMessages,
-          options: {
-            stream: true
-          }
+          options: requestOptions
         })
       }
     );

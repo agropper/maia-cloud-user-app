@@ -4,6 +4,59 @@
 
 import { AgentClient } from '../../lib/do-client/agent.js';
 
+const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+
+const ensureAgentProfileApiKey = (userDoc, agentId, apiKey) => {
+  if (!isPlainObject(userDoc.agentProfiles)) {
+    userDoc.agentProfiles = {};
+  }
+  const defaultKey = userDoc.agentProfileDefaultKey || 'default';
+  const existingProfile = isPlainObject(userDoc.agentProfiles[defaultKey])
+    ? { ...userDoc.agentProfiles[defaultKey] }
+    : {};
+
+  let updated = false;
+
+  if (!existingProfile.agentId) {
+    existingProfile.agentId = agentId;
+    updated = true;
+  }
+  if (existingProfile.agentId === agentId && apiKey && existingProfile.apiKey !== apiKey) {
+    existingProfile.apiKey = apiKey;
+    updated = true;
+  }
+  if (!existingProfile.agentName && userDoc.assignedAgentName) {
+    existingProfile.agentName = userDoc.assignedAgentName;
+    updated = true;
+  }
+  if (!existingProfile.endpoint && userDoc.agentEndpoint) {
+    existingProfile.endpoint = userDoc.agentEndpoint;
+    updated = true;
+  }
+  if (!existingProfile.modelName && userDoc.agentModelName) {
+    existingProfile.modelName = userDoc.agentModelName;
+    updated = true;
+  }
+
+  const now = new Date().toISOString();
+  if (!existingProfile.createdAt) {
+    existingProfile.createdAt = now;
+    updated = true;
+  }
+  if (updated) {
+    existingProfile.updatedAt = now;
+    existingProfile.lastSyncedAt = now;
+  }
+
+  userDoc.agentProfiles[defaultKey] = existingProfile;
+  if (!userDoc.agentProfileDefaultKey) {
+    userDoc.agentProfileDefaultKey = defaultKey;
+  }
+  if (!isPlainObject(userDoc.deepLinkAgentOverrides)) {
+    userDoc.deepLinkAgentOverrides = {};
+  }
+};
+
 /**
  * Get agent API key from user document
  * If missing, create a new one
@@ -14,6 +67,19 @@ export async function getOrCreateAgentApiKey(doClient, cloudant, userId, agentId
     // Get user document
     const userDoc = await cloudant.getDocument('maia_users', userId);
     
+    if (isPlainObject(userDoc.agentProfiles)) {
+      const profileWithKey = Object.values(userDoc.agentProfiles).find(profile =>
+        isPlainObject(profile) && profile.agentId === agentId && profile.apiKey
+      );
+      if (profileWithKey?.apiKey) {
+        if (!userDoc.agentApiKey || userDoc.agentApiKey !== profileWithKey.apiKey) {
+          userDoc.agentApiKey = profileWithKey.apiKey;
+          await cloudant.saveDocument('maia_users', userDoc);
+        }
+        return profileWithKey.apiKey;
+      }
+    }
+
     // Check if user has a stored API key
     if (userDoc.agentApiKey) {
       // Note: We used to validate keys by calling listApiKeys(), but that endpoint
@@ -35,6 +101,7 @@ export async function getOrCreateAgentApiKey(doClient, cloudant, userId, agentId
     
     // Save the new API key to the user document
     userDoc.agentApiKey = apiKey;
+    ensureAgentProfileApiKey(userDoc, agentId, apiKey);
     await cloudant.saveDocument('maia_users', userDoc);
     
     return apiKey;
@@ -61,6 +128,7 @@ export async function recreateAgentApiKey(doClient, cloudant, userId, agentId) {
     
     // Save the new API key to the user document
     userDoc.agentApiKey = apiKey;
+    ensureAgentProfileApiKey(userDoc, agentId, apiKey);
     await cloudant.saveDocument('maia_users', userDoc);
     
     return apiKey;
@@ -77,16 +145,26 @@ export async function findUserAgent(doClient, userId) {
   try {
     const agentClient = new AgentClient(doClient);
     const agents = await agentClient.list();
-    
-    // Pattern: {userId}-agent-*
+
     const agentPattern = new RegExp(`^${userId}-agent-`);
-    const userAgent = agents.find(agent => agentPattern.test(agent.name));
-    
-    if (userAgent) {
-      console.log(`✅ Found agent ${userAgent.name} for user ${userId}`);
+    const basicAgent = agents.find(agent => agentPattern.test(agent.name));
+
+    if (!basicAgent) {
+      return null;
     }
-    
-    return userAgent || null;
+
+    console.log(`✅ Found agent ${basicAgent.name} for user ${userId}`);
+
+    try {
+      const detailedAgent = await agentClient.get(basicAgent.uuid || basicAgent.id || basicAgent.agent_id || basicAgent.agentId || basicAgent.agent_uuid);
+      if (detailedAgent) {
+        return detailedAgent;
+      }
+    } catch (detailError) {
+      console.warn(`⚠️ Unable to fetch detailed info for agent ${basicAgent.uuid || basicAgent.id}: ${detailError.message}`);
+    }
+
+    return basicAgent;
   } catch (error) {
     console.error(`Error finding agent for user ${userId}:`, error.message);
     return null;

@@ -310,6 +310,42 @@ async function validateUserResources(userId) {
         const expectedPattern = new RegExp(`^${userId}-agent-`);
         if (expectedPattern.test(agent.name)) {
           hasAgent = true;
+          const endpointFromAgent = agent.deployment?.url ? `${agent.deployment.url}/api/v1` : null;
+          const modelNameFromAgent = agent.model?.inference_name || agent.model?.name || null;
+          const timestamp = new Date().toISOString();
+          const defaultProfileKey = userDoc.agentProfileDefaultKey || 'default';
+          const mergeResult = mergeAgentProfileOnDoc(userDoc, defaultProfileKey, {
+            agentId: agent.uuid,
+            agentName: agent.name,
+            endpoint: endpointFromAgent,
+            modelName: modelNameFromAgent
+          }, timestamp);
+          if (mergeResult.changed) {
+            cleaned = true;
+          }
+          if (userDoc.assignedAgentName !== agent.name) {
+            userDoc.assignedAgentName = agent.name;
+            cleaned = true;
+          }
+          if (userDoc.assignedAgentId !== agent.uuid) {
+            userDoc.assignedAgentId = agent.uuid;
+            cleaned = true;
+          }
+          if (endpointFromAgent && userDoc.agentEndpoint !== endpointFromAgent) {
+            userDoc.agentEndpoint = endpointFromAgent;
+            cleaned = true;
+          }
+          if (modelNameFromAgent && userDoc.agentModelName !== modelNameFromAgent) {
+            userDoc.agentModelName = modelNameFromAgent;
+            cleaned = true;
+          }
+          if (!userDoc.agentProfileDefaultKey) {
+            userDoc.agentProfileDefaultKey = defaultProfileKey;
+            cleaned = true;
+          }
+          if (ensureDeepLinkAgentOverrides(userDoc)) {
+            cleaned = true;
+          }
         } else {
           // Agent exists but name doesn't match pattern - clear it
           console.log(`⚠️ Agent ${userDoc.assignedAgentId} exists but name "${agent.name}" doesn't match pattern for user ${userId}. Clearing.`);
@@ -502,6 +538,26 @@ async function validateUserResources(userId) {
                 freshDoc.agentEndpoint = null;
                 freshDoc.agentModelName = null;
                 freshDoc.agentApiKey = null;
+                freshDoc.agentProfiles = {};
+                freshDoc.agentProfileDefaultKey = freshDoc.agentProfileDefaultKey || 'default';
+                freshDoc.deepLinkAgentOverrides = {};
+              } else if (userDoc.assignedAgentId) {
+                freshDoc.assignedAgentId = userDoc.assignedAgentId;
+                freshDoc.assignedAgentName = userDoc.assignedAgentName;
+                freshDoc.agentEndpoint = userDoc.agentEndpoint;
+                freshDoc.agentModelName = userDoc.agentModelName;
+                if (userDoc.agentApiKey !== undefined) {
+                  freshDoc.agentApiKey = userDoc.agentApiKey;
+                }
+                if (isPlainObject(userDoc.agentProfiles)) {
+                  freshDoc.agentProfiles = userDoc.agentProfiles;
+                }
+                if (userDoc.agentProfileDefaultKey) {
+                  freshDoc.agentProfileDefaultKey = userDoc.agentProfileDefaultKey;
+                }
+                if (isPlainObject(userDoc.deepLinkAgentOverrides)) {
+                  freshDoc.deepLinkAgentOverrides = userDoc.deepLinkAgentOverrides;
+                }
               }
               if (userDoc.kbId === null) {
                 freshDoc.kbId = null;
@@ -701,6 +757,73 @@ const attachShareToUserDoc = (userDoc, shareId) => {
   }
   userDoc.deepLinkShareIds = shares;
   return shares;
+};
+
+const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+
+const ensureDeepLinkAgentOverrides = (userDoc) => {
+  if (!isPlainObject(userDoc.deepLinkAgentOverrides)) {
+    userDoc.deepLinkAgentOverrides = {};
+    return true;
+  }
+  return false;
+};
+
+const mergeAgentProfileOnDoc = (userDoc, profileKey, profileData, timestamp = new Date().toISOString()) => {
+  if (!isPlainObject(userDoc.agentProfiles)) {
+    userDoc.agentProfiles = {};
+  }
+
+  const existingProfile = isPlainObject(userDoc.agentProfiles[profileKey])
+    ? { ...userDoc.agentProfiles[profileKey] }
+    : {};
+
+  const { agentId, agentName, endpoint, modelName, apiKey, lastSyncedAt } = profileData || {};
+
+  let changed = false;
+  if (agentId !== undefined && existingProfile.agentId !== agentId) {
+    existingProfile.agentId = agentId;
+    changed = true;
+  }
+  if (agentName !== undefined && existingProfile.agentName !== agentName) {
+    existingProfile.agentName = agentName;
+    changed = true;
+  }
+  if (endpoint !== undefined && existingProfile.endpoint !== endpoint) {
+    existingProfile.endpoint = endpoint;
+    changed = true;
+  }
+  if (modelName !== undefined && existingProfile.modelName !== modelName) {
+    existingProfile.modelName = modelName;
+    changed = true;
+  }
+  if (apiKey !== undefined && existingProfile.apiKey !== apiKey) {
+    existingProfile.apiKey = apiKey;
+    changed = true;
+  }
+
+  if (!existingProfile.createdAt) {
+    existingProfile.createdAt = timestamp;
+    changed = true;
+  }
+
+  if (lastSyncedAt !== undefined) {
+    if (existingProfile.lastSyncedAt !== lastSyncedAt) {
+      existingProfile.lastSyncedAt = lastSyncedAt;
+      changed = true;
+    }
+  } else if (changed) {
+    existingProfile.lastSyncedAt = timestamp;
+  }
+
+  if (changed) {
+    existingProfile.updatedAt = timestamp;
+  } else if (!existingProfile.updatedAt) {
+    existingProfile.updatedAt = existingProfile.createdAt;
+  }
+
+  userDoc.agentProfiles[profileKey] = existingProfile;
+  return { changed, profile: existingProfile };
 };
 
 const setDeepLinkSession = (req, userDoc, shareId, chatId) => {
@@ -1023,11 +1146,13 @@ app.post('/api/sync-agent', async (req, res) => {
     
     // Check if agent info needs updating
     const agentModelName = userAgent.model?.inference_name || userAgent.model?.name || null;
+    const agentEndpointFromDetails = userAgent.deployment?.url ? `${userAgent.deployment.url}/api/v1` : null;
     const needsUpdate = 
       userDoc.assignedAgentId !== userAgent.uuid ||
       userDoc.assignedAgentName !== userAgent.name ||
       userDoc.agentModelName !== agentModelName ||
-      !userAgent.deployment?.url;
+      !agentEndpointFromDetails ||
+      userDoc.agentEndpoint !== agentEndpointFromDetails;
     
     if (needsUpdate) {
       // Retry logic for 409 conflicts
@@ -1038,9 +1163,21 @@ app.post('/api/sync-agent', async (req, res) => {
         try {
       userDoc.assignedAgentId = userAgent.uuid;
       userDoc.assignedAgentName = userAgent.name;
-      userDoc.agentEndpoint = userAgent.deployment?.url ? `${userAgent.deployment.url}/api/v1` : null;
+      userDoc.agentEndpoint = agentEndpointFromDetails;
       // Store model inference_name for API requests
       userDoc.agentModelName = userAgent.model?.inference_name || userAgent.model?.name || null;
+      const syncTimestamp = new Date().toISOString();
+      const defaultProfileKey = userDoc.agentProfileDefaultKey || 'default';
+      mergeAgentProfileOnDoc(userDoc, defaultProfileKey, {
+        agentId: userAgent.uuid,
+        agentName: userAgent.name,
+        endpoint: userDoc.agentEndpoint,
+        modelName: userDoc.agentModelName
+      }, syncTimestamp);
+      if (!userDoc.agentProfileDefaultKey) {
+        userDoc.agentProfileDefaultKey = defaultProfileKey;
+      }
+      ensureDeepLinkAgentOverrides(userDoc);
       
       await cloudant.saveDocument('maia_users', userDoc);
       console.log(`✅ Synced agent ${userAgent.name} for user ${userId}`);
@@ -1904,10 +2041,14 @@ async function provisionUserAsync(userId, token) {
           // Re-read document to get latest _rev
           const latestDoc = await cloudant.getDocument('maia_users', userId);
           
+          const updatePayload = typeof updates === 'function'
+            ? updates(latestDoc)
+            : updates;
+          
           // Merge updates with latest document
           const updatedDoc = {
             ...latestDoc,
-            ...updates,
+            ...(updatePayload || {}),
             updatedAt: new Date().toISOString()
           };
           
@@ -2307,16 +2448,38 @@ async function provisionUserAsync(userId, token) {
     const agentEndpoint = agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null;
     const agentModelName = agentDetails?.model?.inference_name || agentDetails?.model?.name || null;
     
-    userDoc = await updateUserDoc({
-      assignedAgentId: newAgent.uuid,
-      assignedAgentName: agentName,
-      agentEndpoint: agentEndpoint,
-      agentModelName: agentModelName,
-      agentApiKey: apiKey,
-      provisioned: true,
-      provisionedAt: new Date().toISOString(),
-      provisionToken: undefined,
-      provisionTokenCreatedAt: undefined
+    userDoc = await updateUserDoc((latestDoc) => {
+      const docClone = { ...latestDoc };
+      const timestamp = new Date().toISOString();
+      const endpointToStore = agentEndpoint || docClone.agentEndpoint || null;
+      const modelNameToStore = agentModelName || docClone.agentModelName || null;
+      const defaultProfileKey = docClone.agentProfileDefaultKey || 'default';
+
+      mergeAgentProfileOnDoc(docClone, defaultProfileKey, {
+        agentId: newAgent.uuid,
+        agentName,
+        endpoint: endpointToStore,
+        modelName: modelNameToStore,
+        apiKey
+      }, timestamp);
+
+      docClone.agentProfileDefaultKey = defaultProfileKey;
+      ensureDeepLinkAgentOverrides(docClone);
+
+      return {
+        assignedAgentId: newAgent.uuid,
+        assignedAgentName: agentName,
+        agentEndpoint: endpointToStore,
+        agentModelName: modelNameToStore,
+        agentApiKey: apiKey,
+        agentProfiles: docClone.agentProfiles,
+        agentProfileDefaultKey: docClone.agentProfileDefaultKey,
+        deepLinkAgentOverrides: docClone.deepLinkAgentOverrides,
+        provisioned: true,
+        provisionedAt: timestamp,
+        provisionToken: undefined,
+        provisionTokenCreatedAt: undefined
+      };
     });
 
     updateStatus('User document updated', { 

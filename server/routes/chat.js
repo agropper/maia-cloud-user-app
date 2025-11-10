@@ -6,6 +6,59 @@ import { ChatClient } from '../../lib/chat-client/index.js';
 import { DigitalOceanProvider } from '../../lib/chat-client/providers/digitalocean.js';
 import { getOrCreateAgentApiKey, recreateAgentApiKey } from '../utils/agent-helper.js';
 
+const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
+
+const findChatByShareId = async (cloudant, shareId) => {
+  if (!shareId) return null;
+  try {
+    const result = await cloudant.findDocuments('maia_chats', {
+      selector: { shareId: { $eq: shareId } },
+      limit: 1
+    });
+    if (result?.docs?.length) {
+      return result.docs[0];
+    }
+  } catch (error) {
+    console.warn('Unable to look up chat by shareId:', error.message);
+  }
+  return null;
+};
+
+const looksLikeDeepLinkId = (userId) => typeof userId === 'string' && userId.includes('-dl-');
+
+const extractOwnerIdFromChatId = (chatId) => {
+  if (typeof chatId !== 'string') return null;
+  const dashIndex = chatId.indexOf('-chat_');
+  if (dashIndex > 0) {
+    return chatId.slice(0, dashIndex);
+  }
+  return null;
+};
+
+const resolveAgentOwnerId = (chatDoc) => {
+  if (!chatDoc || typeof chatDoc !== 'object') return null;
+  const candidates = [
+    chatDoc.patientOwner,
+    chatDoc.ownerId,
+    chatDoc.owner,
+    chatDoc.ownerUserId,
+    chatDoc.currentUser
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && !looksLikeDeepLinkId(candidate)) {
+      return candidate;
+    }
+  }
+
+  const derived = extractOwnerIdFromChatId(chatDoc._id);
+  if (derived && !looksLikeDeepLinkId(derived)) {
+    return derived;
+  }
+
+  return null;
+};
+
 export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
   /**
    * Main chat endpoint - routes to appropriate provider
@@ -14,10 +67,18 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
   app.post('/api/chat/:provider', async (req, res) => {
     // Declare userAgentProvider outside try block for error handling
     let userAgentProvider = null;
+    let agentOwnerId = null;
     
     try {
       const { provider } = req.params;
-      const { messages, options = {} } = req.body;
+      const { messages } = req.body;
+      let options = req.body.options || {};
+      const shareIdFromOptions = options?.shareId;
+      if (shareIdFromOptions) {
+        options = { ...options };
+        delete options.shareId;
+      }
+      const shareIdForRequest = shareIdFromOptions || req.session?.deepLinkShareId || null;
 
       if (!messages || !Array.isArray(messages)) {
         return res.status(400).json({ error: 'Messages array required' });
@@ -32,36 +93,112 @@ export default function setupChatRoutes(app, chatClient, cloudant, doClient) {
       }
 
       // For DigitalOcean provider, check if user has a specific agent
-      let userId = null;
+      let userId = req.session?.userId || null;
       let userDoc = null;
       let agentId = null;
+      let ownerChatDoc = null;
       
       if (provider === 'digitalocean' && cloudant && doClient) {
-        userId = req.session?.userId;
-        
-        if (userId) {
-          userDoc = await cloudant.getDocument('maia_users', userId);
-          
-          if (userDoc.assignedAgentId && userDoc.agentEndpoint && userDoc.assignedAgentName) {
-            agentId = userDoc.assignedAgentId;
-            
-            // Get or create agent API key
-            const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId);
-            
-            // Create provider with agent-specific endpoint and key
-            userAgentProvider = new DigitalOceanProvider(apiKey, {
-              baseURL: userDoc.agentEndpoint
-            });
-            
-            // Use the stored model name if available (from agent sync)
-            // This should be the model's inference_name from the agent details
-            if (userDoc.agentModelName) {
-              options.model = userDoc.agentModelName;
-            } else {
-              // Fallback to agent name (may not work, but keeps old behavior)
-              options.model = userDoc.assignedAgentName;
+        let effectiveUserId = userId;
+
+        if (!effectiveUserId && req.session?.isDeepLink) {
+          const candidateShares = [
+            shareIdForRequest,
+            req.session.deepLinkShareId,
+            ...(Array.isArray(req.session.deepLinkShareIds) ? req.session.deepLinkShareIds : [])
+          ].filter(Boolean);
+
+          for (const candidateShare of candidateShares) {
+            ownerChatDoc = await findChatByShareId(cloudant, candidateShare);
+            if (ownerChatDoc) {
+              effectiveUserId = resolveAgentOwnerId(ownerChatDoc);
+              if (effectiveUserId) {
+                break;
+              }
             }
           }
+
+          if (!effectiveUserId) {
+            return res.status(403).json({
+              error: 'Shared chat is not linked to an agent owner',
+              type: 'DEEPLINK_FORBIDDEN',
+              status: 403
+            });
+          }
+        }
+
+        if (!effectiveUserId) {
+          return res.status(401).json({
+            error: 'User not authenticated',
+            type: 'NOT_AUTHENTICATED',
+            status: 401
+          });
+        }
+
+        userId = effectiveUserId;
+        agentOwnerId = effectiveUserId;
+
+        try {
+          userDoc = await cloudant.getDocument('maia_users', userId);
+        } catch (docError) {
+          return res.status(404).json({
+            error: 'Agent owner not found',
+            type: 'AGENT_OWNER_NOT_FOUND',
+            status: 404
+          });
+        }
+
+        const agentProfiles = isPlainObject(userDoc.agentProfiles) ? userDoc.agentProfiles : {};
+        const defaultProfileKey = userDoc.agentProfileDefaultKey || 'default';
+
+        let profileKeyToUse = defaultProfileKey;
+        let overrideValue = null;
+        if (shareIdForRequest && isPlainObject(userDoc.deepLinkAgentOverrides)) {
+          overrideValue = userDoc.deepLinkAgentOverrides[shareIdForRequest];
+        }
+
+        if (overrideValue) {
+          if (agentProfiles[overrideValue]) {
+            profileKeyToUse = overrideValue;
+          } else {
+            const matchedEntry = Object.entries(agentProfiles).find(([, profile]) => (
+              isPlainObject(profile) && profile.agentId === overrideValue
+            ));
+            if (matchedEntry) {
+              profileKeyToUse = matchedEntry[0];
+            }
+          }
+        }
+
+        const selectedProfile = isPlainObject(agentProfiles[profileKeyToUse])
+          ? agentProfiles[profileKeyToUse]
+          : null;
+
+        const profileAgentId = selectedProfile?.agentId || userDoc.assignedAgentId || null;
+        const profileAgentName = selectedProfile?.agentName || userDoc.assignedAgentName || null;
+        const profileEndpoint = selectedProfile?.endpoint || userDoc.agentEndpoint || null;
+        const profileModelName = selectedProfile?.modelName || userDoc.agentModelName || null;
+
+        if (profileAgentId && profileEndpoint && profileAgentName) {
+          agentId = profileAgentId;
+
+          const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, agentId);
+
+          userAgentProvider = new DigitalOceanProvider(apiKey, {
+            baseURL: profileEndpoint
+          });
+
+          if (profileModelName) {
+            options.model = profileModelName;
+          } else {
+            options.model = profileAgentName;
+          }
+        } else {
+          return res.status(404).json({
+            error: 'Private AI agent not provisioned for this user',
+            type: 'AGENT_NOT_FOUND',
+            status: 404
+          });
         }
       }
 
