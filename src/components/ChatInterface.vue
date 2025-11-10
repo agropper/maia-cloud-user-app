@@ -248,6 +248,7 @@
                 round 
                 icon="settings" 
                 class="text-grey-6 q-mr-xs" 
+                v-if="canAccessMyStuff"
                 @click="showMyStuffDialog = true"
               >
                 <q-tooltip>My Stuff: Manage files, knowledge base, agent settings, and patient summary</q-tooltip>
@@ -283,6 +284,7 @@
     <SavedChatsModal
       v-model="showSavedChatsModal"
       :currentUser="props.user?.userId || ''"
+      :is-deep-link-user="isDeepLink"
       @chat-selected="handleChatSelected"
       @chat-deleted="handleChatDeleted"
     />
@@ -295,6 +297,7 @@
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
       @indexing-finished="handleIndexingFinished"
+      v-if="canAccessMyStuff"
     />
   </div>
 </template>
@@ -321,6 +324,12 @@ interface Message {
 interface User {
   userId: string;
   displayName: string;
+  isDeepLink?: boolean;
+}
+
+interface DeepLinkInfo {
+  shareId: string | null;
+  chatId?: string | null;
 }
 
 interface UploadedFile {
@@ -339,6 +348,8 @@ interface UploadedFile {
 
 interface Props {
   user?: User | null;
+  isDeepLinkUser?: boolean;
+  deepLinkInfo?: DeepLinkInfo | null;
 }
 
 const props = defineProps<Props>();
@@ -373,6 +384,12 @@ const currentSavedChatId = ref<string | null>(null);
 const currentSavedChatShareId = ref<string | null>(null);
 const lastLocalSaveSnapshot = ref<string | null>(null);
 const lastGroupSaveSnapshot = ref<string | null>(null);
+const hasLoadedDeepLinkChat = ref(false);
+
+const isDeepLink = computed(() => !!props.isDeepLinkUser);
+const deepLinkShareId = computed(() => props.deepLinkInfo?.shareId || null);
+const deepLinkChatId = computed(() => props.deepLinkInfo?.chatId || null);
+const canAccessMyStuff = computed(() => !isDeepLink.value && !props.user?.isDeepLink);
 
 type UploadedFilePayload = {
   id: string;
@@ -426,9 +443,34 @@ watch(
   () => {
     currentSavedChatId.value = null;
     currentSavedChatShareId.value = null;
-    lastLocalSaveSnapshot.value = null;
-    lastGroupSaveSnapshot.value = null;
+    lastLocalSaveSnapshot.value = currentChatSnapshot.value;
+    lastGroupSaveSnapshot.value = currentChatSnapshot.value;
   }
+);
+
+watch(
+  [isDeepLink, deepLinkShareId, deepLinkChatId],
+  ([, shareId, chatId], [, prevShareId, prevChatId]) => {
+    if (!canAccessMyStuff.value) {
+      showMyStuffDialog.value = false;
+    }
+
+    if (shareId && (shareId !== prevShareId || chatId !== prevChatId)) {
+      hasLoadedDeepLinkChat.value = false;
+    }
+
+    if (chatId && currentSavedChatId.value !== chatId) {
+      currentSavedChatId.value = chatId;
+    }
+    if (shareId && currentSavedChatShareId.value !== shareId) {
+      currentSavedChatShareId.value = shareId;
+    }
+
+    if (shareId) {
+      loadDeepLinkChat();
+    }
+  },
+  { immediate: true }
 );
 
 watch(
@@ -1803,7 +1845,7 @@ const saveLocally = async () => {
       alert('There is no chat content to save yet.');
       return;
     }
-
+    
     const doc = generateChatTranscriptPdf();
     const now = new Date();
     const filename = `MAIA chat ${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}.pdf`;
@@ -1817,16 +1859,16 @@ const saveLocally = async () => {
           suggestedName: filename,
           types: [
             {
-              description: 'PDF files',
-              accept: { 'application/pdf': ['.pdf'] }
+            description: 'PDF files',
+            accept: { 'application/pdf': ['.pdf'] }
             }
           ]
         });
-
+        
         const writable = await fileHandle.createWritable();
         await writable.write(await doc.output('blob'));
         await writable.close();
-
+        
         alert('Chat saved successfully!');
         lastLocalSaveSnapshot.value = currentChatSnapshot.value;
         return;
@@ -1864,15 +1906,26 @@ const saveToGroup = async () => {
 
     let attemptedUpdate = false;
 
+    if (isDeepLink.value) {
+      if (!currentSavedChatId.value && deepLinkChatId.value) {
+        currentSavedChatId.value = deepLinkChatId.value;
+        currentSavedChatShareId.value = deepLinkShareId.value || currentSavedChatShareId.value;
+      }
+      if (!currentSavedChatId.value) {
+        alert('Unable to locate the shared chat to update. Please refresh and try again.');
+        return;
+      }
+    }
+
     if (currentSavedChatId.value) {
       attemptedUpdate = true;
       const updateResponse = await fetch(`/api/save-group-chat/${encodeURIComponent(currentSavedChatId.value)}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+      headers: {
+        'Content-Type': 'application/json'
+      },
         credentials: 'include',
-        body: JSON.stringify({
+      body: JSON.stringify({
           ...payload,
           shareId: currentSavedChatShareId.value
         })
@@ -1913,18 +1966,18 @@ const saveToGroup = async () => {
 
       if (!createResponse.ok) {
         const errorData = await createResponse.json().catch(() => ({ message: createResponse.statusText }));
-        throw new Error(errorData.message || 'Failed to save chat');
-      }
+      throw new Error(errorData.message || 'Failed to save chat');
+    }
 
       const result = await createResponse.json();
-
+    
       currentSavedChatId.value = result.chatId || null;
       currentSavedChatShareId.value = result.shareId || null;
       lastGroupSaveSnapshot.value = currentChatSnapshot.value;
-
+    
       alert(`Chat saved successfully!${result.shareId ? ` Share ID: ${result.shareId}` : ''}`);
 
-      loadSavedChatCount();
+    loadSavedChatCount();
     }
   } catch (error) {
     console.error('Error saving to group:', error);
@@ -1941,7 +1994,10 @@ const loadSavedChatCount = async () => {
   if (!props.user?.userId) return;
   
   try {
-    const response = await fetch(`/api/user-chats?userId=${encodeURIComponent(props.user.userId)}`, {
+    const endpoint = isDeepLink.value
+      ? '/api/user-chats'
+      : `/api/user-chats?userId=${encodeURIComponent(props.user.userId)}`;
+    const response = await fetch(endpoint, {
       credentials: 'include'
     });
     if (response.ok) {
@@ -1952,6 +2008,38 @@ const loadSavedChatCount = async () => {
     console.error('Failed to load chat count:', error);
   }
 };
+
+async function loadDeepLinkChat(force = false) {
+  const shareId = deepLinkShareId.value;
+  if (!shareId || (hasLoadedDeepLinkChat.value && !force)) return;
+
+  try {
+    const response = await fetch(`/api/load-chat-by-share/${encodeURIComponent(shareId)}`, {
+      credentials: 'include'
+    });
+    if (!response.ok) {
+      throw new Error(response.statusText || 'Failed to load shared chat');
+    }
+    const result = await response.json();
+    if (result?.chat) {
+      handleChatSelected(result.chat);
+      hasLoadedDeepLinkChat.value = true;
+      if (result.chat._id) {
+        currentSavedChatId.value = result.chat._id;
+      } else if (deepLinkChatId.value) {
+        currentSavedChatId.value = deepLinkChatId.value;
+      }
+
+      if (result.chat.shareId) {
+        currentSavedChatShareId.value = result.chat.shareId;
+      } else {
+        currentSavedChatShareId.value = shareId;
+      }
+    }
+  } catch (error) {
+    console.error('Failed to load deep link chat:', error);
+  }
+}
 
 const handleChatDeleted = (chatId: string) => {
   if (currentSavedChatId.value === chatId) {
@@ -1965,6 +2053,9 @@ const handleChatDeleted = (chatId: string) => {
 const handleChatSelected = (chat: any) => {
   currentSavedChatId.value = chat._id || null;
   currentSavedChatShareId.value = chat.shareId || null;
+  if (deepLinkShareId.value) {
+    hasLoadedDeepLinkChat.value = true;
+  }
 
   // Load the chat history
   if (chat.chatHistory) {
@@ -2111,10 +2202,10 @@ const syncAgent = async () => {
     if (response.ok) {
       const result = await response.json();
       if (result.success) {
-        console.log('Agent synced:', result.agent?.name);
+      console.log('Agent synced:', result.agent?.name);
       } else {
-        // No agent found - this is OK, user might not have one yet
-        console.log('No agent found for user');
+      // No agent found - this is OK, user might not have one yet
+      console.log('No agent found for user');
       }
     } else {
       console.error('Failed to sync agent:', response.status, response.statusText);
@@ -2254,34 +2345,40 @@ const updateContextualTip = async () => {
 onMounted(() => {
   loadProviders();
   loadSavedChatCount();
+  if (!isDeepLink.value) {
   syncAgent();
   updateContextualTip();
+  
+    // Update tip periodically and when context changes
+  watch(() => savedChatCount.value, () => {
+    updateContextualTip();
+  });
+  
+    watch(() => messages.value.length, () => {
+      updateContextualTip();
+    });
+    
+    watch(() => selectedProvider.value, () => {
+      updateContextualTip();
+    });
+    
+  setInterval(() => {
+    updateContextualTip();
+  }, 30000);
+  } else {
+    contextualTip.value = 'Ready to chat';
+    loadDeepLinkChat();
+  }
 
   nextTick(() => {
     const snapshot = currentChatSnapshot.value;
     lastLocalSaveSnapshot.value = snapshot;
     lastGroupSaveSnapshot.value = snapshot;
   });
-  
-  // Update tip periodically and when saved chat count changes
-  watch(() => savedChatCount.value, () => {
-    updateContextualTip();
-  });
-  
-  // Update tip when messages change (for chat_modified state)
-  watch(() => messages.value.length, () => {
-    updateContextualTip();
-  });
-  
-  // Update tip when provider changes (for public_llm state)
-  watch(() => selectedProvider.value, () => {
-    updateContextualTip();
-  });
-  
-  // Update tip every 30 seconds to pick up changes
-  setInterval(() => {
-    updateContextualTip();
-  }, 30000);
+
+  if (deepLinkShareId.value) {
+    loadDeepLinkChat(true);
+  }
 });
 </script>
 

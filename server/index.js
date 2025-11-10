@@ -637,6 +637,347 @@ setupChatRoutes(app, chatClient, cloudant, doClient);
 // File routes
 setupFileRoutes(app);
 
+const DEEP_LINK_COOKIE = 'maia_deep_link_user';
+const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
+
+const sanitizeName = (value = '') => value
+  .normalize('NFKD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9\s'-]/g, '')
+  .trim();
+
+const slugifyName = (value = '') => {
+  const cleaned = sanitizeName(value).toLowerCase();
+  const slug = cleaned.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'guest';
+};
+
+const ensureArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
+
+const getChatByShareId = async (shareId) => {
+  if (!shareId) return null;
+  const result = await cloudant.findDocuments('maia_chats', {
+    selector: { shareId: { $eq: shareId } },
+    limit: 1
+  });
+  if (result?.docs?.length) {
+    return result.docs[0];
+  }
+  const allChats = await cloudant.getAllDocuments('maia_chats');
+  return allChats.find(chat => chat.shareId === shareId) || null;
+};
+
+const findDeepLinkUsersByDisplayName = async (displayName, normalizedKey) => {
+  const selector = {
+    type: { $eq: 'user' },
+    isDeepLink: { $eq: true }
+  };
+
+  if (normalizedKey) {
+    selector.$or = [{ deepLinkNameKey: { $eq: normalizedKey } }];
+  }
+
+  if (displayName) {
+    if (selector.$or) {
+      selector.$or.push({ displayName: { $eq: displayName } });
+    } else {
+      selector.displayName = { $eq: displayName };
+    }
+  }
+
+  const result = await cloudant.findDocuments('maia_users', { selector });
+  return result?.docs || [];
+};
+
+const getDeepLinkUserById = async (userId) => {
+  if (!userId) return null;
+  return await cloudant.getDocument('maia_users', userId);
+};
+
+const attachShareToUserDoc = (userDoc, shareId) => {
+  const shares = ensureArray(userDoc.deepLinkShareIds);
+  if (shareId && !shares.includes(shareId)) {
+    shares.push(shareId);
+  }
+  userDoc.deepLinkShareIds = shares;
+  return shares;
+};
+
+const setDeepLinkSession = (req, userDoc, shareId, chatId) => {
+  if (!req.session) return;
+  req.session.isDeepLink = true;
+  req.session.deepLinkUserId = userDoc.userId;
+  req.session.deepLinkDisplayName = userDoc.displayName || userDoc.userId;
+  req.session.deepLinkShareIds = ensureArray(userDoc.deepLinkShareIds);
+  if (shareId) {
+    if (!req.session.deepLinkShareIds.includes(shareId)) {
+      req.session.deepLinkShareIds.push(shareId);
+    }
+    req.session.deepLinkShareId = shareId;
+  }
+  if (chatId) {
+    req.session.deepLinkChatId = chatId;
+  }
+  req.session.deepLinkAuthenticatedAt = new Date().toISOString();
+  req.session.deepLinkExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+};
+
+const isDeepLinkSession = (req) => !!req.session?.isDeepLink;
+
+const generateDeepLinkUserId = (nameSlug, shareId) => {
+  const randomPart = Math.random().toString(36).slice(2, 8);
+  const timePart = Date.now().toString(36);
+  const sharePart = (shareId || 'dl').toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 8);
+  return `${nameSlug}-DL-${sharePart}-${timePart}-${randomPart}`.toLowerCase();
+};
+
+// Deep link session check
+app.get('/api/deep-link/session', async (req, res) => {
+  try {
+    const shareId = req.query.shareId;
+
+    if (!shareId || typeof shareId !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Share ID is required',
+        error: 'MISSING_SHARE_ID'
+      });
+    }
+
+    const chat = await getChatByShareId(shareId);
+    if (!chat) {
+      return res.status(404).json({
+        success: false,
+        message: 'Shared chat not found',
+        error: 'CHAT_NOT_FOUND'
+      });
+    }
+
+    if (req.session?.userId) {
+      const deepLink = isDeepLinkSession(req);
+      const response = {
+        success: true,
+        authenticated: true,
+        deepLink,
+        user: {
+          userId: req.session.userId,
+          displayName: req.session.displayName || req.session.userId,
+          isDeepLink: deepLink
+        }
+      };
+
+      if (deepLink) {
+        if (!req.session.deepLinkShareIds?.includes(shareId)) {
+          req.session.deepLinkShareIds = ensureArray(req.session.deepLinkShareIds);
+          req.session.deepLinkShareIds.push(shareId);
+        }
+        req.session.deepLinkShareId = shareId;
+        req.session.deepLinkChatId = chat._id;
+        response.deepLinkInfo = {
+          shareId,
+          chatId: chat._id
+        };
+      } else {
+        response.deepLinkInfo = {
+          shareId,
+          chatId: chat._id
+        };
+      }
+
+      return res.json(response);
+    } else if (isDeepLinkSession(req) && req.session.deepLinkUserId) {
+      const shareIds = ensureArray(req.session.deepLinkShareIds);
+      return res.json({
+        success: true,
+        authenticated: true,
+        deepLink: true,
+        user: {
+          userId: req.session.deepLinkUserId,
+          displayName: req.session.deepLinkDisplayName || req.session.deepLinkUserId,
+          isDeepLink: true
+        },
+        deepLinkInfo: {
+          shareId: req.session.deepLinkShareId || shareId,
+          chatId: req.session.deepLinkChatId || null
+        }
+      });
+    }
+
+    const cookieUserId = req.cookies?.[DEEP_LINK_COOKIE];
+    if (cookieUserId) {
+      const userDoc = await getDeepLinkUserById(cookieUserId);
+      if (userDoc && userDoc.isDeepLink) {
+        attachShareToUserDoc(userDoc, shareId);
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', userDoc);
+
+        setDeepLinkSession(req, userDoc, shareId, chat._id);
+        res.cookie(DEEP_LINK_COOKIE, userDoc.userId, {
+          maxAge: DEEP_LINK_COOKIE_MAX_AGE,
+          httpOnly: true,
+          sameSite: 'lax'
+        });
+
+        return res.json({
+          success: true,
+          authenticated: true,
+          deepLink: true,
+          user: {
+            userId: userDoc.userId,
+            displayName: userDoc.displayName || userDoc.userId,
+            isDeepLink: true
+          },
+          deepLinkInfo: {
+            shareId,
+            chatId: chat._id
+          }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      authenticated: false,
+      needsRegistration: true
+    });
+  } catch (error) {
+    console.error('❌ Error checking deep-link session:', error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to verify deep-link session: ${error.message}`,
+      error: 'DEEPLINK_SESSION_ERROR'
+    });
+  }
+});
+
+// Deep link login / registration
+app.post('/api/deep-link/login', async (req, res) => {
+  try {
+    const { shareId, name, email, emailPreference } = req.body || {};
+
+    if (!shareId || typeof shareId !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Share ID is required',
+        error: 'MISSING_SHARE_ID'
+      });
+    }
+
+    const chat = await getChatByShareId(shareId);
+    if (!chat) {
+      return res.status(404).json({
+        success: false,
+        message: 'Shared chat not found',
+        error: 'CHAT_NOT_FOUND'
+      });
+    }
+
+    const rawName = typeof name === 'string' ? name.trim() : '';
+    if (!rawName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name is required',
+        error: 'MISSING_NAME'
+      });
+    }
+
+    const normalizedNameKey = sanitizeName(rawName).toLowerCase();
+    if (!normalizedNameKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'Name is invalid',
+        error: 'INVALID_NAME'
+      });
+    }
+
+    const normalizedEmail = typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
+    const nameSlug = slugifyName(rawName);
+
+    const existingMatches = await findDeepLinkUsersByDisplayName(rawName, normalizedNameKey);
+    let userDoc = existingMatches[0] || null;
+
+    const cookieUserId = req.cookies?.[DEEP_LINK_COOKIE];
+    if (!userDoc && cookieUserId) {
+      const cookieUser = await getDeepLinkUserById(cookieUserId);
+      if (cookieUser && cookieUser.isDeepLink) {
+        userDoc = cookieUser;
+      }
+    }
+
+    if (!userDoc) {
+      const userId = generateDeepLinkUserId(nameSlug, shareId);
+      userDoc = {
+        _id: userId,
+        userId,
+        type: 'user',
+        isDeepLink: true,
+        displayName: rawName,
+        deepLinkNameKey: normalizedNameKey,
+        email: normalizedEmail,
+        deepLinkShareIds: [shareId],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        domain: 'deeplink'
+      };
+    } else {
+      // Existing user: handle email differences
+      const existingEmail = userDoc.email ? String(userDoc.email).toLowerCase() : null;
+      if (normalizedEmail && existingEmail && existingEmail !== normalizedEmail) {
+        if (!emailPreference) {
+          return res.status(409).json({
+            success: false,
+            conflict: true,
+            existingEmail: userDoc.email,
+            message: 'Email differs from previous registration'
+          });
+        }
+
+        if (emailPreference === 'new') {
+          userDoc.email = normalizedEmail;
+        }
+      } else if (normalizedEmail && !existingEmail) {
+        userDoc.email = normalizedEmail;
+      }
+
+      userDoc.displayName = rawName;
+      userDoc.deepLinkNameKey = normalizedNameKey;
+      attachShareToUserDoc(userDoc, shareId);
+      userDoc.updatedAt = new Date().toISOString();
+    }
+
+    await cloudant.saveDocument('maia_users', userDoc);
+
+    setDeepLinkSession(req, userDoc, shareId, chat._id);
+    res.cookie(DEEP_LINK_COOKIE, userDoc.userId, {
+      maxAge: DEEP_LINK_COOKIE_MAX_AGE,
+      httpOnly: true,
+      sameSite: 'lax'
+    });
+
+    res.json({
+      success: true,
+      authenticated: true,
+      deepLink: true,
+      user: {
+        userId: userDoc.userId,
+        displayName: userDoc.displayName || userDoc.userId,
+        isDeepLink: true
+      },
+      deepLinkInfo: {
+        shareId,
+        chatId: chat._id
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error processing deep-link login:', error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to process deep-link login: ${error.message}`,
+      error: 'DEEPLINK_LOGIN_ERROR'
+    });
+  }
+});
+
 // Agent sync endpoint - find and configure user's agent
 app.post('/api/sync-agent', async (req, res) => {
   try {
@@ -1750,7 +2091,26 @@ async function provisionUserAsync(userId, token) {
     }
 
     if (deploymentStatus !== 'STATUS_RUNNING') {
-      throw new Error(`Agent deployment timed out after ${attempts} attempts. Status: ${deploymentStatus}`);
+      let finalStatus = deploymentStatus;
+      try {
+        const agents = await agentClient.list();
+        const matchingAgent = agents.find(agent => agent.uuid === newAgent.uuid || agent.id === newAgent.uuid);
+        if (matchingAgent) {
+          finalStatus = matchingAgent.status || matchingAgent.state || finalStatus;
+          logProvisioning(userId, `ℹ️ Agent list status after timeout: ${finalStatus}`, 'info');
+        } else {
+          logProvisioning(userId, 'ℹ️ Agent not found in list after timeout check', 'warning');
+        }
+      } catch (statusError) {
+        logProvisioning(userId, `⚠️ Unable to verify agent status after timeout: ${statusError.message}`, 'warning');
+      }
+
+      if (finalStatus === 'STATUS_RUNNING' || finalStatus === 'RUNNING') {
+        deploymentStatus = finalStatus;
+        logProvisioning(userId, '✅ Agent reported as running in final verification step; continuing provisioning.', 'success');
+      } else {
+        throw new Error(`Agent deployment timed out after ${attempts} attempts. Status: ${deploymentStatus}. Final reported status: ${finalStatus}`);
+      }
     }
 
     updateStatus('Agent deployed', { 
@@ -2046,7 +2406,26 @@ async function provisionUserAsync(userId, token) {
 // Save group chat endpoint
 app.post('/api/save-group-chat', async (req, res) => {
   try {
-    const { chatHistory, uploadedFiles, currentUser, connectedKB } = req.body;
+    const { chatHistory, uploadedFiles, connectedKB } = req.body;
+    const sessionUserId = req.session?.userId;
+    const deepLinkSession = isDeepLinkSession(req);
+
+    if (deepLinkSession) {
+      return res.status(403).json({
+        success: false,
+        message: 'Deep link users cannot create new group chats',
+        error: 'DEEPLINK_FORBIDDEN'
+      });
+    }
+
+    const effectiveUserId = sessionUserId || req.body?.currentUser;
+    if (!effectiveUserId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        error: 'NOT_AUTHENTICATED'
+      });
+    }
     
     if (!chatHistory || chatHistory.length === 0) {
       return res.status(400).json({ 
@@ -2080,7 +2459,7 @@ app.post('/api/save-group-chat', async (req, res) => {
     }));
     
     // Generate _id starting with username
-    const userName = currentUser || 'anonymous';
+    const userName = effectiveUserId || 'anonymous';
     const randomId = Math.random().toString(36).substr(2, 9);
     const chatId = `${userName}-chat_${Date.now()}_${randomId}`;
     
@@ -2088,8 +2467,8 @@ app.post('/api/save-group-chat', async (req, res) => {
       _id: chatId,
       type: 'group_chat',
       shareId: shareId,
-      currentUser: currentUser,
-      patientOwner: currentUser,
+      currentUser: effectiveUserId,
+      patientOwner: effectiveUserId,
       connectedKB: connectedKB || 'No KB connected',
       chatHistory,
       uploadedFiles: processedFiles,
@@ -2105,7 +2484,7 @@ app.post('/api/save-group-chat', async (req, res) => {
     
     // Set workflowStage to link_stored when chat is saved with shareId
     try {
-      const userDoc = await cloudant.getDocument('maia_users', currentUser);
+      const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
       if (userDoc) {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
@@ -2119,7 +2498,9 @@ app.post('/api/save-group-chat', async (req, res) => {
       success: true, 
       chatId: result.id,
       shareId: shareId,
-      message: 'Group chat saved successfully' 
+      message: 'Group chat saved successfully',
+      result,
+      shareUrl: `${process.env.PUBLIC_APP_URL || 'http://localhost:5173'}/?share=${shareId}`
     });
   } catch (error) {
     console.error('❌ Save group chat error:', error);
@@ -2135,7 +2516,9 @@ app.post('/api/save-group-chat', async (req, res) => {
 app.put('/api/save-group-chat/:chatId', async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { chatHistory, uploadedFiles, currentUser, connectedKB, shareId } = req.body;
+    const { chatHistory, uploadedFiles, connectedKB, shareId } = req.body;
+    const sessionUserId = req.session?.userId;
+    const deepLinkSession = isDeepLinkSession(req);
 
     if (!chatId) {
       return res.status(400).json({
@@ -2153,14 +2536,6 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
       });
     }
 
-    if (!currentUser) {
-      return res.status(400).json({
-        success: false,
-        message: 'Current user is required to update chat',
-        error: 'MISSING_USER_ID'
-      });
-    }
-
     const existingChat = await cloudant.getDocument('maia_chats', chatId);
 
     if (!existingChat) {
@@ -2171,7 +2546,33 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
       });
     }
 
-    if (existingChat.currentUser && existingChat.currentUser !== currentUser) {
+    const effectiveUserId = sessionUserId || req.body?.currentUser || existingChat.currentUser;
+
+    if (!effectiveUserId) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not authenticated',
+        error: 'NOT_AUTHENTICATED'
+      });
+    }
+
+    if (deepLinkSession) {
+      const allowedShares = ensureArray(req.session.deepLinkShareIds || []);
+      if (!allowedShares.includes(existingChat.shareId)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Deep link users may only update the shared chat',
+          error: 'DEEPLINK_FORBIDDEN'
+        });
+      }
+      if (shareId && shareId !== existingChat.shareId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot change share link for deep link chat',
+          error: 'DEEPLINK_SHARE_MISMATCH'
+        });
+      }
+    } else if (existingChat.currentUser && existingChat.currentUser !== effectiveUserId) {
       return res.status(403).json({
         success: false,
         message: 'You do not have permission to update this chat',
@@ -2196,12 +2597,13 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
     existingChat.messageCount = chatHistory.length;
     existingChat.participantCount = chatHistory.filter(msg => msg.role === 'user').length;
     existingChat.shareId = shareId || existingChat.shareId;
+    existingChat.currentUser = effectiveUserId;
 
     await cloudant.saveDocument('maia_chats', existingChat);
 
     // Keep workflowStage in sync when chats are updated
     try {
-      const userDoc = await cloudant.getDocument('maia_users', currentUser);
+      const userDoc = await cloudant.getDocument('maia_users', effectiveUserId);
       if (userDoc) {
         userDoc.workflowStage = 'link_stored';
         await cloudant.saveDocument('maia_users', userDoc);
@@ -2230,22 +2632,54 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
 app.get('/api/user-chats', async (req, res) => {
   try {
     const { userId } = req.query;
+    const sessionUserId = req.session?.userId;
+    const deepLinkSession = isDeepLinkSession(req);
     
-    if (!userId) {
-      return res.status(400).json({ 
+    if (!sessionUserId && !userId) {
+      return res.status(401).json({
         success: false, 
-        message: 'User ID is required',
-        error: 'MISSING_USER_ID'
+        message: 'User not authenticated',
+        error: 'NOT_AUTHENTICATED'
       });
     }
 
-    // Get all chats for this user from maia_chats
+    const effectiveUserId = sessionUserId || userId;
+
+    if (sessionUserId && userId && sessionUserId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot request chats for another user',
+        error: 'CHAT_ACCESS_FORBIDDEN'
+      });
+    }
+
+    if (deepLinkSession) {
+      const shareId = req.session.deepLinkShareId;
+      const chatId = req.session.deepLinkChatId;
+      const chats = [];
+      if (chatId) {
+        const chat = await cloudant.getDocument('maia_chats', chatId);
+        if (chat && ensureArray(req.session.deepLinkShareIds).includes(chat.shareId)) {
+          chats.push(chat);
+        }
+      } else if (shareId) {
+        const chat = await getChatByShareId(shareId);
+        if (chat) {
+          chats.push(chat);
+        }
+      }
+
+      return res.json({
+        success: true,
+        chats,
+        count: chats.length
+      });
+    }
+
     const allChats = await cloudant.getAllDocuments('maia_chats');
-    
-    // Filter to only chats owned by this user (by _id prefix)
-    const userChats = allChats.filter(chat => chat._id.startsWith(`${userId}-`));
-    
-    console.log(`✅ Found ${userChats.length} chats for user ${userId}`);
+    const userChats = allChats.filter(chat => chat._id.startsWith(`${effectiveUserId}-`));
+
+    console.log(`✅ Found ${userChats.length} chats for user ${effectiveUserId}`);
     
     res.json({
       success: true,
@@ -2277,6 +2711,19 @@ app.get('/api/load-chat/:chatId', async (req, res) => {
       });
     }
     
+    if (isDeepLinkSession(req)) {
+      const allowedShares = ensureArray(req.session.deepLinkShareIds);
+      const allowedChatId = req.session.deepLinkChatId;
+      if (chat._id !== allowedChatId && !allowedShares.includes(chat.shareId)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Deep link users may only access the shared chat',
+          error: 'DEEPLINK_FORBIDDEN'
+        });
+      }
+      req.session.deepLinkChatId = chat._id;
+    }
+    
     res.json({
       success: true,
       chat: chat
@@ -2304,9 +2751,7 @@ app.get('/api/load-chat-by-share/:shareId', async (req, res) => {
       });
     }
     
-    // Get all chats and find the one with matching shareId
-    const allChats = await cloudant.getAllDocuments('maia_chats');
-    const chat = allChats.find(c => c.shareId === shareId);
+    const chat = await getChatByShareId(shareId);
     
     if (!chat) {
       return res.status(404).json({ 
@@ -2314,6 +2759,18 @@ app.get('/api/load-chat-by-share/:shareId', async (req, res) => {
         message: 'Chat not found',
         error: 'CHAT_NOT_FOUND'
       });
+    }
+    
+    if (isDeepLinkSession(req)) {
+      const allowedShares = ensureArray(req.session.deepLinkShareIds);
+      if (!allowedShares.includes(shareId)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Deep link users may only access the shared chat',
+          error: 'DEEPLINK_FORBIDDEN'
+        });
+      }
+      req.session.deepLinkChatId = chat._id;
     }
     
     res.json({

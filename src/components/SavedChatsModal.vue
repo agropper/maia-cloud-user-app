@@ -63,6 +63,7 @@
                   color="negative"
                   @click.stop="handleDeleteChat(chat._id)"
                   title="Delete chat"
+                  v-if="!props.isDeepLinkUser"
                 />
               </div>
             </div>
@@ -93,6 +94,7 @@ interface SavedChat {
 interface Props {
   modelValue: boolean;
   currentUser: string;
+  isDeepLinkUser?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -113,7 +115,12 @@ const loadSavedChats = async () => {
   error.value = '';
 
   try {
-    const response = await fetch(`/api/user-chats?userId=${encodeURIComponent(props.currentUser)}`);
+    const endpoint = props.isDeepLinkUser
+      ? '/api/user-chats'
+      : `/api/user-chats?userId=${encodeURIComponent(props.currentUser)}`;
+    const response = await fetch(endpoint, {
+      credentials: 'include'
+    });
     if (!response.ok) {
       throw new Error(`Failed to fetch chats: ${response.statusText}`);
     }
@@ -128,7 +135,9 @@ const loadSavedChats = async () => {
 
 const openChat = async (chat: SavedChat) => {
   try {
-    const response = await fetch(`/api/load-chat/${chat._id}`);
+    const response = await fetch(`/api/load-chat/${chat._id}`, {
+      credentials: 'include'
+    });
     if (!response.ok) {
       throw new Error(`Failed to load chat: ${response.statusText}`);
     }

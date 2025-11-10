@@ -286,6 +286,11 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       if (err) {
         return res.status(500).json({ error: 'Failed to sign out' });
       }
+      try {
+        res.clearCookie('maia_deep_link_user');
+      } catch (cookieError) {
+        console.warn('Unable to clear deep-link cookie on sign-out:', cookieError);
+      }
       
       // Log logout
       if (userId) {
@@ -312,7 +317,15 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       user: {
         userId: req.session.userId,
         username: req.session.username,
-        displayName: req.session.displayName
+        displayName: req.session.displayName,
+        isDeepLink: !!req.session.isDeepLink,
+        deepLinkInfo: req.session.isDeepLink ? {
+          shareIds: Array.isArray(req.session.deepLinkShareIds)
+            ? req.session.deepLinkShareIds
+            : (req.session.deepLinkShareIds ? [req.session.deepLinkShareIds] : []),
+          activeShareId: req.session.deepLinkShareId || null,
+          chatId: req.session.deepLinkChatId || null
+        } : null
       }
     });
   });
