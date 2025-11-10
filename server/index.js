@@ -2798,7 +2798,7 @@ app.get('/api/user-chats', async (req, res) => {
     const sessionUserId = req.session?.userId;
     const deepLinkSession = isDeepLinkSession(req);
     
-    if (!sessionUserId && !userId) {
+    if (!sessionUserId && !userId && !deepLinkSession) {
       return res.status(401).json({
         success: false, 
         message: 'User not authenticated',
