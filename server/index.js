@@ -2254,11 +2254,58 @@ async function provisionUserAsync(userId, token) {
       }
     }
 
-    updateStatus('Agent deployed', { 
+    updateStatus('Agent deployed', {
       status: deploymentStatus,
       endpoint: agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null,
       attempts
     });
+
+    // Ensure deployment endpoint becomes available
+    let agentEndpointUrl = agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null;
+    if (!agentEndpointUrl) {
+      updateStatus('Waiting for deployment endpoint...');
+      logProvisioning(userId, '📡 Deployment running but endpoint not yet available. Polling for endpoint...', 'info');
+
+      const endpointAttempts = 10; // 5 minutes max (10 attempts @ 30s interval)
+      const endpointIntervalMs = 30000;
+      let endpointReady = false;
+
+      for (let attempt = 0; attempt < endpointAttempts; attempt++) {
+        if (attempt > 0) {
+          await new Promise(resolve => setTimeout(resolve, endpointIntervalMs));
+        }
+
+        try {
+          const refreshedDetails = await agentClient.get(newAgent.uuid);
+          const refreshedEndpoint = refreshedDetails?.deployment?.url ? `${refreshedDetails.deployment.url}/api/v1` : null;
+          logProvisioning(
+            userId,
+            `📡 Agent endpoint poll (${attempt + 1}/${endpointAttempts}): ${refreshedEndpoint || 'pending'}`,
+            'info'
+          );
+
+          if (refreshedEndpoint) {
+            agentDetails = refreshedDetails;
+            agentEndpointUrl = refreshedEndpoint;
+            endpointReady = true;
+            break;
+          }
+        } catch (endpointError) {
+          logProvisioning(
+            userId,
+            `⚠️ Endpoint poll (${attempt + 1}/${endpointAttempts}) failed: ${endpointError.message}`,
+            'warning'
+          );
+        }
+      }
+
+      if (!endpointReady || !agentEndpointUrl) {
+        logProvisioning(userId, '❌ Agent deployment never exposed an endpoint URL', 'error');
+        throw new Error('Agent deployment did not expose an endpoint within the expected time');
+      }
+
+      updateStatus('Deployment endpoint ready', { endpoint: agentEndpointUrl });
+    }
 
     // Set workflowStage to agent_deployed when deployment reaches STATUS_RUNNING
     userDoc = await updateUserDoc({ workflowStage: 'agent_deployed' });
@@ -2419,10 +2466,9 @@ async function provisionUserAsync(userId, token) {
     let testResult = null;
     try {
       const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
-      const agentEndpoint = agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null;
       
-      if (agentEndpoint) {
-        const testProvider = new DigitalOceanProvider(apiKey, { baseURL: agentEndpoint });
+      if (agentEndpointUrl) {
+        const testProvider = new DigitalOceanProvider(apiKey, { baseURL: agentEndpointUrl });
         const modelName = agentDetails?.model?.inference_name || agentDetails?.model?.name || 'unknown';
         
         testResult = await testProvider.chat(
@@ -2445,13 +2491,12 @@ async function provisionUserAsync(userId, token) {
     // Step 6: Update User Document (before verification)
     updateStatus('Updating user document...');
     
-    const agentEndpoint = agentDetails?.deployment?.url ? `${agentDetails.deployment.url}/api/v1` : null;
     const agentModelName = agentDetails?.model?.inference_name || agentDetails?.model?.name || null;
     
     userDoc = await updateUserDoc((latestDoc) => {
       const docClone = { ...latestDoc };
       const timestamp = new Date().toISOString();
-      const endpointToStore = agentEndpoint || docClone.agentEndpoint || null;
+      const endpointToStore = agentEndpointUrl || docClone.agentEndpoint || null;
       const modelNameToStore = agentModelName || docClone.agentModelName || null;
       const defaultProfileKey = docClone.agentProfileDefaultKey || 'default';
 
