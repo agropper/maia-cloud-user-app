@@ -356,6 +356,7 @@ const props = defineProps<Props>();
 
 const emit = defineEmits<{
   'sign-out': [];
+  'update:deepLinkInfo': [DeepLinkInfo | null];
 }>();
 
 const providers = ref<string[]>([]);
@@ -387,8 +388,17 @@ const lastGroupSaveSnapshot = ref<string | null>(null);
 const hasLoadedDeepLinkChat = ref(false);
 
 const isDeepLink = computed(() => !!props.isDeepLinkUser);
-const deepLinkShareId = computed(() => props.deepLinkInfo?.shareId || null);
-const deepLinkChatId = computed(() => props.deepLinkInfo?.chatId || null);
+const deepLinkInfoLocal = ref<DeepLinkInfo | null>(props.deepLinkInfo || null);
+
+watch(
+  () => props.deepLinkInfo,
+  (newInfo) => {
+    deepLinkInfoLocal.value = newInfo || deepLinkInfoLocal.value;
+  }
+);
+
+const deepLinkShareId = computed(() => deepLinkInfoLocal.value?.shareId || null);
+const deepLinkChatId = computed(() => deepLinkInfoLocal.value?.chatId || null);
 const canAccessMyStuff = computed(() => !isDeepLink.value && !props.user?.isDeepLink);
 
 type UploadedFilePayload = {
@@ -437,6 +447,8 @@ const currentChatSnapshot = computed(() => JSON.stringify(getComparableChatState
 
 const canSaveLocally = computed(() => currentChatSnapshot.value !== lastLocalSaveSnapshot.value);
 const canSaveToGroup = computed(() => currentChatSnapshot.value !== lastGroupSaveSnapshot.value);
+
+const userResourceStatus = ref<{ hasAgent: boolean; kbStatus: string; hasKB: boolean } | null>(null);
 
 watch(
   () => props.user?.userId,
@@ -505,6 +517,9 @@ const getProviderKey = (label: string) => {
   return entry ? entry[0] : label.toLowerCase();
 };
 
+const isPrivateAISelected = computed(() => getProviderKey(selectedProvider.value) === 'digitalocean');
+const PRIVATE_AI_DEFAULT_PROMPT = 'Click SEND to get the patient summary';
+
 // Helper functions for labels
 const getUserLabel = () => {
   return props.user?.userId || 'You';
@@ -562,6 +577,22 @@ const loadProviders = async () => {
     selectedProvider.value = providerLabels['digitalocean'] || 'Private AI';
   }
 };
+
+watch(
+  [isPrivateAISelected, () => messages.value.length, () => userResourceStatus.value?.hasAgent, () => userResourceStatus.value?.kbStatus],
+  ([isPrivate, messageCount, hasAgentRaw, kbStatusRaw]) => {
+    const hasAgent = Boolean(hasAgentRaw);
+    const kbAttached = kbStatusRaw === 'attached';
+    const shouldPrefill = isPrivate && messageCount === 0 && hasAgent && kbAttached;
+
+    if (shouldPrefill && !inputMessage.value) {
+      inputMessage.value = PRIVATE_AI_DEFAULT_PROMPT;
+    } else if (!shouldPrefill && inputMessage.value === PRIVATE_AI_DEFAULT_PROMPT) {
+      inputMessage.value = '';
+    }
+  },
+  { immediate: true }
+);
 
 // Token estimation helper
 const estimateTokenCount = (text: string) => {
@@ -2016,7 +2047,8 @@ const loadSavedChatCount = async () => {
 
 async function loadDeepLinkChat(force = false) {
   const shareId = deepLinkShareId.value;
-  if (!shareId || (hasLoadedDeepLinkChat.value && !force)) return;
+  if (!shareId) return;
+  if (hasLoadedDeepLinkChat.value && !force) return;
 
   try {
     const response = await fetch(`/api/load-chat-by-share/${encodeURIComponent(shareId)}`, {
@@ -2060,6 +2092,11 @@ const handleChatSelected = (chat: any) => {
   currentSavedChatShareId.value = chat.shareId || null;
   if (deepLinkShareId.value) {
     hasLoadedDeepLinkChat.value = true;
+    deepLinkInfoLocal.value = {
+      shareId: deepLinkShareId.value,
+      chatId: chat._id || null
+    };
+    emit('update:deepLinkInfo', deepLinkInfoLocal.value);
   }
 
   // Load the chat history
@@ -2090,6 +2127,14 @@ const handleChatSelected = (chat: any) => {
     lastLocalSaveSnapshot.value = snapshot;
     lastGroupSaveSnapshot.value = snapshot;
   });
+
+  if (deepLinkShareId.value) {
+    deepLinkInfoLocal.value = {
+      shareId: deepLinkShareId.value,
+      chatId: chat._id || null
+    };
+    emit('update:deepLinkInfo', deepLinkInfoLocal.value);
+  }
 };
 
 // Reset chat when needed (kept for reference)
@@ -2309,11 +2354,17 @@ const updateContextualTip = async () => {
 
     if (!userResponse.ok) {
       contextualTip.value = 'Unable to load status';
+      userResourceStatus.value = null;
       return;
     }
 
     const userData = await userResponse.json();
     const workflowStage = userData.workflowStage || null;
+    userResourceStatus.value = {
+      hasAgent: !!userData.hasAgent,
+      kbStatus: userData.kbStatus || 'none',
+      hasKB: !!userData.hasKB
+    };
     
     // Check if workflowStage is 'indexing' (even if frontend polling isn't active)
     if (workflowStage === 'indexing') {
@@ -2344,6 +2395,7 @@ const updateContextualTip = async () => {
   } catch (error) {
     console.error('Failed to update contextual tip:', error);
     contextualTip.value = 'Error loading status';
+    userResourceStatus.value = null;
   }
 };
 

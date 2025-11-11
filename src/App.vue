@@ -72,6 +72,7 @@
             :is-deep-link-user="isDeepLinkUser"
             :deep-link-info="deepLinkInfo"
             @sign-out="handleSignOut"
+            @update:deep-link-info="handleDeepLinkInfoUpdate"
           />
         </div>
       </q-page>
@@ -139,15 +140,15 @@ const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = nul
 };
 
 const handleAuthenticated = (userData: any) => {
-  setAuthenticatedUser(userData);
+  const pendingDeepLink =
+    deepLinkShareId.value
+      ? { shareId: deepLinkShareId.value, chatId: null }
+      : null;
+  setAuthenticatedUser(userData, pendingDeepLink);
 };
 
 const handleDeepLinkAuthenticated = (payload: { user: User; deepLinkInfo: DeepLinkInfo }) => {
   setAuthenticatedUser({ ...payload.user, isDeepLink: true, deepLinkInfo: payload.deepLinkInfo }, payload.deepLinkInfo);
-  if (payload.deepLinkInfo?.shareId && window.location.search.indexOf(`share=${payload.deepLinkInfo.shareId}`) === -1) {
-    const normalizedUrl = `${window.location.origin}/?share=${encodeURIComponent(payload.deepLinkInfo.shareId)}${window.location.hash}`;
-    window.history.replaceState({}, '', normalizedUrl);
-  }
   showDeepLinkAccess.value = false;
   deepLinkLoading.value = false;
   deepLinkError.value = '';
@@ -212,6 +213,34 @@ const handleSignOut = async () => {
   }
 };
 
+const handleDeepLinkInfoUpdate = (info: DeepLinkInfo | null) => {
+  if (info?.shareId) {
+    deepLinkShareId.value = info.shareId;
+  }
+  deepLinkInfo.value = info;
+};
+
+const hydrateDeepLinkSession = async (share: string) => {
+  try {
+    const sessionResponse = await fetch(`/api/deep-link/session?shareId=${encodeURIComponent(share)}`, {
+      credentials: 'include'
+    });
+    if (sessionResponse.ok) {
+      const sessionResult = await sessionResponse.json();
+      if (sessionResult.authenticated && sessionResult.user) {
+        setAuthenticatedUser(
+          { ...sessionResult.user, isDeepLink: !!sessionResult.deepLink, deepLinkInfo: sessionResult.deepLinkInfo || null },
+          sessionResult.deepLinkInfo || { shareId: share, chatId: null }
+        );
+        return true;
+      }
+    }
+  } catch (sessionError) {
+    console.warn('Unable to hydrate deep-link session:', sessionError);
+  }
+  return false;
+};
+
 onMounted(async () => {
   let share: string | null = null;
   const params = new URLSearchParams(window.location.search);
@@ -225,11 +254,6 @@ onMounted(async () => {
       const newUrl = `${window.location.origin}/?share=${encodeURIComponent(share)}${window.location.hash}`;
       window.history.replaceState({}, '', newUrl);
     }
-  }
-
-  if (share) {
-    deepLinkShareId.value = share;
-    showDeepLinkAccess.value = true;
   }
 
   // Check if user is already authenticated
@@ -258,6 +282,12 @@ onMounted(async () => {
   }
 
   if (share) {
+    deepLinkShareId.value = share;
+    const sessionHydrated = await hydrateDeepLinkSession(share);
+    if (sessionHydrated) {
+      return;
+    }
+    showDeepLinkAccess.value = true;
     await checkDeepLinkSession(share);
   }
 });

@@ -1,211 +1,114 @@
 # maia-cloud-user-app
 
-Authenticated User app for MAIA (Medical AI Assistant) - `user.agropper.xyz`
+Authenticated user portal for MAIA (Medical AI Assistant). Available at **https://maia.agropper.xyz**.
 
-## Purpose
+## What’s Included Today
 
-Simplified, maintainable user-facing app with passkey authentication, chat interface, agent management, and knowledge base operations.
+### One-click provisioning
+- Passkey registration notifies the admin automatically.
+- The admin receives a provisioning link; clicking it provisioned new users end‑to‑end:
+  - DigitalOcean agent creation, deployment and health check.
+  - Spaces folder structure (root, archived, KB).
+  - Agent API key generation and storage.
+  - Workflow stages updated (`request_sent → approved → agent_named → agent_deployed`).
 
-## Local Development
+### Knowledge Base automation
+- Users import PDFs directly into their account; text is extracted automatically.
+- “Update and Index KB”:
+  - Creates or syncs the DO Knowledge Base.
+  - Registers the correct Spaces prefix as the data source.
+  - Starts indexing and polls DO every 30 s until tokens/files are reported or timeout.
+  - Auto-attaches the KB to the user’s agent.
+  - Generates a fresh patient summary once indexing completes and stores it in Cloudant.
+- Indexing state and file lists stay consistent through conflict-safe Cloudant updates.
 
-### Prerequisites
+### Deep-link guest access
+- Share any saved chat via deep links.
+- Guests join with a lightweight name/email form; sessions persist in Cloudant without affecting the owner’s passkey session.
+- Deep-link users see the shared chat only, can request context actions (e.g., patient summary once allowed), and stay isolated from owner settings.
 
-- Node.js 18+ 
-- npm
-- Cloudant credentials
-- DigitalOcean API token (optional for basic testing)
-- Resend API key (for registration email notifications)
+### Chat + File interface
+- Streaming chat with multiple providers (DigitalOcean Private AI, Anthropic, OpenAI, Gemini, DeepSeek).
+- PDFs can be viewed, paged, and parsed (selectable text layer preserved).
+- “Save Locally” PDF exports retain chat formatting and markdown.
 
-### Setup
+### Observability & Safety
+- Sessions stored in Cloudant with `userId` or `deeplink_*` IDs for auditability.
+- Authentication events logged to `maia_audit_log`.
+- Environment-driven configuration (Cloudant, DO GenAI/Spaces, Resend email, etc.).
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/agropper/maia-cloud-user-app.git
-   cd maia-cloud-user-app
-   ```
+## Quick Start (local)
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
-
-3. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
-
-4. **Copy libraries** (until we publish npm packages)
-   ```bash
-   # Libraries need to be in ../lib-maia-do-client, ../lib-maia-cloudant, ../lib-maia-passkey
-   # Or copy them to ./lib/ manually
-   ```
-
-### Running Locally
-
-**Terminal 1: Start backend**
 ```bash
-npm run start
-# Server runs on http://localhost:3001
+git clone https://github.com/agropper/maia-cloud-user-app.git
+cd maia-cloud-user-app
+npm install
+cp .env.example .env   # fill in Cloudant, DO, Resend, etc.
+npm run dev            # starts Vite on http://localhost:5173
+npm run start          # (in another terminal) backend on http://localhost:3001
 ```
 
-**Terminal 2: Start frontend dev server**
+Health check:
+
 ```bash
-npm run dev
-# Frontend runs on http://localhost:5173
+curl http://localhost:3001/health
 ```
 
-**Open in browser:**
+## Key Environment Variables
+
 ```
-http://localhost:5173
-```
+# Passkeys
+PASSKEY_RPID=maia.agropper.xyz
+PASSKEY_ORIGIN=https://maia.agropper.xyz
 
-### Testing
+# Cloudant
+CLOUDANT_URL=...
+CLOUDANT_USERNAME=...
+CLOUDANT_PASSWORD=...
 
-1. **Test backend APIs**
-   ```bash
-   node test-backend.js      # Tests Cloudant, Passkey, DO clients
-   node test-do-integration.js  # Tests DigitalOcean integration
-   ```
-
-2. **Health check**
-   ```bash
-   curl http://localhost:3001/health
-   ```
-
-3. **Test authentication**
-   - Open http://localhost:5173
-   - Click "Get Started"
-   - Click "Create New Passkey"
-   - Enter a User ID
-   - Complete passkey registration
-
-### Features
-
-✅ **Passkey Authentication**
-- Secure WebAuthn registration and login
-- No passwords needed
-- Browser-native security
-
-✅ **Clean Architecture**
-- 3 extracted libraries: DO client, Cloudant, Passkey
-- < 2,000 lines of code total
-- No legacy complexity or debug messages
-
-✅ **Registration Email Notifications**
-- Automatic admin notification when new users register
-- Provisioning deep link with secure token for user setup
-- Email sent via Resend API service
-- Graceful fallback if email service is not configured
-
-✅ **Chat Interface with Streaming**
-- Real-time streaming chat responses with incremental updates
-- Multiple AI providers (Anthropic Claude 4.5 supported)
-- Clean, full-width interface with anchored bottom toolbar
-- File attachments support for PDFs and text files
-
-✅ **File Management**
-- PDF upload with text extraction via pdf-parse
-- Binary storage in DigitalOcean Spaces
-- PDF viewer modal with pagination and zoom controls
-- Text files automatically added to chat context
-- Selectable text layer in PDF viewer
-
-✅ **Production Ready**
-- Tested with real Cloudant and DigitalOcean APIs
-- Session management with Cloudant (sessions stored by userId for easy viewing)
-- Security audit logging for authentication events
-- Error handling and validation
-
-### Configuration
-
-`.env`:
-```
-# Passkey Configuration (local development)
-PASSKEY_RPID=localhost
-PASSKEY_ORIGIN=http://localhost:5173
-
-# Passkey Configuration (production)
-# PASSKEY_RPID=user.agropper.xyz
-# PASSKEY_ORIGIN=https://user.agropper.xyz
-
-# Cloudant Database
-CLOUDANT_URL=https://your-instance.cloudantnosqldb.appdomain.cloud
-CLOUDANT_USERNAME=apikey-v2-...
-CLOUDANT_PASSWORD=your-api-key
-
-# DigitalOcean API
-DIGITALOCEAN_TOKEN=dop_v1_...
+# DigitalOcean GenAI & Spaces
+DIGITALOCEAN_TOKEN=...
 DO_REGION=tor1
-
-# Server Configuration
-PORT=3001
-SESSION_SECRET=change-this-in-production
-NODE_ENV=development
-PUBLIC_APP_URL=http://localhost:3001
-
-# Email Service (Resend) - for admin notifications
-RESEND_API_KEY=re_...
-RESEND_FROM_EMAIL=noreply@yourdomain.com
-RESEND_ADMIN_EMAIL=admin@yourdomain.com
-
-# File Upload (DigitalOcean Spaces)
 DIGITALOCEAN_BUCKET=https://maia.tor1.digitaloceanspaces.com
-DIGITALOCEAN_AWS_ACCESS_KEY_ID=...
-DIGITALOCEAN_AWS_SECRET_ACCESS_KEY=...
+DIGITALOCEAN_AWS_ACCESS*=
 
-# Anthropic AI (for chat)
-ANTHROPIC_API_KEY=sk-ant-...
+# App + email
+PORT=3001
+PUBLIC_APP_URL=https://maia.agropper.xyz
+RESEND_API_KEY=...
+RESEND_FROM_EMAIL=...
+RESEND_ADMIN_EMAIL=...
+
+# Optional provider keys
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...
 ```
 
-**Note**: The server automatically creates `maia_sessions`, `maia_users`, and `maia_audit_log` databases on startup if they don't exist.
+The server will create `maia_sessions`, `maia_users`, and `maia_audit_log` automatically on startup.
 
-## Architecture
+## Architecture Notes
 
-### Session Management
-- Sessions stored in Cloudant with `userId` as document `_id` for easy viewing in dashboard
-- Session mapping documents maintain express-session compatibility
-- Automatic session expiration and cleanup
+- **Cloudant session store** keeps both owner and deep-link guest sessions with rehydrate support.
+- **DigitalOcean integrations**:
+  - `lib-maia-do-client` for agents/KB/indexing APIs.
+  - Agent provisioning waits for deployment endpoints before declaring success.
+  - KB automation handles creation, data-source linkage, indexing poll, auto-attach, and summary.
+- **Spaces file flow**:
+  - Upload → root (`userId/`).
+  - “Saved Files” dialog archives to `userId/archived/`.
+  - KB selections move into `userId/<kbName>/`.
+- **Background workers**:
+  - Indexing poller with timeout.
+  - Auto summary generation after indexing.
+  - Conflict-safe KB state persistence (retries on 409s).
 
-### Security Audit Log
-- All authentication events logged to `maia_audit_log` database
-- Event types: `login_success`, `login_failure`, `logout`, `passkey_registered`
-- Each log includes: userId, timestamp, IP address, user agent
-- Queryable in Cloudant dashboard for security audits
+## Development Checklist
 
-### Email Notifications
-- When a new user registers with passkey, an email notification is sent to the admin
-- Email contains user info and a secure provisioning deep link
-- Provisioning token is stored in the user document for secure access
-- Email service uses Resend API with graceful fallback if not configured
-- Admin can click the deep link to provision the user (create agent, Spaces folder, etc.)
+- [ ] Additional provider templates (OpenAI, Gemini, DeepSeek) with default configs.
+- [ ] Expanded deep-link permissions (read-only summary preview, attachments).
+- [ ] UI indicators for indexing progress per user.
+- [ ] Publish shared libraries (`lib-maia-*`) to npm once stable.
 
-### File Upload Architecture
-- Files uploaded as binary data to DigitalOcean Spaces
-- PDFs parsed on server using pdf-parse library
-- File metadata stored in user documents (`maia_users` database) in `files` array
-- Signed URLs generated for secure file access (7-day expiration)
-- PDF viewer uses @tato30/vue-pdf with pdfjs-dist for rendering
-- Selectable text layer enabled for PDF extraction
-- Files support KB tracking via `knowledgeBases` array
+---
 
-### Libraries Used
-- `lib-maia-do-client`: DigitalOcean GenAI API client
-- `lib-maia-cloudant`: Cloudant document operations and session store
-- `lib-maia-passkey`: WebAuthn/passkey authentication service
-- `lib-maia-chat`: Unified chat interface with streaming support
-- `pdf-parse`: PDF text extraction on server
-- `@tato30/vue-pdf`: PDF viewer component
-- `pdfjs-dist`: PDF.js for PDF rendering and text layer
-
-## Next Steps
-
-- [ ] Add more AI providers (OpenAI, Gemini, DeepSeek)
-- [ ] Add KB management UI
-- [ ] Add agent configuration
-- [ ] Implement knowledge base integration with chat
-- [ ] Deploy to DigitalOcean App Platform
-
-## Status
-
-✅ **MVP Complete** - Passkey authentication, chat with streaming, and file uploads working
+MAIA user portal is actively deployed to DigitalOcean App Platform. Open issues and feature requests are welcome. 👍

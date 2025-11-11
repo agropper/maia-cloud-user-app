@@ -1509,23 +1509,48 @@ const selectChat = async (chat: SavedChat) => {
 };
 
 const copyChatLink = (chat: SavedChat) => {
+  if (!chat.shareId) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'warning',
+        message: 'Create a deep link by saving this chat first.',
+        position: 'top',
+        timeout: 2000
+      });
+    }
+    return;
+  }
+
   const baseUrl = window.location.origin;
   const link = `${baseUrl}/chat/${chat.shareId}`;
-  navigator.clipboard.writeText(link).then(() => {
-    if ($q && typeof $q.notify === 'function') {
-    $q.notify({
-      type: 'positive',
-      message: 'Deep link copied to clipboard'
+
+  navigator.clipboard.writeText(link)
+    .then(() => {
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          type: 'positive',
+          message: 'Deep link copied to clipboard',
+          position: 'top',
+          timeout: 3000,
+          color: 'primary',
+          textColor: 'white'
+        });
+      } else {
+        alert('Deep link copied to clipboard');
+      }
+    })
+    .catch(() => {
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          type: 'negative',
+          message: 'Failed to copy link',
+          position: 'top',
+          timeout: 3000
+        });
+      } else {
+        alert('Failed to copy link');
+      }
     });
-    }
-  }).catch(() => {
-    if ($q && typeof $q.notify === 'function') {
-    $q.notify({
-      type: 'negative',
-      message: 'Failed to copy link'
-    });
-    }
-  });
 };
 
 const confirmDeleteChat = (chat: SavedChat) => {

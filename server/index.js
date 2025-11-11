@@ -910,6 +910,12 @@ app.get('/api/deep-link/session', async (req, res) => {
       return res.json(response);
     } else if (isDeepLinkSession(req) && req.session.deepLinkUserId) {
       const shareIds = ensureArray(req.session.deepLinkShareIds);
+    if (!shareIds.includes(shareId)) {
+      shareIds.push(shareId);
+    }
+    req.session.deepLinkShareIds = shareIds;
+    req.session.deepLinkShareId = shareId;
+    req.session.deepLinkChatId = chat._id;
       return res.json({
         success: true,
         authenticated: true,
@@ -920,8 +926,8 @@ app.get('/api/deep-link/session', async (req, res) => {
           isDeepLink: true
         },
         deepLinkInfo: {
-          shareId: req.session.deepLinkShareId || shareId,
-          chatId: req.session.deepLinkChatId || null
+        shareId,
+        chatId: chat._id
         }
       });
     }
@@ -2764,6 +2770,8 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
       });
     }
 
+    const isOwner = existingChat.patientOwner && existingChat.patientOwner === effectiveUserId;
+
     if (deepLinkSession) {
       const allowedShares = ensureArray(req.session.deepLinkShareIds || []);
       if (!allowedShares.includes(existingChat.shareId)) {
@@ -2781,11 +2789,13 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
         });
       }
     } else if (existingChat.currentUser && existingChat.currentUser !== effectiveUserId) {
-      return res.status(403).json({
-        success: false,
-        message: 'You do not have permission to update this chat',
-        error: 'CHAT_UPDATE_FORBIDDEN'
-      });
+      if (!isOwner) {
+        return res.status(403).json({
+          success: false,
+          message: 'You do not have permission to update this chat',
+          error: 'CHAT_UPDATE_FORBIDDEN'
+        });
+      }
     }
 
     const processedFiles = (uploadedFiles || []).map(file => ({
@@ -2805,7 +2815,9 @@ app.put('/api/save-group-chat/:chatId', async (req, res) => {
     existingChat.messageCount = chatHistory.length;
     existingChat.participantCount = chatHistory.filter(msg => msg.role === 'user').length;
     existingChat.shareId = shareId || existingChat.shareId;
-    existingChat.currentUser = effectiveUserId;
+    if (!deepLinkSession || isOwner) {
+      existingChat.currentUser = effectiveUserId;
+    }
 
     await cloudant.saveDocument('maia_chats', existingChat);
 
