@@ -3855,28 +3855,56 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     
     const { kbId, kbDetails } = kbSetupResult;
     
-    // Update user document with KB info
-    userDoc.kbId = kbId;
-    userDoc.kbIndexingNeeded = true;
-    userDoc.kbPendingFiles = filesInKB;
-    userDoc.kbIndexingStartedAt = new Date().toISOString();
-    
-    // Set kbCreatedAt if KB was just created
-    if (!userDoc.kbCreatedAt && kbDetails) {
-      userDoc.kbCreatedAt = new Date().toISOString();
-    }
-    
-    // KB now exists in DO - update connectedKBs array
-    if (!userDoc.connectedKBs || !Array.isArray(userDoc.connectedKBs)) {
-      userDoc.connectedKBs = [];
-    }
-    if (!userDoc.connectedKBs.includes(kbName)) {
-      userDoc.connectedKBs.push(kbName);
-    }
-    userDoc.connectedKB = kbName; // Legacy field
-    
-    // Save updated user document
-    await cloudant.saveDocument('maia_users', userDoc);
+    const persistKbState = async () => {
+      let retries = 3;
+      let docSaved = false;
+      let lastError = null;
+
+      while (retries > 0 && !docSaved) {
+        try {
+          const currentDoc = retries === 3 ? userDoc : await cloudant.getDocument('maia_users', userId);
+          if (!currentDoc) {
+            throw new Error('User document not found during KB update');
+          }
+
+          currentDoc.kbId = kbId;
+          currentDoc.kbIndexingNeeded = true;
+          currentDoc.kbPendingFiles = filesInKB;
+          currentDoc.kbIndexingStartedAt = new Date().toISOString();
+
+          if (!currentDoc.kbCreatedAt && kbDetails) {
+            currentDoc.kbCreatedAt = new Date().toISOString();
+          }
+
+          if (!Array.isArray(currentDoc.connectedKBs)) {
+            currentDoc.connectedKBs = [];
+          }
+          if (!currentDoc.connectedKBs.includes(kbName)) {
+            currentDoc.connectedKBs.push(kbName);
+          }
+          currentDoc.connectedKB = kbName; // Legacy field
+
+          await cloudant.saveDocument('maia_users', currentDoc);
+          userDoc = currentDoc;
+          docSaved = true;
+        } catch (err) {
+          lastError = err;
+          if (err.statusCode === 409 || err.error === 'conflict') {
+            retries -= 1;
+            if (retries === 0) {
+              console.error(`[KB AUTO] Document conflict while updating KB state for ${userId}: ${err.message}`);
+              throw err;
+            }
+            await new Promise(resolve => setTimeout(resolve, 200 * (4 - retries)));
+          } else {
+            throw err;
+          }
+        }
+      }
+      return userDoc;
+    };
+
+    userDoc = await persistKbState();
     
     
     // Return success immediately - polling happens in background
