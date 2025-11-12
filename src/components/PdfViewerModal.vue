@@ -103,6 +103,7 @@ interface Props {
     originalFile?: File;
     name?: string;
   };
+  initialPage?: number;
 }
 
 const props = defineProps<Props>();
@@ -223,11 +224,30 @@ const goToPage = () => {
 // Watch for file changes
 watch(() => props.file, (newFile) => {
   if (newFile && !isLoading.value) {
-    currentPage.value = 1;
+    currentPage.value = props.initialPage && props.initialPage > 0 ? props.initialPage : 1;
     totalPages.value = 0;
     loadPdfDocument();
   }
 }, { immediate: true });
+
+// Watch for modal opening and initialPage changes
+watch(() => [props.modelValue, props.initialPage], ([isOpen, initialPage]) => {
+  if (isOpen && props.file && initialPage && initialPage > 0) {
+    // Wait for PDF to load, then set the page
+    const checkAndSetPage = () => {
+      if (totalPages.value > 0) {
+        if (initialPage <= totalPages.value) {
+          currentPage.value = initialPage;
+          pageInput.value = String(initialPage);
+        }
+      } else {
+        // PDF not loaded yet, try again
+        setTimeout(checkAndSetPage, 100);
+      }
+    };
+    checkAndSetPage();
+  }
+});
 </script>
 
 <style scoped>

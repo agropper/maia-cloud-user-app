@@ -52,8 +52,9 @@
                 class="q-mt-xs q-pa-sm rounded-borders"
                 :class="msg.role === 'user' ? 'bg-blue-1' : 'bg-grey-2'"
                 style="display: inline-block; max-width: 80%;"
+                @click="handlePageLinkClick"
               >
-                <vue-markdown :source="msg.content" />
+                <div v-html="processPageReferences(msg.content)"></div>
                 <div class="q-mt-sm">
                   <q-btn
                     flat
@@ -207,6 +208,7 @@
                 outlined
                 dense
                 @keyup.enter="sendMessage"
+                @focus="clearPresetPrompt"
               >
                 <q-tooltip>Ask for Patient Summary to add it to the chat context and make it available to public AIs.</q-tooltip>
               </q-input>
@@ -278,6 +280,7 @@
     <PdfViewerModal
       v-model="showPdfViewer"
       :file="viewingFile || undefined"
+      :initial-page="pdfInitialPage"
     />
 
     <!-- Saved Chats Modal -->
@@ -299,6 +302,74 @@
       @indexing-finished="handleIndexingFinished"
       v-if="canAccessMyStuff"
     />
+
+    <!-- Document Chooser Dialog -->
+    <q-dialog v-model="showDocumentChooser" persistent>
+      <q-card style="min-width: 400px">
+        <q-card-section>
+          <div class="text-h6">Select Document</div>
+          <div class="text-caption text-grey q-mt-sm">
+            <span v-if="loadingUserFiles">Loading documents...</span>
+            <span v-else-if="uploadedFiles.filter(f => f.type === 'pdf').length > 0 || availableUserFiles.length > 0">
+              Please select which document to view.
+            </span>
+            <span v-else>No PDF documents available.</span>
+          </div>
+        </q-card-section>
+
+        <q-card-section>
+          <q-list v-if="!loadingUserFiles">
+            <!-- Show PDFs from current chat first -->
+            <q-item
+              v-for="file in uploadedFiles.filter(f => f.type === 'pdf')"
+              :key="file.id"
+              clickable
+              v-ripple
+              @click="handleDocumentSelected(file)"
+            >
+              <q-item-section avatar>
+                <q-icon name="description" color="primary" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>{{ file.name }}</q-item-label>
+                <q-item-label caption>From current chat</q-item-label>
+              </q-item-section>
+            </q-item>
+            
+            <!-- Show PDFs from user account -->
+            <q-item
+              v-for="file in availableUserFiles"
+              :key="file.bucketKey"
+              clickable
+              v-ripple
+              @click="handleDocumentSelected(file)"
+            >
+              <q-item-section avatar>
+                <q-icon name="description" color="secondary" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>{{ file.fileName }}</q-item-label>
+                <q-item-label caption>From your files</q-item-label>
+              </q-item-section>
+            </q-item>
+            
+            <q-item v-if="uploadedFiles.filter(f => f.type === 'pdf').length === 0 && availableUserFiles.length === 0">
+              <q-item-section>
+                <q-item-label class="text-grey">No PDF documents found</q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+          
+          <div v-else class="text-center q-pa-md">
+            <q-spinner-dots size="md" />
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right">
+          <q-btn flat label="Cancel" color="primary" @click="showDocumentChooser = false; pendingPageLink = null; availableUserFiles.value = []" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </div>
 </template>
 
@@ -369,6 +440,7 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const isUploadingFile = ref(false);
 const showPdfViewer = ref(false);
 const viewingFile = ref<UploadedFile | null>(null);
+const pdfInitialPage = ref<number | undefined>(undefined);
 const showSavedChatsModal = ref(false);
 const savedChatCount = ref(0);
 const showMyStuffDialog = ref(false);
@@ -379,6 +451,10 @@ const showDeleteDialog = ref(false);
 const messageToDelete = ref<Message | null>(null);
 const precedingUserMessage = ref<Message | null>(null);
 const chatMessagesRef = ref<HTMLElement | null>(null);
+const showDocumentChooser = ref(false);
+const pendingPageLink = ref<{ pageNum: number; bucketKey?: string } | null>(null);
+const availableUserFiles = ref<Array<{ fileName: string; bucketKey: string; fileType?: string }>>([]);
+const loadingUserFiles = ref(false);
 
 // Track owner's deep link Private AI access setting
 const ownerAllowDeepLinkPrivateAI = ref<boolean | null>(null);
@@ -500,6 +576,13 @@ watch(
   }
 );
 
+// Reset initial page when PDF viewer closes
+watch(() => showPdfViewer.value, (isOpen) => {
+  if (!isOpen) {
+    pdfInitialPage.value = undefined;
+  }
+});
+
 // Provider labels map
 const providerLabels: Record<string, string> = {
   digitalocean: 'Private AI',
@@ -522,6 +605,13 @@ const getProviderKey = (label: string) => {
 
 const isPrivateAISelected = computed(() => getProviderKey(selectedProvider.value) === 'digitalocean');
 const PRIVATE_AI_DEFAULT_PROMPT = 'Click SEND to get the patient summary';
+
+// Clear preset prompt when user clicks into the input
+function clearPresetPrompt() {
+  if (inputMessage.value === PRIVATE_AI_DEFAULT_PROMPT) {
+    inputMessage.value = '';
+  }
+}
 
 // Helper functions for labels
 const getUserLabel = () => {
@@ -1081,9 +1171,300 @@ const readFileAsText = (file: File): Promise<string> => {
   });
 };
 
-const viewFile = (file: UploadedFile) => {
+const viewFile = (file: UploadedFile, page?: number) => {
   viewingFile.value = file;
+  pdfInitialPage.value = page;
   showPdfViewer.value = true;
+};
+
+// Process markdown content to convert page references to clickable links
+// Strategy: Find "page"/"Page" + number in markdown, insert HTML links before parsing
+const processPageReferences = (content: string): string => {
+  const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
+  
+  // Debug: Find any instance of "page" or "Page" and show next 12 characters
+  const pageWordPattern = /(Page|page)/gi;
+  let debugMatch;
+  pageWordPattern.lastIndex = 0;
+  while ((debugMatch = pageWordPattern.exec(content)) !== null) {
+    const nextChars = content.substring(debugMatch.index, debugMatch.index + debugMatch[0].length + 12);
+    console.log(`[PDF LINK] Found "${debugMatch[0]}" at index ${debugMatch.index}, next 12 chars: "${nextChars}"`);
+  }
+  
+  // Find all occurrences of "page" or "Page" followed by a number
+  // Pattern matches: "Page 24", "page 24", "Page: 24", "page:24", "Page:** 24", etc.
+  // Match "Page" or "page" followed by any characters (including markdown) then digits
+  const pageReferencePattern = /(Page|page).*?(\d+)/gi;
+  const pageReferences: Array<{ fullMatch: string; pageWord: string; pageNum: number; index: number }> = [];
+  
+  let match;
+  pageReferencePattern.lastIndex = 0;
+  while ((match = pageReferencePattern.exec(content)) !== null) {
+    pageReferences.push({
+      fullMatch: match[0],
+      pageWord: match[1],
+      pageNum: parseInt(match[2], 10),
+      index: match.index
+    });
+  }
+  
+  if (pageReferences.length === 0) {
+    return markdownParser.render(content);
+  }
+  
+  // Find PDF filenames in the content
+  const pdfFilenamePattern = /([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/gi;
+  const pdfFilenames: Array<{ filename: string; index: number }> = [];
+  let filenameMatch;
+  pdfFilenamePattern.lastIndex = 0;
+  while ((filenameMatch = pdfFilenamePattern.exec(content)) !== null) {
+    pdfFilenames.push({ filename: filenameMatch[1], index: filenameMatch.index });
+  }
+  
+  // Process page references in reverse order to preserve indices
+  let processedContent = content;
+  
+  for (let i = pageReferences.length - 1; i >= 0; i--) {
+    const { fullMatch, pageNum, index } = pageReferences[i];
+    
+    // Skip if this text is already inside an HTML tag (to avoid double-linking)
+    const beforeMatch = processedContent.substring(Math.max(0, index - 50), index);
+    if (beforeMatch.includes('<a ') && !beforeMatch.includes('</a>')) {
+      continue;
+    }
+    
+    // Find the closest PDF filename before this page reference
+    let matchedFilename: string | null = null;
+    let matchedFile: UploadedFile | null = null;
+    
+    const filenameBefore = pdfFilenames.filter(f => f.index < index);
+    if (filenameBefore.length > 0) {
+      matchedFilename = filenameBefore[filenameBefore.length - 1].filename;
+      console.log(`[PDF LINK] Found page link "${fullMatch}" (page ${pageNum}), filename in bubble: "${matchedFilename}"`);
+      matchedFile = pdfFiles.find(f => {
+        const nameUpper = f.name?.toUpperCase();
+        const filenameUpper = matchedFilename!.toUpperCase();
+        return nameUpper === filenameUpper || 
+               nameUpper.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
+               filenameUpper.includes(nameUpper.replace(/\.(PDF|pdf)$/, ''));
+      }) || null;
+    }
+    
+    // Create the HTML link (markdown allows raw HTML)
+    let linkHtml: string;
+    if (matchedFile && matchedFilename) {
+      const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      linkHtml = `<a href="#" class="page-link" data-filename="${matchedFilename}" data-page="${pageNum}" data-bucket-key="${matchedFile.bucketKey || ''}">${escapedText}</a>`;
+    } else if (pdfFiles.length === 1) {
+      const singleFile = pdfFiles[0];
+      const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      linkHtml = `<a href="#" class="page-link" data-filename="${singleFile.name}" data-page="${pageNum}" data-bucket-key="${singleFile.bucketKey || ''}">${escapedText}</a>`;
+    } else {
+      // Check if filename found in bubble matches a file in availableUserFiles
+      let matchedUserFile: { fileName: string; bucketKey: string } | null = null;
+      if (matchedFilename) {
+        matchedUserFile = availableUserFiles.value.find(f => {
+          const fileUpper = f.fileName?.toUpperCase();
+          const filenameUpper = matchedFilename!.toUpperCase();
+          return fileUpper === filenameUpper || 
+                 fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
+                 filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+        }) || null;
+        
+        if (matchedUserFile) {
+          console.log(`[PDF LINK] Filename "${matchedFilename}" matches user file "${matchedUserFile.fileName}", skipping chooser`);
+        } else {
+          console.log(`[PDF LINK] Filename "${matchedFilename}" does not match any user file, will show chooser`);
+        }
+      }
+      
+      if (matchedUserFile && matchedFilename) {
+        // Found a match in user files - create direct link
+        const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        linkHtml = `<a href="#" class="page-link" data-filename="${matchedFilename}" data-page="${pageNum}" data-bucket-key="${matchedUserFile.bucketKey}">${escapedText}</a>`;
+      } else {
+        // No match - create chooser link
+        const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        linkHtml = `<a href="#" class="page-link page-link-chooser" data-page="${pageNum}">${escapedText}</a>`;
+      }
+    }
+    
+    // Replace the text in the markdown content
+    const before = processedContent.substring(0, index);
+    const after = processedContent.substring(index + fullMatch.length);
+    processedContent = before + linkHtml + after;
+  }
+  
+  return markdownParser.render(processedContent);
+};
+
+// Handle click on page link
+const handlePageLinkClick = (event: Event) => {
+  event.preventDefault();
+  const target = event.target as HTMLElement;
+  const link = target.closest('.page-link') as HTMLElement;
+  
+  if (!link) return;
+  
+  const pageNum = link.getAttribute('data-page');
+  if (!pageNum) return;
+  
+  const pageNumber = parseInt(pageNum, 10);
+  
+  // Check if this is a chooser link (no filename specified)
+  if (link.classList.contains('page-link-chooser')) {
+    const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
+    
+    // If we have PDFs in the current chat, use them
+    if (pdfFiles.length > 1) {
+      // Multiple PDFs in chat, show chooser with those
+      pendingPageLink.value = { pageNum: pageNumber };
+      showDocumentChooser.value = true;
+      return;
+    } else if (pdfFiles.length === 1) {
+      // Single PDF in chat, use it
+      viewFile(pdfFiles[0], pageNumber);
+      return;
+    }
+    
+    // No PDFs in current chat - check if filename in link matches a user file
+    const filename = link.getAttribute('data-filename');
+    if (filename) {
+      // Check availableUserFiles if already loaded
+      const matchedUserFile = availableUserFiles.value.find(f => {
+        const fileUpper = f.fileName?.toUpperCase();
+        const filenameUpper = filename.toUpperCase();
+        return fileUpper === filenameUpper || 
+               fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
+               filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+      });
+      
+      if (matchedUserFile) {
+        console.log(`[PDF LINK] Filename "${filename}" matches user file "${matchedUserFile.fileName}", skipping chooser`);
+        const userFile: UploadedFile = {
+          id: `user-file-${matchedUserFile.bucketKey}`,
+          name: matchedUserFile.fileName,
+          size: 0,
+          type: 'pdf',
+          content: '',
+          originalFile: null as any,
+          bucketKey: matchedUserFile.bucketKey,
+          uploadedAt: new Date()
+        };
+        viewFile(userFile, pageNumber);
+        return;
+      } else {
+        console.log(`[PDF LINK] Filename "${filename}" does not match any user file, will show chooser`);
+      }
+    }
+    
+    // No match found - fetch user files and show chooser
+    pendingPageLink.value = { pageNum: pageNumber };
+    loadUserFilesForChooser();
+    return;
+  }
+  
+  // Regular link with filename
+  const filename = link.getAttribute('data-filename');
+  const bucketKey = link.getAttribute('data-bucket-key');
+  
+  if (!filename) return;
+  
+  // Find the file in uploadedFiles (current chat)
+  const file = uploadedFiles.value.find(f => 
+    f.name?.toUpperCase() === filename.toUpperCase() ||
+    (bucketKey && f.bucketKey === bucketKey) ||
+    f.name?.toUpperCase().includes(filename.toUpperCase().replace(/\.(PDF|pdf)$/, ''))
+  );
+  
+  if (file) {
+    viewFile(file, pageNumber);
+    return;
+  }
+  
+  // File not in uploadedFiles - check if it's a user file with bucketKey
+  if (bucketKey && filename) {
+    // Create a user file object and view it
+    const userFile: UploadedFile = {
+      id: `user-file-${bucketKey}`,
+      name: filename,
+      size: 0,
+      type: 'pdf',
+      content: '',
+      originalFile: null as any,
+      bucketKey: bucketKey,
+      uploadedAt: new Date()
+    };
+    viewFile(userFile, pageNumber);
+  }
+};
+
+// Load user files for the document chooser
+const loadUserFilesForChooser = async (showChooser = true) => {
+  if (!props.user?.userId) {
+    if (showChooser) {
+      showDocumentChooser.value = true; // Show chooser anyway (might be empty)
+    }
+    return;
+  }
+  
+  loadingUserFiles.value = true;
+  try {
+    const response = await fetch(`/api/user-files?userId=${encodeURIComponent(props.user.userId)}`, {
+      credentials: 'include'
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      const userPdfFiles = (result.files || [])
+        .filter((f: any) => f.fileType === 'pdf' || f.fileName?.toLowerCase().endsWith('.pdf'))
+        .map((f: any) => ({
+          fileName: f.fileName,
+          bucketKey: f.bucketKey,
+          fileType: f.fileType || 'pdf'
+        }));
+      
+      availableUserFiles.value = userPdfFiles;
+    } else {
+      availableUserFiles.value = [];
+    }
+  } catch (error) {
+    console.error('Error loading user files:', error);
+    availableUserFiles.value = [];
+  } finally {
+    loadingUserFiles.value = false;
+    if (showChooser) {
+      showDocumentChooser.value = true;
+    }
+  }
+};
+
+// Handle document selection from chooser
+const handleDocumentSelected = (file: UploadedFile | { fileName: string; bucketKey: string }) => {
+  if (!pendingPageLink.value) return;
+  
+  // Check if it's a user file (from account) or uploaded file (from chat)
+  // User files have fileName property but no id property
+  if ('fileName' in file && 'bucketKey' in file && !('id' in file)) {
+    // User file from account - create a minimal UploadedFile-like object
+    const userFile: UploadedFile = {
+      id: `user-file-${file.bucketKey}`,
+      name: file.fileName,
+      size: 0,
+      type: 'pdf',
+      content: '',
+      originalFile: null as any,
+      bucketKey: file.bucketKey,
+      uploadedAt: new Date()
+    };
+    viewFile(userFile, pendingPageLink.value.pageNum);
+  } else {
+    // Regular uploaded file from chat
+    viewFile(file as UploadedFile, pendingPageLink.value.pageNum);
+  }
+  
+  pendingPageLink.value = null;
+  showDocumentChooser.value = false;
 };
 
 const removeFile = (file: UploadedFile) => {
@@ -1094,7 +1475,7 @@ const removeFile = (file: UploadedFile) => {
 };
 
 const markdownParser = new MarkdownIt({
-  html: false,
+  html: true, // Allow HTML so we can render clickable page links
   linkify: true,
   breaks: true,
   typographer: true
@@ -2478,6 +2859,12 @@ onMounted(async () => {
   await loadOwnerDeepLinkSetting();
   await loadProviders();
   loadSavedChatCount();
+  
+  // Pre-load user files so they're available for page link matching
+  if (props.user?.userId && !isDeepLink.value) {
+    loadUserFilesForChooser(false); // Load but don't show chooser
+  }
+  
   if (!isDeepLink.value) {
   syncAgent();
   updateContextualTip();
@@ -2548,6 +2935,18 @@ onMounted(async () => {
   font-family: monospace;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.page-link {
+  color: #1976d2;
+  text-decoration: underline;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.page-link:hover {
+  color: #1565c0;
+  text-decoration: underline;
 }
 </style>
 
