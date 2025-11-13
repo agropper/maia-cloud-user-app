@@ -4048,6 +4048,24 @@ app.post('/api/toggle-file-knowledge-base', async (req, res) => {
 
     userDoc.files[fileIndex].updatedAt = new Date().toISOString();
 
+    // Mark KB as needing indexing since files were moved in/out of KB folder
+    // Get current files in KB folder to determine if indexing is needed
+    const currentFilesInKB = (userDoc.files || [])
+      .filter(file => {
+        const fileBucketKey = file.bucketKey || '';
+        // File is in KB folder if bucketKey starts with userId/kbName/
+        return fileBucketKey.startsWith(`${userId}/${kbName}/`);
+      })
+      .map(file => file.bucketKey);
+    
+    // Compare with indexed files to determine if indexing is needed
+    const currentIndexedFiles = userDoc.kbIndexedFiles || [];
+    const filesChanged = JSON.stringify([...currentFilesInKB].sort()) !== JSON.stringify([...currentIndexedFiles].sort());
+    
+    // Set kbIndexingNeeded flag if files in KB folder don't match indexed files
+    // This ensures the state is persisted even if user closes dialog without clicking "Update and Index KB"
+    userDoc.kbIndexingNeeded = filesChanged && currentFilesInKB.length > 0;
+
     // Save the updated user document
     await cloudant.saveDocument('maia_users', userDoc);
     
@@ -5734,12 +5752,40 @@ app.post('/api/generate-patient-summary', async (req, res) => {
         throw new Error('Empty summary received from agent');
       }
 
-      // Save the summary to user document
-      userDoc.patientSummary = summary;
-      userDoc.patientSummaryGeneratedAt = new Date().toISOString();
-      // Set workflowStage to patient_summary when summary is saved
-      userDoc.workflowStage = 'patient_summary';
-      await cloudant.saveDocument('maia_users', userDoc);
+      // Re-fetch user document to get latest revision (may have been updated by background polling)
+      // Retry up to 3 times to handle document conflicts
+      let saved = false;
+      let retries = 0;
+      const maxRetries = 3;
+      
+      while (!saved && retries < maxRetries) {
+        try {
+          const freshUserDoc = await cloudant.getDocument('maia_users', userId);
+          if (!freshUserDoc) {
+            throw new Error('User document not found');
+          }
+          
+          // Save the summary to user document
+          freshUserDoc.patientSummary = summary;
+          freshUserDoc.patientSummaryGeneratedAt = new Date().toISOString();
+          // Set workflowStage to patient_summary when summary is saved
+          freshUserDoc.workflowStage = 'patient_summary';
+          await cloudant.saveDocument('maia_users', freshUserDoc);
+          saved = true;
+        } catch (conflictError) {
+          retries++;
+          if (conflictError.statusCode === 409 && retries < maxRetries) {
+            // Document conflict - wait a bit and retry
+            await new Promise(resolve => setTimeout(resolve, 100 * retries));
+            continue;
+          }
+          throw conflictError;
+        }
+      }
+      
+      if (!saved) {
+        throw new Error('Failed to save patient summary after retries');
+      }
 
       console.log(`✅ Patient summary generated successfully for user ${userId}`);
       

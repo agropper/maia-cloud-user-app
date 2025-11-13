@@ -501,31 +501,37 @@
       :file="viewingFile"
     />
 
-    <!-- Patient Summary Available Modal -->
+    <!-- Patient Summary Available Modal (used both before and after generation) -->
     <q-dialog v-model="showSummaryAvailableModal" persistent>
       <q-card style="min-width: 400px; max-width: 600px;">
         <q-card-section class="row items-center q-pb-none">
-          <div class="text-h6">New Patient Summary Available</div>
+          <div class="text-h6">
+            {{ isSummaryModalBeforeGeneration ? 'Replace Existing Summary?' : 'New Patient Summary Available' }}
+          </div>
         </q-card-section>
 
         <q-card-section>
           <div class="text-body1">
-            A new patient summary has been generated based on your updated knowledge base.
+            {{ isSummaryModalBeforeGeneration 
+              ? 'A patient summary already exists. Generating a new summary will replace the current one. Do you want to continue?'
+              : 'A new patient summary has been generated based on your updated knowledge base.' }}
           </div>
         </q-card-section>
 
         <q-card-actions align="right" class="q-pa-md">
           <q-btn 
             flat 
-            :label="patientSummary ? 'KEEP SAVED SUMMARY' : 'CLOSE MyStuff'" 
+            :label="isSummaryModalBeforeGeneration 
+              ? 'CANCEL' 
+              : (patientSummary ? 'KEEP SAVED SUMMARY' : 'CLOSE MyStuff')" 
             color="grey-8" 
-            @click="handleCloseMyStuff"
+            @click="handleCloseSummaryModal"
           />
           <q-btn 
             flat 
             label="REPLACE SUMMARY" 
             color="primary" 
-            @click="handleSaveSummary"
+            @click="isSummaryModalBeforeGeneration ? handleConfirmReplaceSummary() : handleSaveSummary()"
           />
         </q-card-actions>
       </q-card>
@@ -752,6 +758,8 @@ const indexingElapsedTime = computed(() => {
 // Patient summary modal state
 const showSummaryAvailableModal = ref(false);
 const showSummaryViewModal = ref(false);
+const isSummaryModalBeforeGeneration = ref(false); // true = before generation, false = after generation
+const pendingSummaryGeneration = ref<(() => Promise<void>) | null>(null);
 const newPatientSummary = ref('');
 const editingSummary = ref(false);
 const summaryViewText = ref('');
@@ -1698,16 +1706,32 @@ const pollIndexingProgress = async (jobId: string) => {
           
           // Use kbIndexedFiles from server response (single source of truth)
           // Do NOT derive from userFiles - that creates a mismatch
-          if (result.kbIndexedFiles && Array.isArray(result.kbIndexedFiles)) {
+          if (result.kbIndexedFiles && Array.isArray(result.kbIndexedFiles) && result.kbIndexedFiles.length > 0) {
             indexedFiles.value = result.kbIndexedFiles;
-          } else {
-            // Fallback: reload from server if not in response
-            await loadFiles();
           }
           
           // Always reload files to ensure UI is in sync with server state
           // This ensures chips show correct status even if dialog was open during indexing
+          // Wait a bit to ensure background polling has finished updating the user document
+          await new Promise(resolve => setTimeout(resolve, 500));
           await loadFiles();
+          
+          // After loadFiles, verify indexedFiles matches what we expect
+          // If result.kbIndexedFiles was provided and loadFiles overwrote it with empty/stale data,
+          // restore the correct value from the completion response
+          if (result.kbIndexedFiles && Array.isArray(result.kbIndexedFiles) && result.kbIndexedFiles.length > 0) {
+            // Check if loadFiles returned different data - if so, use the completion response
+            const loadedIndexedFiles = indexedFiles.value || [];
+            const completionIndexedFiles = result.kbIndexedFiles;
+            if (loadedIndexedFiles.length !== completionIndexedFiles.length || 
+                JSON.stringify([...loadedIndexedFiles].sort()) !== JSON.stringify([...completionIndexedFiles].sort())) {
+              console.log('[KB] loadFiles returned stale indexedFiles, using completion response:', {
+                loaded: loadedIndexedFiles,
+                completion: completionIndexedFiles
+              });
+              indexedFiles.value = completionIndexedFiles;
+            }
+          }
           
           emit('indexing-finished', { jobId, phase: 'complete' });
           
@@ -1889,6 +1913,73 @@ const deleteChat = async (chat: SavedChat) => {
   }
 };
 
+// Helper function to generate patient summary (actual generation logic)
+const doGeneratePatientSummary = async () => {
+  // Step 1: Attach KB to agent
+  const attachResponse = await fetch('/api/attach-kb-to-agent', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      userId: props.userId
+    })
+  });
+
+  if (!attachResponse.ok) {
+    const errorData = await attachResponse.json();
+    throw new Error(errorData.message || 'Failed to attach KB to agent');
+  }
+
+  const attachResult = await attachResponse.json();
+  console.log('[KB] KB attached to agent:', attachResult);
+  
+  // Step 2: Generate patient summary
+  indexingStatus.value.message = 'Generating patient summary...';
+  emit('indexing-status-update', {
+    jobId: currentIndexingJobId.value || '',
+    phase: 'kb_setup',
+    tokens: indexingStatus.value.tokens,
+    filesIndexed: indexingStatus.value.filesIndexed,
+    progress: 1.0
+  });
+  
+  const summaryResponse = await fetch('/api/generate-patient-summary', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      userId: props.userId
+    })
+  });
+
+  if (!summaryResponse.ok) {
+    const errorData = await summaryResponse.json();
+    throw new Error(errorData.message || 'Failed to generate patient summary');
+  }
+
+  const summaryResult = await summaryResponse.json();
+  console.log('[KB] Patient summary generated:', summaryResult);
+  
+  // Store the new summary and show modal (after generation)
+  newPatientSummary.value = summaryResult.summary || '';
+  isSummaryModalBeforeGeneration.value = false;
+  showSummaryAvailableModal.value = true;
+  
+  // Update indexing status to show completion
+  indexingStatus.value.message = 'Knowledge base indexed and patient summary generated!';
+  
+  if ($q && typeof $q.notify === 'function') {
+    $q.notify({
+      type: 'positive',
+      message: 'Knowledge base indexed and patient summary generated!'
+    });
+  }
+};
+
 // Attach KB to agent and generate patient summary
 const attachKBAndGenerateSummary = async () => {
   try {
@@ -1904,68 +1995,17 @@ const attachKBAndGenerateSummary = async () => {
       progress: 1.0
     });
     
-    // Step 1: Attach KB to agent
-    const attachResponse = await fetch('/api/attach-kb-to-agent', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId
-      })
-    });
-
-    if (!attachResponse.ok) {
-      const errorData = await attachResponse.json();
-      throw new Error(errorData.message || 'Failed to attach KB to agent');
+    // Check if summary already exists
+    if (patientSummary.value && patientSummary.value.trim().length > 0) {
+      // Store the generation function and show confirmation modal
+      pendingSummaryGeneration.value = doGeneratePatientSummary;
+      isSummaryModalBeforeGeneration.value = true;
+      showSummaryAvailableModal.value = true;
+      return;
     }
-
-    const attachResult = await attachResponse.json();
-    console.log('[KB] KB attached to agent:', attachResult);
     
-    // Step 2: Generate patient summary
-    indexingStatus.value.message = 'Generating patient summary...';
-    emit('indexing-status-update', {
-      jobId: currentIndexingJobId.value || '',
-      phase: 'kb_setup',
-      tokens: indexingStatus.value.tokens,
-      filesIndexed: indexingStatus.value.filesIndexed,
-      progress: 1.0
-    });
-    
-    const summaryResponse = await fetch('/api/generate-patient-summary', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        userId: props.userId
-      })
-    });
-
-    if (!summaryResponse.ok) {
-      const errorData = await summaryResponse.json();
-      throw new Error(errorData.message || 'Failed to generate patient summary');
-    }
-
-    const summaryResult = await summaryResponse.json();
-    console.log('[KB] Patient summary generated:', summaryResult);
-    
-    // Store the new summary and show modal
-    newPatientSummary.value = summaryResult.summary || '';
-    showSummaryAvailableModal.value = true;
-    
-    // Update indexing status to show completion
-    indexingStatus.value.message = 'Knowledge base indexed and patient summary generated!';
-    
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'positive',
-        message: 'Knowledge base indexed and patient summary generated!'
-      });
-    }
+    // No existing summary, proceed directly
+    await doGeneratePatientSummary();
   } catch (error) {
     console.error('[KB] Error in attachKBAndGenerateSummary:', error);
     indexingStatus.value.message = `Error: ${error instanceof Error ? error.message : 'Failed to attach KB or generate summary'}`;
@@ -1975,6 +2015,40 @@ const attachKBAndGenerateSummary = async () => {
         message: error instanceof Error ? error.message : 'Failed to attach KB or generate summary'
       });
     }
+  }
+};
+
+// Handle confirmation to replace summary (before generation)
+const handleConfirmReplaceSummary = async () => {
+  showSummaryAvailableModal.value = false;
+  isSummaryModalBeforeGeneration.value = false;
+  if (pendingSummaryGeneration.value) {
+    try {
+      await pendingSummaryGeneration.value();
+    } catch (error) {
+      console.error('[KB] Error generating summary after confirmation:', error);
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          type: 'negative',
+          message: error instanceof Error ? error.message : 'Failed to generate patient summary'
+        });
+      }
+    } finally {
+      pendingSummaryGeneration.value = null;
+    }
+  }
+};
+
+// Handle closing the summary modal
+const handleCloseSummaryModal = () => {
+  showSummaryAvailableModal.value = false;
+  if (isSummaryModalBeforeGeneration.value) {
+    // If it was before generation, cancel the pending generation
+    pendingSummaryGeneration.value = null;
+    isSummaryModalBeforeGeneration.value = false;
+  } else {
+    // If it was after generation, close the dialog
+    handleCloseMyStuff();
   }
 };
 
@@ -2115,7 +2189,72 @@ const loadPatientSummary = async () => {
 };
 
 const requestNewSummary = async () => {
-  // Generate a new patient summary using the agent and KB
+  // Check if summary already exists
+  if (patientSummary.value && patientSummary.value.trim().length > 0) {
+    // Store the generation function and show confirmation modal
+    pendingSummaryGeneration.value = async () => {
+      loadingSummary.value = true;
+      summaryError.value = '';
+
+      try {
+        console.log('[Summary] Requesting new patient summary...');
+        
+        const response = await fetch('/api/generate-patient-summary', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.userId
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.message || 'Failed to generate patient summary');
+        }
+
+        const result = await response.json();
+        console.log('[Summary] Patient summary generated:', result);
+        
+        // Update the displayed summary
+        const generatedSummary = (result.summary || '').trim();
+        patientSummary.value = generatedSummary;
+        newPatientSummary.value = generatedSummary;
+        summaryViewText.value = generatedSummary;
+        summaryEditText.value = generatedSummary;
+        isEditingSummaryTab.value = false;
+        
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'positive',
+            message: 'Patient summary generated successfully!',
+            timeout: 3000
+          });
+        }
+      } catch (error) {
+        console.error('[Summary] Error generating patient summary:', error);
+        summaryError.value = error instanceof Error ? error.message : 'Failed to generate patient summary';
+        
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'negative',
+            message: summaryError.value,
+            timeout: 5000
+          });
+        }
+      } finally {
+        loadingSummary.value = false;
+      }
+    };
+    
+    isSummaryModalBeforeGeneration.value = true;
+    showSummaryAvailableModal.value = true;
+    return;
+  }
+  
+  // No existing summary, proceed directly
   loadingSummary.value = true;
   summaryError.value = '';
 
@@ -2150,7 +2289,7 @@ const requestNewSummary = async () => {
     isEditingSummaryTab.value = false;
     
     if ($q && typeof $q.notify === 'function') {
-  $q.notify({
+      $q.notify({
         type: 'positive',
         message: 'Patient summary generated successfully!',
         timeout: 3000
