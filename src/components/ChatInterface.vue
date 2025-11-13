@@ -259,11 +259,11 @@
                 <template v-for="(part, index) in parsedContextualTip" :key="index">
                   <span v-if="part.type === 'text'">{{ part.text }}</span>
                   <a
-                    v-else-if="part.type === 'link' && part.tab"
+                    v-else-if="part.type === 'link'"
                     href="#"
                     class="text-primary text-underline"
                     style="cursor: pointer; text-decoration: underline;"
-                    @click.prevent="part.tab && openMyStuffTab(part.tab)"
+                    @click.prevent="handleLinkClick(part)"
                   >{{ part.text }}</a>
                 </template>
               </span>
@@ -2809,6 +2809,13 @@ const parsedContextualTip = computed(() => {
 const openMyStuffTab = (tab: string) => {
   myStuffInitialTab.value = tab;
   showMyStuffDialog.value = true;
+};
+
+// Helper function to handle link clicks with proper type narrowing
+const handleLinkClick = (part: { type: 'text' | 'link'; text: string; tab?: string } | { type: string; text: string }) => {
+  if (part.type === 'link' && 'tab' in part && part.tab) {
+    openMyStuffTab(part.tab);
+  }
 };
 
 // Map workflow stages to user-friendly tips
