@@ -127,6 +127,8 @@ interface DeepLinkInfo {
   chatId?: string | null;
 }
 
+const DEFAULT_TITLE = 'MAIA User App';
+
 const authenticated = ref(false);
 const showAuth = ref(false);
 const user = ref<User | null>(null);
@@ -150,6 +152,11 @@ const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = nul
   authenticated.value = true;
   showAuth.value = false;
   isDeepLinkUser.value = !!normalizedUser.isDeepLink;
+
+  // Update window title to include user ID
+  if (typeof document !== 'undefined') {
+    document.title = `MAIA for ${normalizedUser.userId}`;
+  }
 
   if (isDeepLinkUser.value) {
     const sessionInfo = userData.deepLinkInfo || {};
@@ -190,6 +197,10 @@ const resetAuthState = () => {
   deepLinkInfo.value = null;
   showAuth.value = false;
   showDeepLinkAccess.value = !!deepLinkShareId.value;
+
+  if (typeof document !== 'undefined') {
+    document.title = DEFAULT_TITLE;
+  }
 };
 
 const checkDeepLinkSession = async (shareId: string) => {
@@ -269,6 +280,10 @@ const hydrateDeepLinkSession = async (share: string) => {
   }
   return false;
 };
+
+if (typeof document !== 'undefined') {
+  document.title = DEFAULT_TITLE;
+}
 
 onMounted(async () => {
   let share: string | null = null;
