@@ -748,7 +748,7 @@ const elapsedTimeUpdate = ref(0); // Force updates for elapsed time display
 const indexingElapsedTime = computed(() => {
   if (!indexingStartTime.value) return null;
   // Use elapsedTimeUpdate to force reactivity
-  const _ = elapsedTimeUpdate.value;
+  void elapsedTimeUpdate.value; // Force reactivity by reading the value
   const elapsed = Date.now() - indexingStartTime.value;
   const minutes = Math.floor(elapsed / 60000);
   const seconds = Math.floor((elapsed % 60000) / 1000);

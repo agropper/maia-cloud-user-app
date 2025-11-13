@@ -259,11 +259,11 @@
                 <template v-for="(part, index) in parsedContextualTip" :key="index">
                   <span v-if="part.type === 'text'">{{ part.text }}</span>
                   <a
-                    v-else-if="part.type === 'link'"
+                    v-else-if="part.type === 'link' && part.tab"
                     href="#"
                     class="text-primary text-underline"
                     style="cursor: pointer; text-decoration: underline;"
-                    @click.prevent="openMyStuffTab(part.tab)"
+                    @click.prevent="part.tab && openMyStuffTab(part.tab)"
                   >{{ part.text }}</a>
                 </template>
               </span>
