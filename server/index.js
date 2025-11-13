@@ -2617,6 +2617,7 @@ async function provisionUserAsync(userId, token) {
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Poll for deployment status
+    const successStatuses = ['STATUS_RUNNING', 'RUNNING', 'STATUS_SUCCEEDED', 'SUCCEEDED', 'STATUS_READY', 'READY'];
     let agentDetails = null;
     let deploymentStatus = 'STATUS_PENDING';
     const maxAttempts = 60; // 5 minutes max (60 attempts @ 5s interval)
@@ -2625,16 +2626,18 @@ async function provisionUserAsync(userId, token) {
     while (attempts < maxAttempts && deploymentStatus !== 'STATUS_RUNNING') {
       try {
         agentDetails = await agentClient.get(newAgent.uuid);
-        deploymentStatus = agentDetails?.deployment?.status || 'STATUS_PENDING';
+        const rawDeploymentStatus = agentDetails?.deployment?.status || agentDetails?.deployment?.state || null;
+        const agentStatus = agentDetails?.status || agentDetails?.state || null;
+        deploymentStatus = rawDeploymentStatus || agentStatus || 'STATUS_PENDING';
         
-        if (attempts % 6 === 0 || deploymentStatus === 'STATUS_RUNNING') {
+        if (attempts === 0 || attempts % 6 === 0 || successStatuses.includes(deploymentStatus)) {
           logProvisioning(userId, `📊 Deployment status check (${attempts}/${maxAttempts}): ${deploymentStatus}`, 'info');
         }
         
-        if (deploymentStatus === 'STATUS_RUNNING') {
+        if (successStatuses.includes(deploymentStatus)) {
           logProvisioning(userId, `✅ Agent deployment reached STATUS_RUNNING after ${attempts} attempts`, 'success');
           break;
-        } else if (deploymentStatus === 'STATUS_FAILED') {
+        } else if (['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(deploymentStatus)) {
           logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus}`, 'error');
           throw new Error('Agent deployment failed');
         }
@@ -2654,7 +2657,7 @@ async function provisionUserAsync(userId, token) {
       }
     }
 
-    if (deploymentStatus !== 'STATUS_RUNNING') {
+    if (!successStatuses.includes(deploymentStatus)) {
       let finalStatus = deploymentStatus;
       try {
         const agents = await agentClient.list();
@@ -2669,7 +2672,7 @@ async function provisionUserAsync(userId, token) {
         logProvisioning(userId, `⚠️ Unable to verify agent status after timeout: ${statusError.message}`, 'warning');
       }
 
-      if (finalStatus === 'STATUS_RUNNING' || finalStatus === 'RUNNING') {
+      if (successStatuses.includes(finalStatus)) {
         deploymentStatus = finalStatus;
         logProvisioning(userId, '✅ Agent reported as running in final verification step; continuing provisioning.', 'success');
       } else {
