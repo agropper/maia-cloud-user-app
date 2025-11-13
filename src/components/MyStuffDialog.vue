@@ -517,20 +517,15 @@
         <q-card-actions align="right" class="q-pa-md">
           <q-btn 
             flat 
-            label="CLOSE MyStuff" 
+            :label="patientSummary ? 'KEEP SAVED SUMMARY' : 'CLOSE MyStuff'" 
             color="grey-8" 
             @click="handleCloseMyStuff"
           />
           <q-btn 
             flat 
-            label="SAVE SUMMARY" 
+            label="REPLACE SUMMARY" 
             color="primary" 
             @click="handleSaveSummary"
-          />
-          <q-btn 
-            label="VIEW SUMMARY" 
-            color="primary" 
-            @click="handleViewSummary"
           />
         </q-card-actions>
       </q-card>
@@ -1667,14 +1662,7 @@ const pollIndexingProgress = async (jobId: string) => {
 
       const result = await response.json();
       
-      console.log(`[KB Polling] Status check for job ${jobId}:`, {
-        phase: result.phase,
-        status: result.status,
-        completed: result.completed,
-        tokens: result.tokens,
-        filesIndexed: result.filesIndexed,
-        progress: result.progress
-      });
+      // Status check for job (verbose logging removed)
       
       // Update status with all fields from response
       indexingStatus.value = {
@@ -1991,13 +1979,6 @@ const attachKBAndGenerateSummary = async () => {
 };
 
 // Patient Summary modal handlers
-const handleViewSummary = () => {
-  summaryViewText.value = newPatientSummary.value;
-  editingSummary.value = false;
-  showSummaryAvailableModal.value = false;
-  showSummaryViewModal.value = true;
-};
-
 const handleSaveSummary = async () => {
   try {
     const response = await fetch('/api/patient-summary', {

@@ -4466,7 +4466,6 @@ async function setupKnowledgeBase(userId, kbName, filesInKB, bucketName, existin
       console.log(`✅ Created new KB: ${kbName} (${kbId})`);
       
       // Get KB details
-      console.log(`[KB AUTO] Calling doClient.kb.get(${kbId}) to get full KB details after creation`);
       kbDetails = await doClient.kb.get(kbId);
       
       invalidateResourceCache(userId);
@@ -4692,17 +4691,13 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             if (!dataSourceUuid) {
               console.warn(`[KB Update] ⚠️ Data source has no UUID - cannot start indexing`);
             } else {
-              // Log files in source folder before starting indexing
-              console.log(`[KB INDEXING] Starting indexing job for KB ${kbId}, data source ${dataSourceUuid}`);
-              console.log(`[KB INDEXING] Files in source folder (${filesInKB.length}):`, filesInKB.map(key => key.split('/').pop()));
-              
               try {
                 // Start indexing job using global endpoint
                 const indexingJob = await doClient.indexing.startGlobal(kbId, [dataSourceUuid]);
                 jobId = indexingJob.uuid || indexingJob.id || indexingJob.indexing_job?.uuid || indexingJob.indexing_job?.id || indexingJob.job?.uuid || indexingJob.job?.id;
                 
                 if (jobId) {
-                  console.log(`[KB INDEXING] ✅ Started indexing job: ${jobId}`);
+                  console.log(`✅ Started indexing job: ${jobId}`);
                   
                   // Store job ID in user document
                   const jobUserDoc = await cloudant.getDocument('maia_users', userId);
@@ -4804,11 +4799,18 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             const previousIndexedFiles = finalUserDoc.kbIndexedFiles || [];
             const previousTokens = finalUserDoc.kbLastIndexedAt ? (await getCachedKB(kbId))?.total_tokens || '0' : '0';
             
+            // Calculate indexing duration
+            const indexingDurationSeconds = elapsedTime;
+            const indexingDurationMinutes = Math.floor(indexingDurationSeconds / 60);
+            const indexingDurationSecondsRemainder = indexingDurationSeconds % 60;
+            
             finalUserDoc.kbIndexedFiles = filesToIndex;
             finalUserDoc.kbPendingFiles = undefined;
             finalUserDoc.kbIndexingNeeded = false;
             finalUserDoc.kbLastIndexedAt = new Date().toISOString();
             finalUserDoc.kbLastIndexingJobId = activeJobId;
+            finalUserDoc.kbIndexingDurationSeconds = indexingDurationSeconds;
+            finalUserDoc.kbLastIndexingTokens = finalTokens;
             if (finalUserDoc.workflowStage === 'indexing') {
               if (finalUserDoc.files && finalUserDoc.files.length > 0) {
                 finalUserDoc.workflowStage = 'files_archived';
@@ -4818,17 +4820,8 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             }
             await cloudant.saveDocument('maia_users', finalUserDoc);
             
-            // Log indexing success with clear details
-            console.log(`[KB INDEXING] ✅ Indexing completed successfully`);
-            console.log(`[KB INDEXING] Job ID: ${activeJobId}, Elapsed: ${elapsedMinutes}m ${elapsedSeconds}s`);
-            console.log(`[KB INDEXING] Files indexed: ${filesToIndex.length} (${filesToIndex.map(key => key.split('/').pop()).join(', ')})`);
-            console.log(`[KB INDEXING] Tokens: ${previousTokens} → ${finalTokens}`);
-            console.log(`[KB INDEXING] User document updated:`);
-            console.log(`[KB INDEXING]   - kbIndexedFiles: ${previousIndexedFiles.length} → ${filesToIndex.length} files`);
-            console.log(`[KB INDEXING]   - kbPendingFiles: cleared`);
-            console.log(`[KB INDEXING]   - kbIndexingNeeded: false`);
-            console.log(`[KB INDEXING]   - kbLastIndexedAt: ${finalUserDoc.kbLastIndexedAt}`);
-            console.log(`[KB INDEXING]   - kbLastIndexingJobId: ${activeJobId}`);
+            // Log indexing completion with essential details
+            console.log(`[KB INDEXING] ✅ Indexing completed successfully: ${filesToIndex.length} files, ${finalTokens} tokens, ${indexingDurationMinutes}m ${indexingDurationSecondsRemainder}s`);
             
             invalidateResourceCache(userId);
           }
@@ -5037,8 +5030,6 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       jobStatus = await doClient.indexing.getStatus(jobId);
       status = jobStatus.status || jobStatus.job?.status || 'INDEX_JOB_STATUS_RUNNING';
       
-      console.log(`[KB Indexing Status] Job ${jobId} status: ${status}`);
-      
       // Determine phase based on status
       if (status === 'INDEX_JOB_STATUS_PENDING') {
         phase = 'indexing_started';
@@ -5047,11 +5038,9 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
       } else if (status === 'INDEX_JOB_STATUS_COMPLETED') {
         phase = 'complete';
         completed = true;
-        console.log(`[KB Indexing Status] ✅ Job ${jobId} completed successfully`);
       } else if (status === 'INDEX_JOB_STATUS_FAILED') {
         phase = 'error';
         completed = true;
-        console.log(`[KB Indexing Status] ❌ Job ${jobId} failed`);
       }
       
       // Get KB details for token count and name
@@ -5125,46 +5114,18 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
                 }
               }
               
-              updatedUserDoc.kbIndexedFiles = filesToIndex; // Use current files in KB folder
-              updatedUserDoc.kbPendingFiles = undefined; // Clear pending
-              updatedUserDoc.kbIndexingNeeded = false;
-              updatedUserDoc.kbLastIndexedAt = new Date().toISOString();
-              
-              // Save with retry on conflict
-              try {
-                await cloudant.saveDocument('maia_users', updatedUserDoc);
-                finalIndexedFiles = updatedUserDoc.kbIndexedFiles;
-                filesIndexed = finalIndexedFiles.length;
-                success = true;
-                
-                // Log indexing success with clear details
-                console.log(`[KB INDEXING] ✅ Indexing completed successfully (via /api/kb-indexing-status)`);
-                console.log(`[KB INDEXING] Job ID: ${jobId}`);
-                console.log(`[KB INDEXING] Files indexed: ${filesToIndex.length} (${filesToIndex.map(key => key.split('/').pop()).join(', ')})`);
-                console.log(`[KB INDEXING] Tokens: ${previousTokens} → ${tokens}`);
-                console.log(`[KB INDEXING] User document updated:`);
-                console.log(`[KB INDEXING]   - kbIndexedFiles: ${previousIndexedFiles.length} → ${filesToIndex.length} files`);
-                console.log(`[KB INDEXING]   - kbPendingFiles: cleared`);
-                console.log(`[KB INDEXING]   - kbIndexingNeeded: false`);
-                console.log(`[KB INDEXING]   - kbLastIndexedAt: ${updatedUserDoc.kbLastIndexedAt}`);
-                console.log(`[KB INDEXING]   - kbLastIndexingJobId: ${jobId}`);
-              } catch (saveErr) {
-                if (saveErr.statusCode === 409 && retryCount < maxRetries - 1) {
-                  // Document conflict - retry
-                  retryCount++;
-                  console.log(`[KB Indexing Status] ⚠️ Document conflict, retrying (${retryCount}/${maxRetries})...`);
-                  await new Promise(resolve => setTimeout(resolve, 100 * retryCount)); // Exponential backoff
-                  continue;
-                } else {
-                  throw saveErr;
-                }
-              }
+              // Don't update user document here - let background polling handle it
+              // This endpoint should only return status, not update state
+              // The background polling will update the document with correct tokens and timing
+              finalIndexedFiles = filesToIndex;
+              filesIndexed = finalIndexedFiles.length;
+              success = true;
             } else {
               // No kbPendingFiles - check if kbIndexedFiles already exists (might have been set by another request)
               if (updatedUserDoc.kbIndexedFiles && Array.isArray(updatedUserDoc.kbIndexedFiles) && updatedUserDoc.kbIndexedFiles.length > 0) {
                 finalIndexedFiles = updatedUserDoc.kbIndexedFiles;
                 filesIndexed = finalIndexedFiles.length;
-                console.log(`[KB Indexing Status] ℹ️ kbIndexedFiles already set (${finalIndexedFiles.length} files)`);
+                // kbIndexedFiles already set
                 success = true;
               } else {
                 // This is an error condition - indexing completed but we have no record of what was indexed
@@ -5182,7 +5143,7 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
         } catch (err) {
           if (retryCount < maxRetries - 1) {
             retryCount++;
-            console.log(`[KB Indexing Status] ⚠️ Error updating indexed files, retrying (${retryCount}/${maxRetries}):`, err.message);
+            // Error updating indexed files - retry silently
             await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
           } else {
             console.error('[KB Indexing Status] ❌ Error updating indexed files after retries:', err);
@@ -5207,8 +5168,23 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
     }
 
     // Include kbIndexedFiles in response if available (from update or from userDoc)
-    // This allows frontend to always have the latest state
-    const responseIndexedFiles = finalIndexedFiles || (userDoc.kbIndexedFiles && Array.isArray(userDoc.kbIndexedFiles) ? userDoc.kbIndexedFiles : undefined);
+    // If completion was detected, refresh userDoc to get latest kbIndexedFiles from background polling
+    let responseIndexedFiles = finalIndexedFiles;
+    if (!responseIndexedFiles && completed) {
+      // Refresh user document to get latest kbIndexedFiles (might have been updated by background polling)
+      try {
+        const refreshedUserDoc = await cloudant.getDocument('maia_users', userId);
+        if (refreshedUserDoc && refreshedUserDoc.kbIndexedFiles && Array.isArray(refreshedUserDoc.kbIndexedFiles)) {
+          responseIndexedFiles = refreshedUserDoc.kbIndexedFiles;
+        }
+      } catch (refreshError) {
+        console.warn('[KB Indexing Status] Failed to refresh user doc for kbIndexedFiles:', refreshError);
+      }
+    }
+    // Fallback to original userDoc if still not set
+    if (!responseIndexedFiles) {
+      responseIndexedFiles = userDoc.kbIndexedFiles && Array.isArray(userDoc.kbIndexedFiles) ? userDoc.kbIndexedFiles : undefined;
+    }
     
     res.json({
       success: true,
