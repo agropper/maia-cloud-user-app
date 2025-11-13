@@ -4874,8 +4874,8 @@ app.post('/api/update-knowledge-base', async (req, res) => {
 
             const summaryUserDoc = await cloudant.getDocument('maia_users', userId);
             if (summaryUserDoc) {
-              summaryUserDoc.patientSummary = summary;
-              summaryUserDoc.patientSummaryGeneratedAt = new Date().toISOString();
+              // Use helper function to add new summary (default to 'newest' strategy)
+              addNewSummary(summaryUserDoc, summary, 'newest');
               summaryUserDoc.workflowStage = 'patient_summary';
               await cloudant.saveDocument('maia_users', summaryUserDoc);
               invalidateResourceCache(userId);
@@ -5758,41 +5758,39 @@ app.post('/api/generate-patient-summary', async (req, res) => {
       let retries = 0;
       const maxRetries = 3;
       
-      while (!saved && retries < maxRetries) {
-        try {
-          const freshUserDoc = await cloudant.getDocument('maia_users', userId);
-          if (!freshUserDoc) {
-            throw new Error('User document not found');
-          }
-          
-          // Save the summary to user document
-          freshUserDoc.patientSummary = summary;
-          freshUserDoc.patientSummaryGeneratedAt = new Date().toISOString();
-          // Set workflowStage to patient_summary when summary is saved
-          freshUserDoc.workflowStage = 'patient_summary';
-          await cloudant.saveDocument('maia_users', freshUserDoc);
-          saved = true;
-        } catch (conflictError) {
-          retries++;
-          if (conflictError.statusCode === 409 && retries < maxRetries) {
-            // Document conflict - wait a bit and retry
-            await new Promise(resolve => setTimeout(resolve, 100 * retries));
-            continue;
-          }
-          throw conflictError;
+      // Get current summary for undo (don't save yet - frontend will choose replace strategy)
+      let savedCurrentSummary = null;
+      try {
+        const freshUserDoc = await cloudant.getDocument('maia_users', userId);
+        if (freshUserDoc) {
+          const summaries = initializeSummariesArray(freshUserDoc);
+          savedCurrentSummary = summaries.length > 0 ? summaries[summaries.length - 1] : null;
         }
+      } catch (err) {
+        console.warn('Failed to get current summary for undo:', err);
       }
       
-      if (!saved) {
-        throw new Error('Failed to save patient summary after retries');
-      }
+      // Store for response
+      res.locals.savedCurrentSummary = savedCurrentSummary;
+      saved = true; // Mark as "saved" (actually just prepared, frontend will save)
 
       console.log(`✅ Patient summary generated successfully for user ${userId}`);
+      
+      // Get current summaries array (before saving new one)
+      const finalUserDoc = await cloudant.getDocument('maia_users', userId);
+      const summaries = initializeSummariesArray(finalUserDoc);
       
       res.json({ 
         success: true, 
         summary,
-        message: 'Patient summary generated successfully'
+        message: 'Patient summary generated successfully',
+        summaries: summaries.map((s, index) => ({
+          text: s.text,
+          createdAt: s.createdAt,
+          updatedAt: s.updatedAt,
+          isCurrent: index === summaries.length - 1
+        })),
+        savedCurrentSummary: res.locals.savedCurrentSummary || null
       });
     } catch (error) {
       console.error('❌ Error generating patient summary:', error);
@@ -5807,6 +5805,101 @@ app.post('/api/generate-patient-summary', async (req, res) => {
     });
   }
 });
+
+// Helper functions for managing multiple patient summaries
+const MAX_SUMMARIES = 3;
+
+function initializeSummariesArray(userDoc) {
+  // Initialize patientSummaries array if it doesn't exist
+  if (!userDoc.patientSummaries || !Array.isArray(userDoc.patientSummaries)) {
+    userDoc.patientSummaries = [];
+  }
+  
+  // Migrate old patientSummary to array if it exists and array is empty
+  if (userDoc.patientSummary && userDoc.patientSummaries.length === 0) {
+    const createdAt = userDoc.patientSummaryGeneratedAt || new Date().toISOString();
+    userDoc.patientSummaries.push({
+      text: userDoc.patientSummary,
+      createdAt: createdAt,
+      updatedAt: createdAt
+    });
+  }
+  
+  return userDoc.patientSummaries;
+}
+
+function getCurrentSummary(userDoc) {
+  // Current summary is the most recent one (last in array)
+  const summaries = initializeSummariesArray(userDoc);
+  if (summaries.length === 0) {
+    return null;
+  }
+  return summaries[summaries.length - 1];
+}
+
+function addNewSummary(userDoc, summaryText, replaceStrategy = 'newest', replaceIndex = null) {
+  const summaries = initializeSummariesArray(userDoc);
+  const now = new Date().toISOString();
+  const newSummary = {
+    text: summaryText,
+    createdAt: now,
+    updatedAt: now
+  };
+  
+  // Save current summary for undo (if exists)
+  const currentSummary = summaries.length > 0 ? summaries[summaries.length - 1] : null;
+  
+  if (replaceIndex !== null && replaceIndex >= 0 && replaceIndex < summaries.length) {
+    // Replace at specific index and make the new summary current (move to end)
+    if (replaceIndex === summaries.length - 1) {
+      // Replacing current summary - just update it
+      summaries[replaceIndex] = newSummary;
+    } else {
+      // Replacing a non-current summary - remove old one, add new at end
+      summaries.splice(replaceIndex, 1);
+      summaries.push(newSummary);
+    }
+  } else if (summaries.length < MAX_SUMMARIES) {
+    // Add to array
+    summaries.push(newSummary);
+  } else {
+    // Replace based on strategy
+    if (replaceStrategy === 'oldest') {
+      // Remove oldest (first) and add new at end
+      summaries.shift();
+      summaries.push(newSummary);
+    } else if (replaceStrategy === 'newest') {
+      // Replace newest (last) with new
+      summaries[summaries.length - 1] = newSummary;
+    }
+    // 'keep' strategy means don't add (handled by caller)
+  }
+  
+  // Update backward compatibility fields
+  userDoc.patientSummary = newSummary.text;
+  userDoc.patientSummaryGeneratedAt = now;
+  
+  return { summaries, currentSummary };
+}
+
+function swapSummary(userDoc, index) {
+  const summaries = initializeSummariesArray(userDoc);
+  if (index < 0 || index >= summaries.length || index === summaries.length - 1) {
+    return false; // Invalid index or already current
+  }
+  
+  // Swap the summary at index with the last one (current)
+  const temp = summaries[index];
+  summaries[index] = summaries[summaries.length - 1];
+  summaries[summaries.length - 1] = temp;
+  
+  // Update backward compatibility fields
+  const current = summaries[summaries.length - 1];
+  userDoc.patientSummary = current.text;
+  userDoc.patientSummaryGeneratedAt = current.updatedAt || current.createdAt;
+  
+  return true;
+}
 
 // Patient Summary endpoints
 app.get('/api/patient-summary', async (req, res) => {
@@ -5832,11 +5925,18 @@ app.get('/api/patient-summary', async (req, res) => {
       });
     }
 
-    const summary = userDoc.patientSummary || '';
+    const summaries = initializeSummariesArray(userDoc);
+    const currentSummary = getCurrentSummary(userDoc);
     
     res.json({ 
       success: true, 
-      summary 
+      summary: currentSummary ? currentSummary.text : '',
+      summaries: summaries.map((s, index) => ({
+        text: s.text,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        isCurrent: index === summaries.length - 1
+      }))
     });
   } catch (error) {
     console.error('Error fetching patient summary:', error);
@@ -5850,7 +5950,7 @@ app.get('/api/patient-summary', async (req, res) => {
 
 app.post('/api/patient-summary', async (req, res) => {
   try {
-    const { userId, summary } = req.body;
+    const { userId, summary, replaceStrategy, replaceIndex } = req.body;
     
     if (!userId) {
       return res.status(400).json({ 
@@ -5879,23 +5979,110 @@ app.post('/api/patient-summary', async (req, res) => {
       });
     }
 
-    // Update the patient summary
-    userDoc.patientSummary = summary;
+    // Add new summary (or update current if replaceStrategy is 'keep')
+    if (replaceStrategy === 'keep') {
+      // Just update the current summary's text and updatedAt
+      const summaries = initializeSummariesArray(userDoc);
+      if (summaries.length > 0) {
+        summaries[summaries.length - 1].text = summary;
+        summaries[summaries.length - 1].updatedAt = new Date().toISOString();
+        userDoc.patientSummary = summary;
+      } else {
+        // No summaries exist, add first one
+        addNewSummary(userDoc, summary, 'newest');
+      }
+    } else {
+      // Add new summary with replace strategy or specific index
+      addNewSummary(userDoc, summary, replaceStrategy || 'newest', replaceIndex);
+    }
+    
     userDoc.updatedAt = new Date().toISOString();
     // Set workflowStage to patient_summary when summary is saved
     userDoc.workflowStage = 'patient_summary';
     
     await cloudant.saveDocument('maia_users', userDoc);
     
+    const summaries = initializeSummariesArray(userDoc);
     res.json({ 
       success: true, 
-      message: 'Patient summary saved successfully'
+      message: 'Patient summary saved successfully',
+      summaries: summaries.map((s, index) => ({
+        text: s.text,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        isCurrent: index === summaries.length - 1
+      }))
     });
   } catch (error) {
     console.error('Error saving patient summary:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to save patient summary',
+      error: error.message 
+    });
+  }
+});
+
+// Swap summary endpoint - make a non-current summary the current one
+app.post('/api/patient-summary/swap', async (req, res) => {
+  try {
+    const { userId, index } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    if (typeof index !== 'number' || index < 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid index is required',
+        error: 'MISSING_INDEX'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    const swapped = swapSummary(userDoc, index);
+    if (!swapped) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid index or summary is already current',
+        error: 'INVALID_SWAP'
+      });
+    }
+    
+    userDoc.updatedAt = new Date().toISOString();
+    await cloudant.saveDocument('maia_users', userDoc);
+    
+    const summaries = initializeSummariesArray(userDoc);
+    res.json({ 
+      success: true, 
+      message: 'Summary swapped successfully',
+      summaries: summaries.map((s, idx) => ({
+        text: s.text,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        isCurrent: idx === summaries.length - 1
+      }))
+    });
+  } catch (error) {
+    console.error('Error swapping patient summary:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to swap patient summary',
       error: error.message 
     });
   }

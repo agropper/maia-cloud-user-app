@@ -466,6 +466,18 @@
                   :loading="isSavingSummary"
                   :disable="isSavingSummary"
                 />
+                <!-- Buttons for non-current summaries -->
+                <template v-for="(summary, index) in patientSummaries" :key="index">
+                  <q-btn
+                    v-if="!summary.isCurrent && !isEditingSummaryTab"
+                    outline
+                    :label="`SUMMARY ${getTimeAgo(summary.updatedAt || summary.createdAt)} ago`"
+                    color="grey-7"
+                    size="sm"
+                    @click="swapSummary(index)"
+                    :disable="isSavingSummary"
+                  />
+                </template>
                 <q-space />
                 <q-btn 
                   label="Request New Summary" 
@@ -583,6 +595,42 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Replace Summary Dialog (when new summary is created and all slots are full) -->
+    <q-dialog v-model="showReplaceSummaryDialog" persistent>
+      <q-card style="min-width: 800px; max-width: 1200px; max-height: 90vh;">
+        <q-card-section class="row items-center q-pb-none">
+          <div class="text-h6">New Patient Summary Generated</div>
+        </q-card-section>
+
+        <q-card-section style="max-height: 60vh; overflow-y: auto;">
+          <div class="text-body1 q-mb-md">
+            A new patient summary has been generated. Choose which summary to replace:
+          </div>
+          <div class="text-body2 q-pa-md bg-grey-1 rounded-borders">
+            <vue-markdown :source="newSummaryToReplace" />
+          </div>
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-pa-md">
+          <!-- Buttons for each existing summary (oldest to newest) -->
+          <template v-for="(summary, index) in patientSummaries" :key="index">
+            <q-btn 
+              flat 
+              :label="`Replace ${getTimeAgo(summary.updatedAt || summary.createdAt)} ago summary`"
+              color="primary" 
+              @click="handleReplaceSummaryByIndex(index)"
+            />
+          </template>
+          <q-btn 
+            flat 
+            label="Close without saving" 
+            color="grey-8" 
+            @click="showReplaceSummaryDialog = false; newSummaryToReplace = ''"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-dialog>
 </template>
 
@@ -670,6 +718,10 @@ const sharedChats = ref<SavedChat[]>([]);
 const loadingSummary = ref(false);
 const summaryError = ref('');
 const patientSummary = ref('');
+const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
+const savedCurrentSummaryForUndo = ref<{ text: string; createdAt: string; updatedAt: string } | null>(null);
+const showReplaceSummaryDialog = ref(false);
+const newSummaryToReplace = ref('');
 
 // PDF Viewer
 const showPdfViewer = ref(false);
@@ -1964,20 +2016,21 @@ const doGeneratePatientSummary = async () => {
   const summaryResult = await summaryResponse.json();
   console.log('[KB] Patient summary generated:', summaryResult);
   
-  // Store the new summary and show modal (after generation)
-  newPatientSummary.value = summaryResult.summary || '';
-  isSummaryModalBeforeGeneration.value = false;
-  showSummaryAvailableModal.value = true;
+  // Check if there are empty slots
+  const hasEmptySlots = patientSummaries.value.length < 3;
+  
+  if (hasEmptySlots) {
+    // Automatically save with 'newest' strategy (just adds to array)
+    await handleReplaceSummary('newest', summaryResult.summary);
+  } else {
+    // All slots full - show dialog to choose replace strategy
+    savedCurrentSummaryForUndo.value = summaryResult.savedCurrentSummary || null;
+    newSummaryToReplace.value = summaryResult.summary || '';
+    showReplaceSummaryDialog.value = true;
+  }
   
   // Update indexing status to show completion
   indexingStatus.value.message = 'Knowledge base indexed and patient summary generated!';
-  
-  if ($q && typeof $q.notify === 'function') {
-    $q.notify({
-      type: 'positive',
-      message: 'Knowledge base indexed and patient summary generated!'
-    });
-  }
 };
 
 // Attach KB to agent and generate patient summary
@@ -1995,16 +2048,8 @@ const attachKBAndGenerateSummary = async () => {
       progress: 1.0
     });
     
-    // Check if summary already exists
-    if (patientSummary.value && patientSummary.value.trim().length > 0) {
-      // Store the generation function and show confirmation modal
-      pendingSummaryGeneration.value = doGeneratePatientSummary;
-      isSummaryModalBeforeGeneration.value = true;
-      showSummaryAvailableModal.value = true;
-      return;
-    }
-    
-    // No existing summary, proceed directly
+    // Always proceed directly - no pre-generation confirmation
+    // If slots are full, the replace dialog will show after generation
     await doGeneratePatientSummary();
   } catch (error) {
     console.error('[KB] Error in attachKBAndGenerateSummary:', error);
@@ -2035,6 +2080,106 @@ const handleConfirmReplaceSummary = async () => {
       }
     } finally {
       pendingSummaryGeneration.value = null;
+    }
+  }
+};
+
+// Handle replace summary by index (when all slots are full)
+const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
+  showReplaceSummaryDialog.value = false;
+  
+  try {
+    const response = await fetch('/api/patient-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        summary: newSummaryToReplace.value,
+        replaceIndex: indexToReplace
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to save patient summary');
+    }
+
+    const result = await response.json();
+    
+    // Reload summaries to get updated list
+    await loadPatientSummary();
+    
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Patient summary saved successfully!',
+        timeout: 3000
+      });
+    }
+    
+    newSummaryToReplace.value = '';
+  } catch (error) {
+    console.error('[Summary] Error saving summary:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to save patient summary',
+        timeout: 5000
+      });
+    }
+  }
+};
+
+// Handle replace summary dialog choice (for empty slots or keep strategy)
+const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest', summaryText?: string) => {
+  showReplaceSummaryDialog.value = false;
+  
+  const summaryToSave = summaryText || newSummaryToReplace.value;
+  
+  try {
+    const response = await fetch('/api/patient-summary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        summary: summaryToSave,
+        replaceStrategy: replaceStrategy
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to save patient summary');
+    }
+
+    const result = await response.json();
+    
+    // Reload summaries to get updated list
+    await loadPatientSummary();
+    
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: replaceStrategy === 'keep' ? 'Current summary kept' : 'Patient summary saved successfully!',
+        timeout: 3000
+      });
+    }
+    
+    newSummaryToReplace.value = '';
+  } catch (error) {
+    console.error('[Summary] Error saving summary:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to save patient summary',
+        timeout: 5000
+      });
     }
   }
 };
@@ -2161,6 +2306,67 @@ const handleCloseWithoutSaving = () => {
 };
 
 // Patient Summary methods
+// Helper function to format time ago
+const getTimeAgo = (dateString: string): string => {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  if (diffDays > 0) {
+    return `${diffDays} ${diffDays === 1 ? 'day' : 'days'}`;
+  } else if (diffHours > 0) {
+    return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'}`;
+  } else {
+    return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'}`;
+  }
+};
+
+// Swap summary function
+const swapSummary = async (index: number) => {
+  try {
+    const response = await fetch('/api/patient-summary/swap', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        index: index
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Failed to swap summary');
+    }
+
+    const result = await response.json();
+    // Reload summaries
+    await loadPatientSummary();
+    
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Summary swapped successfully',
+        timeout: 3000
+      });
+    }
+  } catch (error) {
+    console.error('[Summary] Error swapping summary:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to swap summary',
+        timeout: 5000
+      });
+    }
+  }
+};
+
 const loadPatientSummary = async () => {
   loadingSummary.value = true;
   summaryError.value = '';
@@ -2178,6 +2384,7 @@ const loadPatientSummary = async () => {
     const loadedSummary = result.summary || '';
     patientSummary.value = loadedSummary;
     summaryEditText.value = loadedSummary;
+    patientSummaries.value = result.summaries || [];
     if (!loadedSummary) {
       isEditingSummaryTab.value = false;
     }
@@ -2189,72 +2396,8 @@ const loadPatientSummary = async () => {
 };
 
 const requestNewSummary = async () => {
-  // Check if summary already exists
-  if (patientSummary.value && patientSummary.value.trim().length > 0) {
-    // Store the generation function and show confirmation modal
-    pendingSummaryGeneration.value = async () => {
-      loadingSummary.value = true;
-      summaryError.value = '';
-
-      try {
-        console.log('[Summary] Requesting new patient summary...');
-        
-        const response = await fetch('/api/generate-patient-summary', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({
-            userId: props.userId
-          })
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || 'Failed to generate patient summary');
-        }
-
-        const result = await response.json();
-        console.log('[Summary] Patient summary generated:', result);
-        
-        // Update the displayed summary
-        const generatedSummary = (result.summary || '').trim();
-        patientSummary.value = generatedSummary;
-        newPatientSummary.value = generatedSummary;
-        summaryViewText.value = generatedSummary;
-        summaryEditText.value = generatedSummary;
-        isEditingSummaryTab.value = false;
-        
-        if ($q && typeof $q.notify === 'function') {
-          $q.notify({
-            type: 'positive',
-            message: 'Patient summary generated successfully!',
-            timeout: 3000
-          });
-        }
-      } catch (error) {
-        console.error('[Summary] Error generating patient summary:', error);
-        summaryError.value = error instanceof Error ? error.message : 'Failed to generate patient summary';
-        
-        if ($q && typeof $q.notify === 'function') {
-          $q.notify({
-            type: 'negative',
-            message: summaryError.value,
-            timeout: 5000
-          });
-        }
-      } finally {
-        loadingSummary.value = false;
-      }
-    };
-    
-    isSummaryModalBeforeGeneration.value = true;
-    showSummaryAvailableModal.value = true;
-    return;
-  }
-  
-  // No existing summary, proceed directly
+  // Always proceed directly - no pre-generation confirmation
+  // If slots are full, the replace dialog will show after generation
   loadingSummary.value = true;
   summaryError.value = '';
 
@@ -2280,20 +2423,17 @@ const requestNewSummary = async () => {
     const result = await response.json();
     console.log('[Summary] Patient summary generated:', result);
     
-    // Update the displayed summary
-    const generatedSummary = (result.summary || '').trim();
-    patientSummary.value = generatedSummary;
-    newPatientSummary.value = generatedSummary;
-    summaryViewText.value = generatedSummary;
-    summaryEditText.value = generatedSummary;
-    isEditingSummaryTab.value = false;
+    // Check if there are empty slots
+    const hasEmptySlots = patientSummaries.value.length < 3;
     
-    if ($q && typeof $q.notify === 'function') {
-      $q.notify({
-        type: 'positive',
-        message: 'Patient summary generated successfully!',
-        timeout: 3000
-      });
+    if (hasEmptySlots) {
+      // Automatically save with 'newest' strategy (just adds to array)
+      await handleReplaceSummary('newest', (result.summary || '').trim());
+    } else {
+      // All slots full - show dialog to choose which summary to replace
+      savedCurrentSummaryForUndo.value = result.savedCurrentSummary || null;
+      newSummaryToReplace.value = (result.summary || '').trim();
+      showReplaceSummaryDialog.value = true;
     }
   } catch (error) {
     console.error('[Summary] Error generating patient summary:', error);
@@ -2310,6 +2450,7 @@ const requestNewSummary = async () => {
     loadingSummary.value = false;
   }
 };
+
 
 const startSummaryEdit = () => {
   summaryEditText.value = patientSummary.value || '';
