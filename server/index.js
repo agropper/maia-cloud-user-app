@@ -2572,9 +2572,11 @@ async function provisionUserAsync(userId, token) {
     // MAIA medical assistant instruction (from NEW-AGENT.txt)
     const maiaInstruction = getMaiaInstructionText();
 
-    // Create agent name: {userId}-agent-{YYYYMMDD}
-    const dateStr = new Date().toISOString().split('T')[0].replace(/-/g, '');
-    const agentName = `${userId}-agent-${dateStr}`;
+    // Create agent name: {userId}-agent-{YYYYMMDD}-{HRMINSEC} for uniqueness
+    const now = new Date();
+    const dateStr = now.toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD in UTC
+    const timeStr = now.toISOString().split('T')[1].split('.')[0].replace(/:/g, ''); // HHMMSS in UTC
+    const agentName = `${userId}-agent-${dateStr}-${timeStr}`;
 
     const agentClient = doClient.agent;
 
@@ -2630,24 +2632,35 @@ async function provisionUserAsync(userId, token) {
         const agentStatus = agentDetails?.status || agentDetails?.state || null;
         deploymentStatus = rawDeploymentStatus || agentStatus || 'STATUS_PENDING';
         
-        if (attempts === 0 || attempts % 6 === 0 || successStatuses.includes(deploymentStatus)) {
-          logProvisioning(userId, `📊 Deployment status check (${attempts}/${maxAttempts}): ${deploymentStatus}`, 'info');
+        // Add detailed debug messages
+        if (attempts === 0) {
+          logProvisioning(userId, `[NEW USER DETAIL] 🛰 First poll - Full agent payload: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
+        }
+        if (attempts === 0 || attempts % 6 === 0 || successStatuses.includes(deploymentStatus) || ['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(deploymentStatus)) {
+          logProvisioning(userId, `[NEW USER DETAIL] 📊 Deployment status check (${attempts}/${maxAttempts}): deploymentStatus=${rawDeploymentStatus || 'null'}, agentStatus=${agentStatus || 'null'}, resolved=${deploymentStatus}`, 'debug');
+          if (agentDetails?.deployment) {
+            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Deployment object: ${JSON.stringify(agentDetails.deployment, null, 2)}`, 'debug');
+          }
         }
         
         if (successStatuses.includes(deploymentStatus)) {
           logProvisioning(userId, `✅ Agent deployment reached ${deploymentStatus} after ${attempts} attempts`, 'success');
           break;
         } else if (['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(deploymentStatus)) {
-          // If this is the first check (attempt 0), wait 2 minutes and recheck before aborting
+          // If STATUS_FAILED occurs within first 2 minutes (first 24 attempts), wait 2 minutes and recheck
           // DO sometimes reports STATUS_FAILED early but then succeeds
-          if (attempts === 0) {
-            logProvisioning(userId, `⚠️ Early STATUS_FAILED detected on first check. Waiting 2 minutes before rechecking...`, 'warning');
+          const isEarlyFailure = attempts < 24; // First 2 minutes (24 attempts * 5s = 120s)
+          if (isEarlyFailure) {
+            logProvisioning(userId, `⚠️ Early STATUS_FAILED detected on attempt ${attempts} (within first 2 minutes). Waiting 2 minutes before rechecking...`, 'warning');
+            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details at failure: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
             await new Promise(resolve => setTimeout(resolve, 120000)); // Wait 2 minutes
             
             // Recheck status after waiting
             try {
               agentDetails = await agentClient.get(newAgent.uuid);
               const recheckDeploymentStatus = agentDetails?.deployment?.status || agentDetails?.deployment?.state || agentDetails?.status || agentDetails?.state || 'STATUS_PENDING';
+              logProvisioning(userId, `[NEW USER DETAIL] 📊 Status after 2-minute wait: ${recheckDeploymentStatus}`, 'debug');
+              logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details after wait: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
               logProvisioning(userId, `📊 Status after 2-minute wait: ${recheckDeploymentStatus}`, 'info');
               
               if (successStatuses.includes(recheckDeploymentStatus)) {
@@ -2656,7 +2669,7 @@ async function provisionUserAsync(userId, token) {
                 break;
               } else if (['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(recheckDeploymentStatus)) {
                 logProvisioning(userId, `❌ Agent deployment still failed after 2-minute wait. Status: ${recheckDeploymentStatus}`, 'error');
-                throw new Error('Agent deployment failed');
+          throw new Error('Agent deployment failed');
               } else {
                 // Status changed to something else (e.g., STATUS_DEPLOYING), continue polling
                 deploymentStatus = recheckDeploymentStatus;
@@ -2667,8 +2680,9 @@ async function provisionUserAsync(userId, token) {
               throw new Error('Agent deployment failed');
             }
           } else {
-            // Not the first check, fail immediately
-            logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus}`, 'error');
+            // Not an early failure, fail immediately
+            logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus} (attempt ${attempts})`, 'error');
+            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details at failure: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
             throw new Error('Agent deployment failed');
           }
         }
@@ -4802,43 +4816,43 @@ app.post('/api/update-knowledge-base', async (req, res) => {
     // Only start polling if we actually started a new job
     // Don't poll if we didn't start a job - that would find old completed jobs incorrectly
     if (jobId && indexingStarted) {
-      // Start polling for indexing jobs in background (non-blocking)
+    // Start polling for indexing jobs in background (non-blocking)
       // Poll every 30 seconds for max 30 minutes (60 polls)
-      const startTime = Date.now();
-      const pollDelayMs = 30000; // 30 seconds
-      const maxPolls = Math.ceil((30 * 60 * 1000) / pollDelayMs);
-      let pollCount = 0;
+    const startTime = Date.now();
+    const pollDelayMs = 30000; // 30 seconds
+    const maxPolls = Math.ceil((30 * 60 * 1000) / pollDelayMs);
+    let pollCount = 0;
       let activeJobId = jobId; // Track the specific job we started
-      let finished = false;
-      let pollTimer = null;
+    let finished = false;
+    let pollTimer = null;
 
-      const clearPollTimer = () => {
-        if (pollTimer) {
-          clearTimeout(pollTimer);
-          pollTimer = null;
-        }
-      };
+    const clearPollTimer = () => {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    };
 
-      const scheduleNextPoll = () => {
-        if (finished) return;
-        pollTimer = setTimeout(runPoll, pollDelayMs);
-      };
+    const scheduleNextPoll = () => {
+      if (finished) return;
+      pollTimer = setTimeout(runPoll, pollDelayMs);
+    };
 
-      const completeIndexing = async (job, fileCount, tokenValue, indexedFiles) => {
-        if (finished) return;
-        finished = true;
-        clearPollTimer();
+    const completeIndexing = async (job, fileCount, tokenValue, indexedFiles) => {
+      if (finished) return;
+      finished = true;
+      clearPollTimer();
 
-        const elapsedTime = Math.round((Date.now() - startTime) / 1000); // seconds
-        const elapsedMinutes = Math.floor(elapsedTime / 60);
-        const elapsedSeconds = elapsedTime % 60;
+      const elapsedTime = Math.round((Date.now() - startTime) / 1000); // seconds
+      const elapsedMinutes = Math.floor(elapsedTime / 60);
+      const elapsedSeconds = elapsedTime % 60;
 
-        const finalTokens = String(job.tokens || job.total_tokens || tokenValue || 0);
-        const finalFileCount = job.data_source_jobs?.[0]?.indexed_file_count || fileCount;
+      const finalTokens = String(job.tokens || job.total_tokens || tokenValue || 0);
+      const finalFileCount = job.data_source_jobs?.[0]?.indexed_file_count || fileCount;
 
-        try {
-          const finalUserDoc = await cloudant.getDocument('maia_users', userId);
-          if (finalUserDoc) {
+      try {
+        const finalUserDoc = await cloudant.getDocument('maia_users', userId);
+        if (finalUserDoc) {
             // Get current files in KB folder (source of truth for what should be indexed)
             const kbName = getKBNameFromUserDoc(finalUserDoc, userId);
             const currentFilesInKB = (finalUserDoc.files || [])
@@ -4857,26 +4871,26 @@ app.post('/api/update-knowledge-base', async (req, res) => {
             const indexingDurationSecondsRemainder = indexingDurationSeconds % 60;
             
             finalUserDoc.kbIndexedFiles = filesToIndex;
-            finalUserDoc.kbPendingFiles = undefined;
-            finalUserDoc.kbIndexingNeeded = false;
-            finalUserDoc.kbLastIndexedAt = new Date().toISOString();
-            finalUserDoc.kbLastIndexingJobId = activeJobId;
+          finalUserDoc.kbPendingFiles = undefined;
+          finalUserDoc.kbIndexingNeeded = false;
+          finalUserDoc.kbLastIndexedAt = new Date().toISOString();
+          finalUserDoc.kbLastIndexingJobId = activeJobId;
             finalUserDoc.kbIndexingDurationSeconds = indexingDurationSeconds;
             finalUserDoc.kbLastIndexingTokens = finalTokens;
-            if (finalUserDoc.workflowStage === 'indexing') {
-              if (finalUserDoc.files && finalUserDoc.files.length > 0) {
-                finalUserDoc.workflowStage = 'files_archived';
-              } else {
-                finalUserDoc.workflowStage = 'agent_deployed';
-              }
+          if (finalUserDoc.workflowStage === 'indexing') {
+            if (finalUserDoc.files && finalUserDoc.files.length > 0) {
+              finalUserDoc.workflowStage = 'files_archived';
+            } else {
+              finalUserDoc.workflowStage = 'agent_deployed';
             }
-            await cloudant.saveDocument('maia_users', finalUserDoc);
+          }
+          await cloudant.saveDocument('maia_users', finalUserDoc);
             
             // Log indexing completion with essential details
             console.log(`[KB INDEXING] ✅ Indexing completed successfully: ${filesToIndex.length} files, ${finalTokens} tokens, ${indexingDurationMinutes}m ${indexingDurationSecondsRemainder}s`);
             
-            invalidateResourceCache(userId);
-          }
+          invalidateResourceCache(userId);
+        }
 
         // Attach KB to agent if needed
         try {
@@ -4923,22 +4937,22 @@ app.post('/api/update-knowledge-base', async (req, res) => {
       }
     };
 
-      try {
-        const indexingUserDoc = await cloudant.getDocument('maia_users', userId);
-        if (indexingUserDoc) {
-          indexingUserDoc.workflowStage = 'indexing';
-          await cloudant.saveDocument('maia_users', indexingUserDoc);
-        }
-      } catch (err) {
-        console.error('[KB AUTO] Error setting workflowStage to indexing:', err);
+    try {
+      const indexingUserDoc = await cloudant.getDocument('maia_users', userId);
+      if (indexingUserDoc) {
+        indexingUserDoc.workflowStage = 'indexing';
+        await cloudant.saveDocument('maia_users', indexingUserDoc);
       }
+    } catch (err) {
+      console.error('[KB AUTO] Error setting workflowStage to indexing:', err);
+    }
 
-      const runPoll = async () => {
-        if (finished) return;
-        pollCount += 1;
+    const runPoll = async () => {
+      if (finished) return;
+      pollCount += 1;
 
-        try {
-          const indexingJobs = await doClient.indexing.listForKB(kbId);
+      try {
+        const indexingJobs = await doClient.indexing.listForKB(kbId);
          
          
          // listForKB already returns the jobs array, so indexingJobs should be an array
@@ -4976,26 +4990,26 @@ app.post('/api/update-knowledge-base', async (req, res) => {
            const kbDetails = await getCachedKB(kbId);
            const tokens = String(kbDetails?.total_tokens || kbDetails?.token_count || kbDetails?.tokens || job.tokens || job.total_tokens || 0);
 
-          const updatedUserDoc = await cloudant.getDocument('maia_users', userId);
-          const indexedFiles = updatedUserDoc?.kbPendingFiles || filesInKB;
-          const fileCount = job.data_source_jobs?.[0]?.indexed_file_count || indexedFiles.length;
+           const updatedUserDoc = await cloudant.getDocument('maia_users', userId);
+           const indexedFiles = updatedUserDoc?.kbPendingFiles || filesInKB;
+           const fileCount = job.data_source_jobs?.[0]?.indexed_file_count || indexedFiles.length;
 
           // Only mark as complete if this is the job we're tracking AND it's actually completed
           // Don't use hasIndexedData check - that will trigger on old completed jobs
           const currentJobId = job.uuid || job.id || job.indexing_job_id;
           const isCompleted = (status === 'INDEX_JOB_STATUS_COMPLETED' || 
-                            status === 'completed' ||
-                            status === 'COMPLETED' ||
-                            (job.completed === true) ||
-                            (job.phase === 'BATCH_JOB_PHASE_COMPLETED') ||
+                             status === 'completed' ||
+                             status === 'COMPLETED' ||
+                             (job.completed === true) ||
+                             (job.phase === 'BATCH_JOB_PHASE_COMPLETED') ||
                             (job.phase === 'BATCH_JOB_PHASE_SUCCEEDED')) &&
                             // Only complete if this is EXACTLY the job we started (activeJobId must match)
                             activeJobId === currentJobId;
 
           if (isCompleted) {
-            await completeIndexing(job, fileCount, tokens, indexedFiles);
-            return;
-          }
+             await completeIndexing(job, fileCount, tokens, indexedFiles);
+             return;
+           }
          } else {
            const failedJob = jobsArray.find(j => {
              const jobStatus = j.status || j.job_status || j.state;
@@ -5170,8 +5184,8 @@ app.get('/api/kb-indexing-status/:jobId', async (req, res) => {
               // This endpoint should only return status, not update state
               // The background polling will update the document with correct tokens and timing
               finalIndexedFiles = filesToIndex;
-              filesIndexed = finalIndexedFiles.length;
-              success = true;
+                filesIndexed = finalIndexedFiles.length;
+                success = true;
             } else {
               // No kbPendingFiles - check if kbIndexedFiles already exists (might have been set by another request)
               if (updatedUserDoc.kbIndexedFiles && Array.isArray(updatedUserDoc.kbIndexedFiles) && updatedUserDoc.kbIndexedFiles.length > 0) {
@@ -6020,7 +6034,7 @@ app.post('/api/patient-summary', async (req, res) => {
       if (summaries.length > 0) {
         summaries[summaries.length - 1].text = summary;
         summaries[summaries.length - 1].updatedAt = new Date().toISOString();
-        userDoc.patientSummary = summary;
+    userDoc.patientSummary = summary;
       } else {
         // No summaries exist, add first one
         addNewSummary(userDoc, summary, 'newest');
