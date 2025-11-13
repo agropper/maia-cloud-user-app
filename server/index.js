@@ -2623,7 +2623,7 @@ async function provisionUserAsync(userId, token) {
     const maxAttempts = 60; // 5 minutes max (60 attempts @ 5s interval)
     let attempts = 0;
 
-    while (attempts < maxAttempts && deploymentStatus !== 'STATUS_RUNNING') {
+    while (attempts < maxAttempts && !successStatuses.includes(deploymentStatus)) {
       try {
         agentDetails = await agentClient.get(newAgent.uuid);
         const rawDeploymentStatus = agentDetails?.deployment?.status || agentDetails?.deployment?.state || null;
@@ -2635,11 +2635,42 @@ async function provisionUserAsync(userId, token) {
         }
         
         if (successStatuses.includes(deploymentStatus)) {
-          logProvisioning(userId, `✅ Agent deployment reached STATUS_RUNNING after ${attempts} attempts`, 'success');
+          logProvisioning(userId, `✅ Agent deployment reached ${deploymentStatus} after ${attempts} attempts`, 'success');
           break;
         } else if (['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(deploymentStatus)) {
-          logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus}`, 'error');
-          throw new Error('Agent deployment failed');
+          // If this is the first check (attempt 0), wait 2 minutes and recheck before aborting
+          // DO sometimes reports STATUS_FAILED early but then succeeds
+          if (attempts === 0) {
+            logProvisioning(userId, `⚠️ Early STATUS_FAILED detected on first check. Waiting 2 minutes before rechecking...`, 'warning');
+            await new Promise(resolve => setTimeout(resolve, 120000)); // Wait 2 minutes
+            
+            // Recheck status after waiting
+            try {
+              agentDetails = await agentClient.get(newAgent.uuid);
+              const recheckDeploymentStatus = agentDetails?.deployment?.status || agentDetails?.deployment?.state || agentDetails?.status || agentDetails?.state || 'STATUS_PENDING';
+              logProvisioning(userId, `📊 Status after 2-minute wait: ${recheckDeploymentStatus}`, 'info');
+              
+              if (successStatuses.includes(recheckDeploymentStatus)) {
+                deploymentStatus = recheckDeploymentStatus;
+                logProvisioning(userId, `✅ Agent deployment succeeded after waiting. Status: ${deploymentStatus}`, 'success');
+                break;
+              } else if (['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(recheckDeploymentStatus)) {
+                logProvisioning(userId, `❌ Agent deployment still failed after 2-minute wait. Status: ${recheckDeploymentStatus}`, 'error');
+                throw new Error('Agent deployment failed');
+              } else {
+                // Status changed to something else (e.g., STATUS_DEPLOYING), continue polling
+                deploymentStatus = recheckDeploymentStatus;
+                logProvisioning(userId, `ℹ️ Status changed to ${deploymentStatus}. Continuing to poll...`, 'info');
+              }
+            } catch (recheckError) {
+              logProvisioning(userId, `❌ Error rechecking status after wait: ${recheckError.message}`, 'error');
+              throw new Error('Agent deployment failed');
+            }
+          } else {
+            // Not the first check, fail immediately
+            logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus}`, 'error');
+            throw new Error('Agent deployment failed');
+          }
         }
         
         attempts++;
