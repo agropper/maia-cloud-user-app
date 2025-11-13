@@ -4771,8 +4771,52 @@ app.post('/api/update-knowledge-base', async (req, res) => {
               } catch (startError) {
                 // Check if error is "already running"
                 if (startError.message && startError.message.includes('already') && startError.message.includes('running')) {
-                  console.log(`[KB Update] Indexing already running - will poll for job ID`);
-                  // Background polling will find the job
+                  console.log(`[KB Update] Indexing already running - finding active job ID`);
+                  
+                  // Try to find the active indexing job from the KB
+                  try {
+                    const indexingJobs = await doClient.indexing.listForKB(kbId);
+                    if (Array.isArray(indexingJobs) && indexingJobs.length > 0) {
+                      // Find the first active (pending or running) job
+                      const activeJob = indexingJobs.find(job => {
+                        const status = job.status || job.job_status || job.state;
+                        return status === 'INDEX_JOB_STATUS_PENDING' || 
+                               status === 'INDEX_JOB_STATUS_RUNNING' ||
+                               status === 'INDEX_JOB_STATUS_IN_PROGRESS' ||
+                               status === 'pending' ||
+                               status === 'running' ||
+                               status === 'in_progress';
+                      });
+                      
+                      if (activeJob) {
+                        jobId = activeJob.uuid || activeJob.id || activeJob.indexing_job_id;
+                        if (jobId) {
+                          console.log(`[KB Update] ✅ Found active indexing job: ${jobId}`);
+                          
+                          // Store job ID in user document
+                          const jobUserDoc = await cloudant.getDocument('maia_users', userId);
+                          if (jobUserDoc) {
+                            jobUserDoc.kbLastIndexingJobId = jobId;
+                            jobUserDoc.kbIndexingStartedAt = new Date().toISOString();
+                            jobUserDoc.workflowStage = 'indexing';
+                            await cloudant.saveDocument('maia_users', jobUserDoc);
+                            invalidateResourceCache(userId);
+                          }
+                          
+                          indexingStarted = true;
+                        } else {
+                          console.warn(`[KB Update] ⚠️ Found active job but no jobId in response`);
+                        }
+                      } else {
+                        console.warn(`[KB Update] ⚠️ No active indexing job found in KB's job list`);
+                      }
+                    } else {
+                      console.warn(`[KB Update] ⚠️ No indexing jobs found for KB`);
+                    }
+                  } catch (listError) {
+                    console.error(`[KB Update] ❌ Error listing indexing jobs:`, listError.message);
+                    // Continue - we'll try to poll anyway if userDoc has a job ID
+                  }
                 } else {
                   throw startError;
                 }
