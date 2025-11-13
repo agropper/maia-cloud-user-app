@@ -2632,15 +2632,8 @@ async function provisionUserAsync(userId, token) {
         const agentStatus = agentDetails?.status || agentDetails?.state || null;
         deploymentStatus = rawDeploymentStatus || agentStatus || 'STATUS_PENDING';
         
-        // Add detailed debug messages
-        if (attempts === 0) {
-          logProvisioning(userId, `[NEW USER DETAIL] 🛰 First poll - Full agent payload: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
-        }
-        if (attempts === 0 || attempts % 6 === 0 || successStatuses.includes(deploymentStatus) || ['STATUS_FAILED', 'FAILED', 'STATUS_ERROR'].includes(deploymentStatus)) {
-          logProvisioning(userId, `[NEW USER DETAIL] 📊 Deployment status check (${attempts}/${maxAttempts}): deploymentStatus=${rawDeploymentStatus || 'null'}, agentStatus=${agentStatus || 'null'}, resolved=${deploymentStatus}`, 'debug');
-          if (agentDetails?.deployment) {
-            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Deployment object: ${JSON.stringify(agentDetails.deployment, null, 2)}`, 'debug');
-          }
+        if (attempts === 0 || attempts % 6 === 0 || successStatuses.includes(deploymentStatus)) {
+          logProvisioning(userId, `📊 Deployment status check (${attempts}/${maxAttempts}): ${deploymentStatus}`, 'info');
         }
         
         if (successStatuses.includes(deploymentStatus)) {
@@ -2652,15 +2645,12 @@ async function provisionUserAsync(userId, token) {
           const isEarlyFailure = attempts < 24; // First 2 minutes (24 attempts * 5s = 120s)
           if (isEarlyFailure) {
             logProvisioning(userId, `⚠️ Early STATUS_FAILED detected on attempt ${attempts} (within first 2 minutes). Waiting 2 minutes before rechecking...`, 'warning');
-            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details at failure: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
             await new Promise(resolve => setTimeout(resolve, 120000)); // Wait 2 minutes
             
             // Recheck status after waiting
             try {
               agentDetails = await agentClient.get(newAgent.uuid);
               const recheckDeploymentStatus = agentDetails?.deployment?.status || agentDetails?.deployment?.state || agentDetails?.status || agentDetails?.state || 'STATUS_PENDING';
-              logProvisioning(userId, `[NEW USER DETAIL] 📊 Status after 2-minute wait: ${recheckDeploymentStatus}`, 'debug');
-              logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details after wait: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
               logProvisioning(userId, `📊 Status after 2-minute wait: ${recheckDeploymentStatus}`, 'info');
               
               if (successStatuses.includes(recheckDeploymentStatus)) {
@@ -2682,7 +2672,6 @@ async function provisionUserAsync(userId, token) {
           } else {
             // Not an early failure, fail immediately
             logProvisioning(userId, `❌ Agent deployment failed with status: ${deploymentStatus} (attempt ${attempts})`, 'error');
-            logProvisioning(userId, `[NEW USER DETAIL] 🛰 Agent details at failure: ${JSON.stringify(agentDetails, null, 2)}`, 'debug');
             throw new Error('Agent deployment failed');
           }
         }
