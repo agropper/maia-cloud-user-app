@@ -2107,7 +2107,7 @@ const handleReplaceSummaryByIndex = async (indexToReplace: number) => {
       throw new Error(errorData.message || 'Failed to save patient summary');
     }
 
-    const result = await response.json();
+    await response.json(); // Response processed, but result not needed
     
     // Reload summaries to get updated list
     await loadPatientSummary();
@@ -2158,7 +2158,7 @@ const handleReplaceSummary = async (replaceStrategy: 'keep' | 'oldest' | 'newest
       throw new Error(errorData.message || 'Failed to save patient summary');
     }
 
-    const result = await response.json();
+    await response.json(); // Response processed, but result not needed
     
     // Reload summaries to get updated list
     await loadPatientSummary();
@@ -2344,7 +2344,7 @@ const swapSummary = async (index: number) => {
       throw new Error(errorData.message || 'Failed to swap summary');
     }
 
-    const result = await response.json();
+    await response.json(); // Response processed, but result not needed
     // Reload summaries
     await loadPatientSummary();
     
