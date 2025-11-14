@@ -64,8 +64,8 @@
                         <video
                           style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain;"
                           controls
-                          preload="metadata"
-                          poster=""
+                          preload="auto"
+                          playsinline
                         >
                           <source src="/MAIA.mp4" type="video/mp4">
                           Your browser does not support the video tag.
@@ -86,10 +86,9 @@
                   <!-- Privacy link at bottom -->
                   <div class="text-center q-mt-lg q-mb-md">
                     <a 
-                      href="/Privacy.md" 
-                      target="_blank" 
-                      rel="noopener noreferrer"
-                      style="color: #1976d2; text-decoration: none; font-size: 0.9rem;"
+                      href="#" 
+                      @click.prevent="showPrivacyDialog = true"
+                      style="color: #1976d2; text-decoration: none; font-size: 0.9rem; cursor: pointer;"
                       class="text-primary"
                     >
                       Privacy, Security, Communities, and Risk
@@ -119,6 +118,9 @@
         </div>
       </q-page>
     </q-page-container>
+    
+    <!-- Privacy Dialog -->
+    <PrivacyDialog v-model="showPrivacyDialog" />
   </q-layout>
 </template>
 
@@ -127,6 +129,7 @@ import { ref, onMounted } from 'vue';
 import PasskeyAuth from './components/PasskeyAuth.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
+import PrivacyDialog from './components/PrivacyDialog.vue';
 
 interface User {
   userId: string;
@@ -151,6 +154,7 @@ const deepLinkShareId = ref<string | null>(null);
 const showDeepLinkAccess = ref(false);
 const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
+const showPrivacyDialog = ref(false);
 
 const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = null) => {
   if (!userData) return;
