@@ -2669,14 +2669,15 @@ async function provisionUserAsync(userId, token) {
           logProvisioning(userId, `✅ KB has ${datasources.length} data source(s)`, 'success');
         }
       } else {
-        // Create new KB with datasource (KB create automatically includes datasource if itemPath is provided)
+        // Create new KB without datasource (per-file datasources will be created when files are added)
+        // Note: We don't set itemPath to avoid creating a folder-level datasource during provisioning
         const kbCreateOptions = {
           name: kbName,
           description: `Knowledge base for ${userId}`,
           projectId: projectId.trim(),
           databaseId: databaseId.trim(),
           bucketName: bucketName,
-          itemPath: `${userId}/${kbName}/`,
+          // itemPath intentionally omitted - per-file datasources will be created when files are added
           region: process.env.DO_REGION || 'tor1'
         };
         
@@ -7834,7 +7835,25 @@ if (isProduction) {
       return res.status(404).json({ error: 'API endpoint not found' });
     }
     
-    // For all other routes, serve index.html (SPA fallback)
+    // Check if this is a static asset request (CSS, JS, images, etc.)
+    const isStaticAsset = req.path.startsWith('/assets/') || 
+                          req.path.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|webp|avif)$/);
+    
+    if (isStaticAsset) {
+      // For static assets, check if file exists
+      const filePath = path.join(distPath, req.path);
+      if (existsSync(filePath)) {
+        // File exists - serve it (should have been caught by static middleware, but handle it anyway)
+        console.log(`📦 [CATCH-ALL] Serving static asset: ${req.path}`);
+        return res.sendFile(filePath);
+      } else {
+        // File doesn't exist - return 404 (don't serve index.html for missing assets)
+        console.log(`❌ [CATCH-ALL] Static asset not found: ${req.path}`);
+        return res.status(404).send('Asset not found');
+      }
+    }
+    
+    // For SPA routes, serve index.html (SPA fallback)
     console.log(`📄 [CATCH-ALL] Serving index.html for: ${req.path}`);
     res.sendFile(indexPath, (err) => {
       if (err) {
