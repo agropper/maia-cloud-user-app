@@ -2179,6 +2179,7 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
   logProvisioning(userId, `🔍 Starting comprehensive verification...`, 'info');
   
   const verificationResults = {
+    kbName: { passed: false, message: '' },
     bucketFolders: { passed: false, message: '' },
     agentExists: { passed: false, message: '' },
     agentDeployed: { passed: false, message: '' },
@@ -2188,6 +2189,17 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
   };
   
   try {
+    // 0. Verify KB name is set
+    if (kbName) {
+      verificationResults.kbName.passed = true;
+      verificationResults.kbName.message = `KB name: ${kbName}`;
+      logProvisioning(userId, `✅ KB name verified: ${kbName}`, 'success');
+    } else {
+      verificationResults.kbName.message = 'KB name not set';
+      logProvisioning(userId, `❌ KB name not set`, 'error');
+    }
+    
+    // 1. Verify bucket folders (check accessibility)
     // 1. Verify bucket folders (check accessibility)
     try {
       const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
