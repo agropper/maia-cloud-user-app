@@ -1959,17 +1959,37 @@ app.get('/api/admin/provision', async (req, res) => {
       `);
     }
 
-    // Validate token
+    // Validate token (allow viewing completed provisioning for 24 hours)
     if (!userDoc.provisionToken || userDoc.provisionToken !== token) {
-      return res.status(401).send(`
-        <html>
-          <head><title>Provision Error</title></head>
-          <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
-            <h2 style="color: #d32f2f;">❌ Invalid Token</h2>
-            <p>The provisioning token is invalid or has expired.</p>
-          </body>
-        </html>
-      `);
+      // If user is already provisioned, allow viewing the page without token for 24 hours
+      if (userDoc.provisioned && userDoc.provisionedAt) {
+        const provisionedAt = new Date(userDoc.provisionedAt);
+        const hoursSinceProvisioned = (Date.now() - provisionedAt.getTime()) / (1000 * 60 * 60);
+        if (hoursSinceProvisioned <= 24) {
+          // Allow viewing completed provisioning page for 24 hours without token
+          // This allows admins to view the results even after the page auto-refreshes
+        } else {
+          return res.status(401).send(`
+            <html>
+              <head><title>Provision Error</title></head>
+              <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+                <h2 style="color: #d32f2f;">❌ Invalid Token</h2>
+                <p>The provisioning token is invalid or has expired. Provisioning was completed more than 24 hours ago.</p>
+              </body>
+            </html>
+          `);
+        }
+      } else {
+        return res.status(401).send(`
+          <html>
+            <head><title>Provision Error</title></head>
+            <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+              <h2 style="color: #d32f2f;">❌ Invalid Token</h2>
+              <p>The provisioning token is invalid or has expired.</p>
+            </body>
+          </html>
+        `);
+      }
     }
 
     // Check if user already has an agent
@@ -2713,7 +2733,60 @@ async function provisionUserAsync(userId, token) {
           item_path: ds.item_path || ds.spaces_data_source?.item_path
         })), null, 2));
         
-        // Find and delete the datasource we just created (pointing to KB folder)
+        // FIRST: Check for and cancel any active indexing jobs BEFORE deleting datasource
+        // (Datasource cannot be deleted while it's being indexed)
+        console.log(`[KB VERIFY] Checking for active indexing jobs for KB ${kbId}...`);
+        let activeJobsCancelled = false;
+        try {
+          const indexingJobs = await doClient.indexing.listForKB(kbId);
+          console.log(`[KB VERIFY] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
+            uuid: job.uuid || job.id,
+            status: job.status,
+            created_at: job.created_at
+          })), null, 2));
+          
+          // Find active indexing jobs (in progress or pending)
+          const activeJobs = indexingJobs.filter(job => {
+            const status = job.status || '';
+            return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                   status === 'INDEX_JOB_STATUS_PENDING' ||
+                   status === 'INDEX_JOB_STATUS_QUEUED';
+          });
+          
+          if (activeJobs.length > 0) {
+            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), cancelling immediately...`);
+            logProvisioning(userId, `⚠️  Found active indexing job(s), cancelling before deleting datasource...`, 'warning');
+            
+            // Cancel all active jobs immediately
+            for (const job of activeJobs) {
+              const jobId = job.uuid || job.id;
+              console.log(`[KB VERIFY] Cancelling indexing job ${jobId}...`);
+              try {
+                await doClient.indexing.cancel(jobId);
+                console.log(`[KB VERIFY] ✅ Successfully cancelled indexing job ${jobId}`);
+                logProvisioning(userId, `✅ Cancelled indexing job ${jobId}`, 'success');
+                activeJobsCancelled = true;
+              } catch (cancelError) {
+                console.error(`[KB VERIFY] ❌ Error cancelling indexing job ${jobId}:`, cancelError.message);
+                logProvisioning(userId, `⚠️  Warning: Could not cancel indexing job ${jobId}: ${cancelError.message}`, 'warning');
+              }
+            }
+            
+            // If we cancelled jobs, wait a moment for the cancellation to propagate
+            if (activeJobsCancelled) {
+              console.log(`[KB VERIFY] Waiting 5 seconds for cancellation to propagate...`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+          } else {
+            console.log(`[KB VERIFY] ✅ No active indexing jobs found`);
+            logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
+          }
+        } catch (jobCheckError) {
+          console.error(`[KB VERIFY] ❌ Error checking indexing jobs:`, jobCheckError.message);
+          logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
+        }
+        
+        // NOW: Delete the datasource (after cancelling any indexing jobs)
         const kbFolderDataSource = datasources.find(ds => {
           const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
           return dsPath === kbFolderPath || dsPath.startsWith(kbFolderPath);
@@ -2735,27 +2808,20 @@ async function provisionUserAsync(userId, token) {
           logProvisioning(userId, `⚠️  Warning: Could not find temporary datasource to delete`, 'warning');
         }
         
-        // Verify no indexing jobs are running
-        console.log(`[KB VERIFY] Checking for active indexing jobs for KB ${kbId}...`);
+        // Final verification: Check again for any indexing jobs that might have started
+        console.log(`[KB VERIFY] Final check for any remaining indexing jobs...`);
         try {
-          const indexingJobs = await doClient.indexing.listForKB(kbId);
-          console.log(`[KB VERIFY] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
-            uuid: job.uuid || job.id,
-            status: job.status,
-            created_at: job.created_at
-          })), null, 2));
-          
-          // Find active indexing jobs (in progress or pending)
-          const activeJobs = indexingJobs.filter(job => {
+          const finalIndexingJobs = await doClient.indexing.listForKB(kbId);
+          const finalActiveJobs = finalIndexingJobs.filter(job => {
             const status = job.status || '';
             return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
                    status === 'INDEX_JOB_STATUS_PENDING' ||
                    status === 'INDEX_JOB_STATUS_QUEUED';
           });
           
-          if (activeJobs.length > 0) {
-            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), waiting 1 minute...`);
-            logProvisioning(userId, `⚠️  Found active indexing job(s), waiting 1 minute before checking again...`, 'warning');
+          if (finalActiveJobs.length > 0) {
+            console.log(`[KB VERIFY] ⚠️  Found ${finalActiveJobs.length} active indexing job(s) after datasource deletion, waiting 1 minute...`);
+            logProvisioning(userId, `⚠️  Found active indexing job(s) after datasource deletion, waiting 1 minute before checking again...`, 'warning');
             
             // Wait 1 minute
             await new Promise(resolve => setTimeout(resolve, 60000));
@@ -2789,11 +2855,11 @@ async function provisionUserAsync(userId, token) {
               }
             }
           } else {
-            console.log(`[KB VERIFY] ✅ No active indexing jobs found`);
+            console.log(`[KB VERIFY] ✅ No active indexing jobs found in final check`);
             logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
           }
         } catch (jobCheckError) {
-          console.error(`[KB VERIFY] ❌ Error checking indexing jobs:`, jobCheckError.message);
+          console.error(`[KB VERIFY] ❌ Error in final indexing job check:`, jobCheckError.message);
           logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
         }
       }
@@ -3107,8 +3173,10 @@ async function provisionUserAsync(userId, token) {
         deepLinkAgentOverrides: docClone.deepLinkAgentOverrides,
         provisioned: true,
         provisionedAt: timestamp,
-        provisionToken: undefined,
-        provisionTokenCreatedAt: undefined
+        // Keep provisionToken for 24 hours after completion so the tracking page remains accessible
+        // Token will be cleared after 24 hours by a separate cleanup process if needed
+        // provisionToken: undefined,  // Keep token for viewing completed provisioning
+        // provisionTokenCreatedAt: undefined  // Keep timestamp for viewing completed provisioning
       };
     });
 
