@@ -185,7 +185,7 @@
                   Tokens: {{ indexingStatus.tokens || 'Calculating...' }}
                 </div>
                 <div class="text-caption text-grey-6 q-mt-xs">
-                  Indexing can take about 200 pages per minute. This may take up to 60 minutes.
+                  This may take up to 60 minutes.
                 </div>
               </div>
 
