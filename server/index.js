@@ -2733,10 +2733,13 @@ async function provisionUserAsync(userId, token) {
           item_path: ds.item_path || ds.spaces_data_source?.item_path
         })), null, 2));
         
-        // FIRST: Check for and cancel any active indexing jobs BEFORE deleting datasource
+        // FIRST: Wait for any active indexing jobs to complete BEFORE deleting datasource
         // (Datasource cannot be deleted while it's being indexed)
+        // Note: We wait for completion instead of cancelling because:
+        // 1. Cancellation returns 405 (Method Not Allowed) for PENDING/IN_PROGRESS jobs
+        // 2. The KB folder is empty, so indexing should complete quickly (10-30 seconds)
         console.log(`[KB VERIFY] Checking for active indexing jobs for KB ${kbId}...`);
-        let activeJobsCancelled = false;
+        let indexingJobCompleted = false;
         try {
           const indexingJobs = await doClient.indexing.listForKB(kbId);
           console.log(`[KB VERIFY] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
@@ -2754,39 +2757,51 @@ async function provisionUserAsync(userId, token) {
           });
           
           if (activeJobs.length > 0) {
-            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), cancelling immediately...`);
-            logProvisioning(userId, `⚠️  Found active indexing job(s), cancelling before deleting datasource...`, 'warning');
+            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), waiting for completion (KB folder is empty, should finish quickly)...`);
+            logProvisioning(userId, `⚠️  Found active indexing job(s), waiting for completion before deleting datasource...`, 'warning');
             
-            // Cancel all active jobs immediately
-            for (const job of activeJobs) {
-              const jobId = job.uuid || job.id;
-              console.log(`[KB VERIFY] Cancelling indexing job ${jobId}...`);
-              try {
-                await doClient.indexing.cancel(jobId);
-                console.log(`[KB VERIFY] ✅ Successfully cancelled indexing job ${jobId}`);
-                logProvisioning(userId, `✅ Cancelled indexing job ${jobId}`, 'success');
-                activeJobsCancelled = true;
-              } catch (cancelError) {
-                console.error(`[KB VERIFY] ❌ Error cancelling indexing job ${jobId}:`, cancelError.message);
-                logProvisioning(userId, `⚠️  Warning: Could not cancel indexing job ${jobId}: ${cancelError.message}`, 'warning');
+            // Wait for jobs to complete (poll every 5 seconds, max 2 minutes)
+            const maxWaitTime = 120000; // 2 minutes
+            const pollInterval = 5000; // 5 seconds
+            const startTime = Date.now();
+            let allJobsCompleted = false;
+            
+            while (!allJobsCompleted && (Date.now() - startTime) < maxWaitTime) {
+              await new Promise(resolve => setTimeout(resolve, pollInterval));
+              
+              const currentJobs = await doClient.indexing.listForKB(kbId);
+              const stillActive = currentJobs.filter(job => {
+                const status = job.status || '';
+                return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                       status === 'INDEX_JOB_STATUS_PENDING' ||
+                       status === 'INDEX_JOB_STATUS_QUEUED';
+              });
+              
+              if (stillActive.length === 0) {
+                allJobsCompleted = true;
+                indexingJobCompleted = true;
+                console.log(`[KB VERIFY] ✅ All indexing jobs completed after ${Math.round((Date.now() - startTime) / 1000)}s`);
+                logProvisioning(userId, `✅ All indexing jobs completed`, 'success');
+              } else {
+                console.log(`[KB VERIFY] Still waiting for ${stillActive.length} indexing job(s) to complete... (elapsed: ${Math.round((Date.now() - startTime) / 1000)}s)`);
               }
             }
             
-            // If we cancelled jobs, wait a moment for the cancellation to propagate
-            if (activeJobsCancelled) {
-              console.log(`[KB VERIFY] Waiting 5 seconds for cancellation to propagate...`);
-              await new Promise(resolve => setTimeout(resolve, 5000));
+            if (!allJobsCompleted) {
+              console.log(`[KB VERIFY] ⚠️  Indexing jobs did not complete within 2 minutes, proceeding anyway...`);
+              logProvisioning(userId, `⚠️  Indexing jobs did not complete within timeout, proceeding with datasource deletion...`, 'warning');
             }
           } else {
             console.log(`[KB VERIFY] ✅ No active indexing jobs found`);
             logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
+            indexingJobCompleted = true;
           }
         } catch (jobCheckError) {
           console.error(`[KB VERIFY] ❌ Error checking indexing jobs:`, jobCheckError.message);
           logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
         }
         
-        // NOW: Delete the datasource (after cancelling any indexing jobs)
+        // NOW: Delete the datasource (after waiting for indexing jobs to complete)
         const kbFolderDataSource = datasources.find(ds => {
           const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
           return dsPath === kbFolderPath || dsPath.startsWith(kbFolderPath);
@@ -2795,72 +2810,37 @@ async function provisionUserAsync(userId, token) {
         if (kbFolderDataSource) {
           const dsUuid = kbFolderDataSource.uuid || kbFolderDataSource.id;
           console.log(`[KB VERIFY] Deleting datasource ${dsUuid} pointing to ${kbFolderPath}...`);
-          try {
-            await doClient.kb.deleteDataSource(kbId, dsUuid);
-            console.log(`[KB VERIFY] ✅ Successfully deleted datasource ${dsUuid}`);
-            logProvisioning(userId, `✅ Deleted temporary datasource from KB`, 'success');
-          } catch (deleteError) {
-            console.error(`[KB VERIFY] ❌ Error deleting datasource:`, deleteError.message);
-            logProvisioning(userId, `⚠️  Warning: Could not delete temporary datasource: ${deleteError.message}`, 'warning');
+          
+          // Retry deletion up to 3 times with delays (in case job just completed)
+          let deleted = false;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              await doClient.kb.deleteDataSource(kbId, dsUuid);
+              console.log(`[KB VERIFY] ✅ Successfully deleted datasource ${dsUuid} (attempt ${attempt})`);
+              logProvisioning(userId, `✅ Deleted temporary datasource from KB`, 'success');
+              deleted = true;
+              break;
+            } catch (deleteError) {
+              const errorMsg = deleteError.message || '';
+              console.error(`[KB VERIFY] ❌ Error deleting datasource (attempt ${attempt}/3):`, errorMsg);
+              
+              // If it's a 400 error and we haven't exhausted retries, wait and retry
+              if (attempt < 3 && (errorMsg.includes('400') || errorMsg.includes('bad_request'))) {
+                console.log(`[KB VERIFY] Waiting 5 seconds before retry...`);
+                await new Promise(resolve => setTimeout(resolve, 5000));
+              } else {
+                logProvisioning(userId, `⚠️  Warning: Could not delete temporary datasource after ${attempt} attempt(s): ${errorMsg}`, 'warning');
+              }
+            }
+          }
+          
+          if (!deleted) {
+            console.error(`[KB VERIFY] ❌ Failed to delete datasource after 3 attempts`);
+            logProvisioning(userId, `❌ Failed to delete temporary datasource after 3 attempts`, 'error');
           }
         } else {
           console.log(`[KB VERIFY] ⚠️  Could not find datasource pointing to ${kbFolderPath} to delete`);
           logProvisioning(userId, `⚠️  Warning: Could not find temporary datasource to delete`, 'warning');
-        }
-        
-        // Final verification: Check again for any indexing jobs that might have started
-        console.log(`[KB VERIFY] Final check for any remaining indexing jobs...`);
-        try {
-          const finalIndexingJobs = await doClient.indexing.listForKB(kbId);
-          const finalActiveJobs = finalIndexingJobs.filter(job => {
-            const status = job.status || '';
-            return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
-                   status === 'INDEX_JOB_STATUS_PENDING' ||
-                   status === 'INDEX_JOB_STATUS_QUEUED';
-          });
-          
-          if (finalActiveJobs.length > 0) {
-            console.log(`[KB VERIFY] ⚠️  Found ${finalActiveJobs.length} active indexing job(s) after datasource deletion, waiting 1 minute...`);
-            logProvisioning(userId, `⚠️  Found active indexing job(s) after datasource deletion, waiting 1 minute before checking again...`, 'warning');
-            
-            // Wait 1 minute
-            await new Promise(resolve => setTimeout(resolve, 60000));
-            
-            // Check again
-            console.log(`[KB VERIFY] Re-checking indexing jobs after 1 minute wait...`);
-            const indexingJobsAfterWait = await doClient.indexing.listForKB(kbId);
-            const activeJobsAfterWait = indexingJobsAfterWait.filter(job => {
-              const status = job.status || '';
-              return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
-                     status === 'INDEX_JOB_STATUS_PENDING' ||
-                     status === 'INDEX_JOB_STATUS_QUEUED';
-            });
-            
-            console.log(`[KB VERIFY] After wait, found ${activeJobsAfterWait.length} active indexing job(s):`, JSON.stringify(activeJobsAfterWait.map(job => ({
-              uuid: job.uuid || job.id,
-              status: job.status
-            })), null, 2));
-            
-            // Cancel any remaining active jobs
-            for (const job of activeJobsAfterWait) {
-              const jobId = job.uuid || job.id;
-              console.log(`[KB VERIFY] Cancelling indexing job ${jobId}...`);
-              try {
-                await doClient.indexing.cancel(jobId);
-                console.log(`[KB VERIFY] ✅ Successfully cancelled indexing job ${jobId}`);
-                logProvisioning(userId, `✅ Cancelled indexing job ${jobId}`, 'success');
-              } catch (cancelError) {
-                console.error(`[KB VERIFY] ❌ Error cancelling indexing job ${jobId}:`, cancelError.message);
-                logProvisioning(userId, `⚠️  Warning: Could not cancel indexing job ${jobId}: ${cancelError.message}`, 'warning');
-              }
-            }
-          } else {
-            console.log(`[KB VERIFY] ✅ No active indexing jobs found in final check`);
-            logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
-          }
-        } catch (jobCheckError) {
-          console.error(`[KB VERIFY] ❌ Error in final indexing job check:`, jobCheckError.message);
-          logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
         }
       }
       
