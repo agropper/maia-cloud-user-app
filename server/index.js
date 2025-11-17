@@ -2680,15 +2680,16 @@ async function provisionUserAsync(userId, token) {
           logProvisioning(userId, `✅ KB has ${datasources.length} data source(s)`, 'success');
         }
       } else {
-        // Create new KB without datasource (per-file datasources will be created when files are added)
-        // Note: We don't set itemPath to avoid creating a folder-level datasource during provisioning
+        // Create new KB with datasource pointing to empty KB folder (will be deleted after creation)
+        // This satisfies the API requirement for a datasource, but we'll delete it immediately
+        const kbFolderPath = `${userId}/${kbName}/`;
         const kbCreateOptions = {
           name: kbName,
           description: `Knowledge base for ${userId}`,
           projectId: projectId.trim(),
           databaseId: databaseId.trim(),
           bucketName: bucketName,
-          // itemPath intentionally omitted - per-file datasources will be created when files are added
+          itemPath: kbFolderPath, // Point to KB folder (should be empty)
           region: process.env.DO_REGION || 'tor1'
         };
         
@@ -2696,11 +2697,105 @@ async function provisionUserAsync(userId, token) {
           kbCreateOptions.embeddingModelId = embeddingModelId;
         }
         
+        console.log(`[KB VERIFY] Creating KB with datasource pointing to: ${kbFolderPath}`);
         const kbResult = await doClient.kb.create(kbCreateOptions);
         kbId = kbResult.uuid || kbResult.id;
         kbDetails = await doClient.kb.get(kbId);
         
-        logProvisioning(userId, `✅ Created new KB: ${kbName} (${kbId}) - per-file datasources will be created when files are added`, 'success');
+        console.log(`[KB VERIFY] KB created: ${kbId}, response:`, JSON.stringify(kbResult, null, 2));
+        logProvisioning(userId, `✅ Created new KB: ${kbName} (${kbId})`, 'success');
+        
+        // Get datasources to find the one we just created
+        console.log(`[KB VERIFY] Fetching datasources for KB ${kbId}...`);
+        const datasources = await doClient.kb.listDataSources(kbId);
+        console.log(`[KB VERIFY] Found ${datasources.length} datasource(s):`, JSON.stringify(datasources.map(ds => ({
+          uuid: ds.uuid || ds.id,
+          item_path: ds.item_path || ds.spaces_data_source?.item_path
+        })), null, 2));
+        
+        // Find and delete the datasource we just created (pointing to KB folder)
+        const kbFolderDataSource = datasources.find(ds => {
+          const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
+          return dsPath === kbFolderPath || dsPath.startsWith(kbFolderPath);
+        });
+        
+        if (kbFolderDataSource) {
+          const dsUuid = kbFolderDataSource.uuid || kbFolderDataSource.id;
+          console.log(`[KB VERIFY] Deleting datasource ${dsUuid} pointing to ${kbFolderPath}...`);
+          try {
+            await doClient.kb.deleteDataSource(kbId, dsUuid);
+            console.log(`[KB VERIFY] ✅ Successfully deleted datasource ${dsUuid}`);
+            logProvisioning(userId, `✅ Deleted temporary datasource from KB`, 'success');
+          } catch (deleteError) {
+            console.error(`[KB VERIFY] ❌ Error deleting datasource:`, deleteError.message);
+            logProvisioning(userId, `⚠️  Warning: Could not delete temporary datasource: ${deleteError.message}`, 'warning');
+          }
+        } else {
+          console.log(`[KB VERIFY] ⚠️  Could not find datasource pointing to ${kbFolderPath} to delete`);
+          logProvisioning(userId, `⚠️  Warning: Could not find temporary datasource to delete`, 'warning');
+        }
+        
+        // Verify no indexing jobs are running
+        console.log(`[KB VERIFY] Checking for active indexing jobs for KB ${kbId}...`);
+        try {
+          const indexingJobs = await doClient.indexing.listForKB(kbId);
+          console.log(`[KB VERIFY] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
+            uuid: job.uuid || job.id,
+            status: job.status,
+            created_at: job.created_at
+          })), null, 2));
+          
+          // Find active indexing jobs (in progress or pending)
+          const activeJobs = indexingJobs.filter(job => {
+            const status = job.status || '';
+            return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                   status === 'INDEX_JOB_STATUS_PENDING' ||
+                   status === 'INDEX_JOB_STATUS_QUEUED';
+          });
+          
+          if (activeJobs.length > 0) {
+            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), waiting 1 minute...`);
+            logProvisioning(userId, `⚠️  Found active indexing job(s), waiting 1 minute before checking again...`, 'warning');
+            
+            // Wait 1 minute
+            await new Promise(resolve => setTimeout(resolve, 60000));
+            
+            // Check again
+            console.log(`[KB VERIFY] Re-checking indexing jobs after 1 minute wait...`);
+            const indexingJobsAfterWait = await doClient.indexing.listForKB(kbId);
+            const activeJobsAfterWait = indexingJobsAfterWait.filter(job => {
+              const status = job.status || '';
+              return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                     status === 'INDEX_JOB_STATUS_PENDING' ||
+                     status === 'INDEX_JOB_STATUS_QUEUED';
+            });
+            
+            console.log(`[KB VERIFY] After wait, found ${activeJobsAfterWait.length} active indexing job(s):`, JSON.stringify(activeJobsAfterWait.map(job => ({
+              uuid: job.uuid || job.id,
+              status: job.status
+            })), null, 2));
+            
+            // Cancel any remaining active jobs
+            for (const job of activeJobsAfterWait) {
+              const jobId = job.uuid || job.id;
+              console.log(`[KB VERIFY] Cancelling indexing job ${jobId}...`);
+              try {
+                await doClient.indexing.cancel(jobId);
+                console.log(`[KB VERIFY] ✅ Successfully cancelled indexing job ${jobId}`);
+                logProvisioning(userId, `✅ Cancelled indexing job ${jobId}`, 'success');
+              } catch (cancelError) {
+                console.error(`[KB VERIFY] ❌ Error cancelling indexing job ${jobId}:`, cancelError.message);
+                logProvisioning(userId, `⚠️  Warning: Could not cancel indexing job ${jobId}: ${cancelError.message}`, 'warning');
+              }
+            }
+          } else {
+            console.log(`[KB VERIFY] ✅ No active indexing jobs found`);
+            logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
+          }
+        } catch (jobCheckError) {
+          console.error(`[KB VERIFY] ❌ Error checking indexing jobs:`, jobCheckError.message);
+          logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
+        }
       }
       
       // Update user document with KB info
