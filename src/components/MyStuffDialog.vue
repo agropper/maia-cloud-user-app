@@ -947,7 +947,7 @@ const loadFiles = async () => {
         indexingStatus.value = {
           phase: 'indexing',
           message: 'Indexing in progress...',
-          kb: null,
+          kb: '',
           tokens: '0',
           filesIndexed: 0,
           progress: 0,

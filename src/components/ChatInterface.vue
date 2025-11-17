@@ -2905,7 +2905,7 @@ const handleLinkClick = (part: { type: 'text' | 'link'; text: string; tab?: stri
 };
 
 // Map workflow stages to user-friendly tips
-const getWorkflowTip = (workflowStage: string | null, hasKB: boolean = false, hasFilesInKB: boolean = false): string => {
+const getWorkflowTip = (workflowStage: string | null, hasFilesInKB: boolean = false): string => {
   const tips: Record<string, string> = {
     'request_sent': 'Support requested. You will be notified when your private AI agent is ready.',
     'agent_deployed': 'Your agent is ready. Use the paperclip to import files for your knowledge base.',
@@ -2993,7 +2993,7 @@ const updateContextualTip = async () => {
     }
 
     // Priority 4: Get tip for workflow stage
-    const tip = getWorkflowTip(workflowStage, hasKB, hasFilesInKB);
+    const tip = getWorkflowTip(workflowStage, hasFilesInKB);
     if (tip) {
       contextualTip.value = tip;
     } else {
