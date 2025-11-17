@@ -91,7 +91,7 @@ const columns = [
   {
     name: 'actions',
     label: 'Actions',
-    align: 'center',
+    align: 'center' as const,
     field: 'actions',
     sortable: false
   },
@@ -99,56 +99,56 @@ const columns = [
     name: 'userId',
     required: true,
     label: 'User ID',
-    align: 'left',
+    align: 'left' as const,
     field: 'userId',
     sortable: true
   },
   {
     name: 'workflowStage',
     label: 'Workflow Stage',
-    align: 'left',
+    align: 'left' as const,
     field: 'workflowStage',
     sortable: true
   },
   {
     name: 'lastActivity',
     label: 'Last Activity',
-    align: 'left',
+    align: 'left' as const,
     field: 'lastActivity',
     sortable: true
   },
   {
     name: 'provisionedDate',
     label: 'Provisioned On',
-    align: 'left',
+    align: 'left' as const,
     field: 'provisionedDate',
     sortable: true
   },
   {
     name: 'totalStorageMB',
     label: 'Storage (MB)',
-    align: 'right',
+    align: 'right' as const,
     field: 'totalStorageMB',
     sortable: true
   },
   {
     name: 'filesIndexed',
     label: 'Files Indexed',
-    align: 'center',
+    align: 'center' as const,
     field: 'filesIndexed',
     sortable: true
   },
   {
     name: 'savedChatsCount',
     label: 'Saved Chats',
-    align: 'center',
+    align: 'center' as const,
     field: 'savedChatsCount',
     sortable: true
   },
   {
     name: 'deepLinkUsersCount',
     label: '# Deep Link Users',
-    align: 'center',
+    align: 'center' as const,
     field: 'deepLinkUsersCount',
     sortable: true
   }

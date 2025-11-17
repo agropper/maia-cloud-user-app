@@ -3,7 +3,7 @@
  */
 
 import { createApp } from 'vue';
-import { Quasar } from 'quasar';
+import { Quasar, Dialog, Notify } from 'quasar';
 import App from './App.vue';
 
 // Quasar components and styles
@@ -14,8 +14,8 @@ const app = createApp(App);
 
 app.use(Quasar, {
   plugins: {
-    Dialog: true,
-    Notify: true
+    Dialog,
+    Notify
   }
 });
 
