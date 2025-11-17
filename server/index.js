@@ -2200,7 +2200,6 @@ async function verifyProvisioningComplete(userId, agentId, agentName, kbName, ex
     }
     
     // 1. Verify bucket folders (check accessibility)
-    // 1. Verify bucket folders (check accessibility)
     try {
       const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
       const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
