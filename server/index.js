@@ -752,6 +752,32 @@ const getDeepLinkUserById = async (userId) => {
   return await cloudant.getDocument('maia_users', userId);
 };
 
+// Add deep link user to chat's deepLinkUserIds array
+const addDeepLinkUserToChat = async (chat, deepLinkUserId) => {
+  if (!chat || !deepLinkUserId) return chat;
+  
+  // Ensure deepLinkUserIds array exists
+  if (!Array.isArray(chat.deepLinkUserIds)) {
+    chat.deepLinkUserIds = [];
+  }
+  
+  // Add user if not already in the list
+  if (!chat.deepLinkUserIds.includes(deepLinkUserId)) {
+    chat.deepLinkUserIds.push(deepLinkUserId);
+    chat.updatedAt = new Date().toISOString();
+    
+    // Save the updated chat document
+    try {
+      await cloudant.saveDocument('maia_chats', chat);
+    } catch (error) {
+      console.error(`[Deep Link Tracking] Error saving chat ${chat._id} with deep link user ${deepLinkUserId}:`, error.message);
+      // Don't throw - this is non-critical tracking
+    }
+  }
+  
+  return chat;
+};
+
 const attachShareToUserDoc = (userDoc, shareId) => {
   const shares = ensureArray(userDoc.deepLinkShareIds);
   if (shareId && !shares.includes(shareId)) {
@@ -892,6 +918,12 @@ app.get('/api/deep-link/session', async (req, res) => {
       };
 
       if (deepLink) {
+        // Add deep link user to chat's tracking list
+        const deepLinkUserId = req.session.deepLinkUserId || req.session.userId;
+        if (deepLinkUserId) {
+          await addDeepLinkUserToChat(chat, deepLinkUserId);
+        }
+        
         if (!req.session.deepLinkShareIds?.includes(shareId)) {
           req.session.deepLinkShareIds = ensureArray(req.session.deepLinkShareIds);
           req.session.deepLinkShareIds.push(shareId);
@@ -911,6 +943,10 @@ app.get('/api/deep-link/session', async (req, res) => {
 
       return res.json(response);
     } else if (isDeepLinkSession(req) && req.session.deepLinkUserId) {
+      const deepLinkUserId = req.session.deepLinkUserId;
+      // Add deep link user to chat's tracking list
+      await addDeepLinkUserToChat(chat, deepLinkUserId);
+      
       const shareIds = ensureArray(req.session.deepLinkShareIds);
     if (!shareIds.includes(shareId)) {
       shareIds.push(shareId);
@@ -923,8 +959,8 @@ app.get('/api/deep-link/session', async (req, res) => {
         authenticated: true,
         deepLink: true,
         user: {
-          userId: req.session.deepLinkUserId,
-          displayName: req.session.deepLinkDisplayName || req.session.deepLinkUserId,
+          userId: deepLinkUserId,
+          displayName: req.session.deepLinkDisplayName || deepLinkUserId,
           isDeepLink: true
         },
         deepLinkInfo: {
@@ -941,6 +977,9 @@ app.get('/api/deep-link/session', async (req, res) => {
         attachShareToUserDoc(userDoc, shareId);
         userDoc.updatedAt = new Date().toISOString();
         await cloudant.saveDocument('maia_users', userDoc);
+
+        // Add deep link user to chat's tracking list
+        await addDeepLinkUserToChat(chat, userDoc.userId);
 
         setDeepLinkSession(req, userDoc, shareId, chat._id);
         res.cookie(DEEP_LINK_COOKIE, userDoc.userId, {
@@ -1077,6 +1116,9 @@ app.post('/api/deep-link/login', async (req, res) => {
     }
 
     await cloudant.saveDocument('maia_users', userDoc);
+
+    // Add deep link user to chat's tracking list
+    await addDeepLinkUserToChat(chat, userDoc.userId);
 
     setDeepLinkSession(req, userDoc, shareId, chat._id);
     res.cookie(DEEP_LINK_COOKIE, userDoc.userId, {
@@ -3407,7 +3449,8 @@ app.post('/api/save-group-chat', async (req, res) => {
       updatedAt: new Date().toISOString(),
       participantCount: chatHistory.filter(msg => msg.role === 'user').length,
       messageCount: chatHistory.length,
-      isShared: true
+      isShared: true,
+      deepLinkUserIds: [] // Array to track deep link users who have accessed this chat
     };
 
     // Save to maia_chats database
@@ -3661,6 +3704,13 @@ app.get('/api/load-chat/:chatId', async (req, res) => {
           error: 'DEEPLINK_FORBIDDEN'
         });
       }
+      
+      // Add deep link user to chat's tracking list
+      const deepLinkUserId = req.session.deepLinkUserId || req.session.userId;
+      if (deepLinkUserId) {
+        await addDeepLinkUserToChat(chat, deepLinkUserId);
+      }
+      
       req.session.deepLinkChatId = chat._id;
     }
     
@@ -3710,6 +3760,13 @@ app.get('/api/load-chat-by-share/:shareId', async (req, res) => {
           error: 'DEEPLINK_FORBIDDEN'
         });
       }
+      
+      // Add deep link user to chat's tracking list
+      const deepLinkUserId = req.session.deepLinkUserId || req.session.userId;
+      if (deepLinkUserId) {
+        await addDeepLinkUserToChat(chat, deepLinkUserId);
+      }
+      
       req.session.deepLinkChatId = chat._id;
     }
     
@@ -6958,9 +7015,29 @@ app.get('/api/admin/users', async (req, res) => {
       // Get saved chats count
       const savedChatsCount = chatsByUserId.get(userId) || 0;
       
-      // Count deep link users (for now, 1 if this user is a deep link user, 0 otherwise)
-      // TODO: Could be enhanced to count deep link users that have accessed this user's chats
-      const deepLinkUsersCount = deepLinkUserIds.has(userId) ? 1 : 0;
+      // Count deep link users that have accessed this user's chats
+      // Each chat has a deepLinkUserIds array tracking which deep link users accessed it
+      const userChats = allChats.filter(chat => {
+        const ownerId = chat.patientOwner || chat.currentUser;
+        // Also try to extract from chat _id if patientOwner is missing
+        if (!ownerId && chat._id) {
+          const match = chat._id.match(/^([^-]+)-chat_/);
+          return match && match[1] === userId;
+        }
+        return ownerId === userId;
+      });
+      
+      // Collect all unique deep link user IDs from this user's chats
+      const uniqueDeepLinkUserIds = new Set();
+      userChats.forEach(chat => {
+        if (Array.isArray(chat.deepLinkUserIds)) {
+          chat.deepLinkUserIds.forEach(deepLinkUserId => {
+            uniqueDeepLinkUserIds.add(deepLinkUserId);
+          });
+        }
+      });
+      
+      const deepLinkUsersCount = uniqueDeepLinkUserIds.size;
       
       return {
         userId: userId,
@@ -7025,6 +7102,7 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
       agentDeleted: false,
       userDocDeleted: false,
       sessionsDeleted: 0,
+      deepLinkUsersDeleted: 0,
       chatsDeleted: 0,
       errors: []
     };
@@ -7147,11 +7225,51 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
       deletionDetails.errors.push(`Failed to delete sessions: ${error.message}`);
     }
 
-    // 5. Delete user chats from maia_chats
+    // 5. Delete deep link users and user chats from maia_chats
     try {
       const allChats = await cloudant.getAllDocuments('maia_chats');
-      const userChats = allChats.filter(chat => chat.currentUser === userId && !chat._id.startsWith('_design'));
+      // Find chats owned by this user (check patientOwner, currentUser, or extract from _id)
+      const userChats = allChats.filter(chat => {
+        if (chat._id.startsWith('_design')) return false;
+        const ownerId = chat.patientOwner || chat.currentUser;
+        if (ownerId === userId) return true;
+        // Also try to extract from chat _id if patientOwner is missing
+        if (!ownerId && chat._id) {
+          const match = chat._id.match(/^([^-]+)-chat_/);
+          return match && match[1] === userId;
+        }
+        return false;
+      });
       
+      // Collect all unique deep link user IDs from these chats
+      const deepLinkUserIdsToDelete = new Set();
+      userChats.forEach(chat => {
+        if (Array.isArray(chat.deepLinkUserIds)) {
+          chat.deepLinkUserIds.forEach(deepLinkUserId => {
+            deepLinkUserIdsToDelete.add(deepLinkUserId);
+          });
+        }
+      });
+      
+      // Delete each deep link user
+      let deepLinkUsersDeleted = 0;
+      for (const deepLinkUserId of deepLinkUserIdsToDelete) {
+        try {
+          await cloudant.deleteDocument('maia_users', deepLinkUserId);
+          deepLinkUsersDeleted++;
+        } catch (err) {
+          // Deep link user might not exist or already deleted - log but continue
+          if (err.statusCode !== 404) {
+            deletionDetails.errors.push(`Failed to delete deep link user ${deepLinkUserId}: ${err.message}`);
+          }
+        }
+      }
+      
+      if (deepLinkUsersDeleted > 0) {
+        deletionDetails.deepLinkUsersDeleted = deepLinkUsersDeleted;
+      }
+      
+      // Now delete the chats
       for (const chat of userChats) {
         try {
           await cloudant.deleteDocument('maia_chats', chat._id);
@@ -7161,7 +7279,7 @@ app.delete('/api/admin/users/:userId', async (req, res) => {
         }
       }
     } catch (error) {
-      deletionDetails.errors.push(`Failed to delete chats: ${error.message}`);
+      deletionDetails.errors.push(`Failed to delete chats and deep link users: ${error.message}`);
     }
 
     // 6. Delete user document (do this last)
