@@ -254,6 +254,61 @@ export default function setupFileRoutes(app) {
   });
 
   /**
+   * Get text/markdown file content from DigitalOcean Spaces
+   * GET /api/files/get-text/:bucketKey(*)
+   */
+  app.get('/api/files/get-text/:bucketKey(*)', async (req, res) => {
+    try {
+      // Require authentication (regular user or deep-link user)
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { bucketKey } = req.params;
+      
+      const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+
+      const s3Client = new S3Client({
+        endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
+        region: 'us-east-1',
+        forcePathStyle: false,
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: bucketKey
+      });
+      
+      const response = await s3Client.send(getCommand);
+      
+      // Read the file content as text
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const buffer = Buffer.concat(chunks);
+      const content = buffer.toString('utf-8');
+      
+      res.json({
+        success: true,
+        content
+      });
+    } catch (error) {
+      console.error('❌ Error fetching text file:', error);
+      res.status(500).json({ 
+        success: false,
+        error: `Failed to fetch text file: ${error.message}` 
+      });
+    }
+  });
+
+  /**
    * Get user's storage usage
    * GET /api/files/storage-usage?userId=xxx
    */

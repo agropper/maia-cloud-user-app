@@ -15,7 +15,6 @@
             >
               {{ file.name }}
               <q-btn 
-                v-if="file.type === 'pdf'"
                 flat dense round size="xs" 
                 icon="visibility" 
                 color="white"
@@ -300,6 +299,12 @@
       :initial-page="pdfInitialPage"
     />
 
+    <!-- Text/Markdown Viewer Modal -->
+    <TextViewerModal
+      v-model="showTextViewer"
+      :file="viewingFile || undefined"
+    />
+
     <!-- Saved Chats Modal -->
     <SavedChatsModal
       v-model="showSavedChatsModal"
@@ -412,6 +417,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
 import PdfViewerModal from './PdfViewerModal.vue';
+import TextViewerModal from './TextViewerModal.vue';
 import SavedChatsModal from './SavedChatsModal.vue';
 import MyStuffDialog from './MyStuffDialog.vue';
 import { jsPDF } from 'jspdf';
@@ -474,6 +480,7 @@ const uploadedFiles = ref<UploadedFile[]>([]);
 const fileInput = ref<HTMLInputElement | null>(null);
 const isUploadingFile = ref(false);
 const showPdfViewer = ref(false);
+const showTextViewer = ref(false);
 const viewingFile = ref<UploadedFile | null>(null);
 const pdfInitialPage = ref<number | undefined>(undefined);
 const showSavedChatsModal = ref(false);
@@ -1102,6 +1109,17 @@ const detectFileType = (fileName: string, mimeType: string): 'text' | 'pdf' | 'm
   return 'text';
 };
 
+// Helper to detect file type from stored file metadata
+const detectFileTypeFromMetadata = (fileName: string, fileType?: string): 'text' | 'pdf' | 'markdown' => {
+  // If fileType is already set and valid, use it
+  if (fileType === 'pdf' || fileType === 'text' || fileType === 'markdown') {
+    return fileType;
+  }
+  
+  // Otherwise, detect from filename
+  return detectFileType(fileName, '');
+};
+
 const uploadPDFFile = async (file: File) => {
   // Check file size
   const maxSize = 50 * 1024 * 1024; // 50MB
@@ -1189,8 +1207,59 @@ const uploadPDFFile = async (file: File) => {
 };
 
 const uploadTextFile = async (file: File) => {
+  // Check file size
+  const maxSize = 50 * 1024 * 1024; // 50MB
+  if (file.size > maxSize) {
+    throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 50MB.`);
+  }
+
+  // Read text content
   const text = await readFileAsText(file);
   
+  // Upload to bucket
+  const uploadFormData = new FormData();
+  uploadFormData.append('file', file);
+
+  const uploadResponse = await fetch('/api/files/upload', {
+    method: 'POST',
+    credentials: 'include',
+    body: uploadFormData
+  });
+
+  if (!uploadResponse.ok) {
+    const errorData = await uploadResponse.json();
+    throw new Error(errorData.message || errorData.error || 'Failed to upload file');
+  }
+
+  const uploadResult = await uploadResponse.json();
+
+  // Update user document with file metadata
+  if (props.user?.userId) {
+    try {
+      await fetch('/api/user-file-metadata', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.user.userId,
+          fileMetadata: {
+            fileName: uploadResult.fileInfo.fileName,
+            bucketKey: uploadResult.fileInfo.bucketKey,
+            bucketPath: uploadResult.fileInfo.userFolder,
+            fileSize: uploadResult.fileInfo.size,
+            fileType: file.name.endsWith('.md') ? 'markdown' : 'text',
+            uploadedAt: uploadResult.fileInfo.uploadedAt
+          }
+        })
+      });
+    } catch (error) {
+      console.warn('Failed to save file metadata to user document:', error);
+    }
+  }
+
+  // Create uploaded file object
   const uploadedFile: UploadedFile = {
     id: `file-${Date.now()}-${Math.random().toString(36).substring(7)}`,
     name: file.name,
@@ -1198,6 +1267,9 @@ const uploadTextFile = async (file: File) => {
     type: file.name.endsWith('.md') ? 'markdown' : 'text',
     content: text,
     originalFile: file,
+    bucketKey: uploadResult.fileInfo.bucketKey,
+    bucketPath: uploadResult.fileInfo.userFolder,
+    fileUrl: uploadResult.fileInfo.fileUrl,
     uploadedAt: new Date()
   };
 
@@ -1215,8 +1287,23 @@ const readFileAsText = (file: File): Promise<string> => {
 
 const viewFile = (file: UploadedFile, page?: number) => {
   viewingFile.value = file;
-  pdfInitialPage.value = page;
-  showPdfViewer.value = true;
+  
+  // Determine file type - use detectFileTypeFromMetadata if type is not set or invalid
+  let fileType = file.type;
+  if (!fileType || (fileType !== 'pdf' && fileType !== 'text' && fileType !== 'markdown')) {
+    fileType = detectFileTypeFromMetadata(file.name || '', file.type);
+  }
+  
+  // Open appropriate viewer based on detected type
+  if (fileType === 'pdf') {
+    pdfInitialPage.value = page;
+    showPdfViewer.value = true;
+    showTextViewer.value = false;
+  } else {
+    // Default to text viewer for text, markdown, and unknown types
+    showTextViewer.value = true;
+    showPdfViewer.value = false;
+  }
 };
 
 // Process markdown content to convert page references to clickable links
@@ -1376,7 +1463,7 @@ const handlePageLinkClick = async (event: Event) => {
             id: `user-file-${matchedUserFile.bucketKey}`,
             name: matchedUserFile.fileName,
             size: 0,
-            type: 'pdf',
+            type: detectFileTypeFromMetadata(matchedUserFile.fileName, matchedUserFile.fileType),
             content: '',
             originalFile: null as any,
             bucketKey: matchedUserFile.bucketKey,
@@ -1406,7 +1493,7 @@ const handlePageLinkClick = async (event: Event) => {
           id: `user-file-${matchedUserFile.bucketKey}`,
           name: matchedUserFile.fileName,
           size: 0,
-          type: 'pdf',
+          type: detectFileTypeFromMetadata(matchedUserFile.fileName, matchedUserFile.fileType),
           content: '',
           originalFile: null as any,
           bucketKey: matchedUserFile.bucketKey,
@@ -1448,7 +1535,7 @@ const handlePageLinkClick = async (event: Event) => {
       id: `user-file-${bucketKey}`,
       name: filename,
       size: 0,
-      type: 'pdf',
+      type: detectFileTypeFromMetadata(filename),
       content: '',
       originalFile: null as any,
       bucketKey: bucketKey,
@@ -1483,15 +1570,22 @@ const loadUserFilesForChooser = async (showChooser = true) => {
     
     if (response.ok) {
       const result = await response.json();
-      const userPdfFiles = (result.files || [])
-        .filter((f: any) => f.fileType === 'pdf' || f.fileName?.toLowerCase().endsWith('.pdf'))
+      // Include PDF, text, and markdown files (not just PDFs)
+      const userFiles = (result.files || [])
+        .filter((f: any) => {
+          const fileName = f.fileName?.toLowerCase() || '';
+          const fileType = f.fileType?.toLowerCase();
+          return fileType === 'pdf' || fileType === 'text' || fileType === 'markdown' ||
+                 fileName.endsWith('.pdf') || fileName.endsWith('.txt') || 
+                 fileName.endsWith('.md') || fileName.endsWith('.markdown');
+        })
         .map((f: any) => ({
           fileName: f.fileName,
           bucketKey: f.bucketKey,
-          fileType: f.fileType || 'pdf'
+          fileType: f.fileType || detectFileTypeFromMetadata(f.fileName)
         }));
       
-      availableUserFiles.value = userPdfFiles;
+      availableUserFiles.value = userFiles;
     } else {
       availableUserFiles.value = [];
     }
@@ -1521,11 +1615,12 @@ const handleDocumentSelected = (file: UploadedFile | { fileName: string; bucketK
   // User files have fileName property but no id property
   if ('fileName' in file && 'bucketKey' in file && !('id' in file)) {
     // User file from account - create a minimal UploadedFile-like object
+    const fileType = 'fileType' in file ? file.fileType : undefined;
     const userFile: UploadedFile = {
       id: `user-file-${file.bucketKey}`,
       name: file.fileName,
       size: 0,
-      type: 'pdf',
+      type: detectFileTypeFromMetadata(file.fileName, fileType),
       content: '',
       originalFile: null as any,
       bucketKey: file.bucketKey,

@@ -8,7 +8,17 @@
       </q-card-section>
 
       <q-card-section class="q-pt-md">
-        <div v-if="pdfUrl" class="pdf-container">
+        <!-- Error message -->
+        <div v-if="errorMessage" class="error-message q-mb-md">
+          <q-banner rounded class="bg-negative text-white">
+            <template v-slot:avatar>
+              <q-icon name="error" />
+            </template>
+            {{ errorMessage }}
+          </q-banner>
+        </div>
+
+        <div v-if="pdfUrl && !errorMessage" class="pdf-container">
           <VuePDF
             :pdf="pdfDocument"
             :page="currentPage"
@@ -76,7 +86,7 @@
         </div>
 
         <!-- No PDF state -->
-        <div v-else class="no-pdf">
+        <div v-else-if="!errorMessage" class="no-pdf">
           <q-icon name="description" size="40px" color="grey" />
           <p>No PDF to display</p>
         </div>
@@ -119,6 +129,13 @@ const isOpen = computed({
 
 const fileName = computed(() => props.file?.name || 'PDF Viewer');
 
+// Helper to check if file is actually a PDF
+const isPdfFile = computed(() => {
+  if (!props.file?.name) return false;
+  const fileName = props.file.name.toLowerCase();
+  return fileName.endsWith('.pdf');
+});
+
 // Reactive state
 const currentPage = ref(1);
 const totalPages = ref(0);
@@ -126,6 +143,7 @@ const scale = ref(1.0);
 const pageInput = ref('');
 const pdfDocument = ref<any>(null);
 const isLoading = ref(false);
+const errorMessage = ref<string>('');
 
 // Computed
 const pdfUrl = computed(() => {
@@ -151,7 +169,17 @@ const pdfUrl = computed(() => {
 
 // Methods
 const loadPdfDocument = async () => {
+  // Validate that this is actually a PDF file
+  if (!isPdfFile.value) {
+    errorMessage.value = `This file (${props.file?.name || 'unknown'}) is not a PDF file. Please use the text viewer instead.`;
+    pdfDocument.value = null;
+    totalPages.value = 0;
+    isLoading.value = false;
+    return;
+  }
+
   if (!pdfUrl.value) {
+    errorMessage.value = 'No file URL available';
     pdfDocument.value = null;
     totalPages.value = 0;
     isLoading.value = false;
@@ -164,12 +192,14 @@ const loadPdfDocument = async () => {
 
   try {
     isLoading.value = true;
+    errorMessage.value = '';
     const loadingTask = pdfjsLib.getDocument(pdfUrl.value);
     pdfDocument.value = loadingTask;
     const pdf = await loadingTask.promise;
     totalPages.value = pdf.numPages || 0;
-  } catch (error) {
+  } catch (error: any) {
     console.error('[PDF VIEW] PDF loading error:', error);
+    errorMessage.value = error?.message || 'Failed to load PDF. This file may not be a valid PDF.';
     pdfDocument.value = null;
     totalPages.value = 0;
   } finally {
@@ -226,6 +256,7 @@ watch(() => props.file, (newFile) => {
   if (newFile && !isLoading.value) {
     currentPage.value = props.initialPage && props.initialPage > 0 ? props.initialPage : 1;
     totalPages.value = 0;
+    errorMessage.value = '';
     loadPdfDocument();
   }
 }, { immediate: true });

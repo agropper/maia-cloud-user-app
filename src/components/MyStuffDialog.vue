@@ -513,6 +513,12 @@
       :file="viewingFile"
     />
 
+    <!-- Text/Markdown Viewer Modal -->
+    <TextViewerModal
+      v-model="showTextViewer"
+      :file="viewingFile"
+    />
+
     <!-- Patient Summary Available Modal (used both before and after generation) -->
     <q-dialog v-model="showSummaryAvailableModal" persistent>
       <q-card style="min-width: 400px; max-width: 600px;">
@@ -638,6 +644,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 import PdfViewerModal from './PdfViewerModal.vue';
+import TextViewerModal from './TextViewerModal.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 
@@ -648,6 +655,7 @@ interface UserFile {
   uploadedAt: string;
   inKnowledgeBase: boolean;
   knowledgeBases?: string[];
+  fileType?: string;
 }
 
 interface SavedChat {
@@ -725,6 +733,7 @@ const newSummaryToReplace = ref('');
 
 // PDF Viewer
 const showPdfViewer = ref(false);
+const showTextViewer = ref(false);
 const viewingFile = ref<any>(null);
 
 // KB management
@@ -1347,12 +1356,46 @@ const onCheckboxChange = async (file: UserFile) => {
   }
 };
 
+// Helper to detect file type from stored file metadata
+const detectFileTypeFromMetadata = (fileName: string, fileType?: string): 'text' | 'pdf' | 'markdown' => {
+  // If fileType is already set and valid, use it
+  if (fileType === 'pdf' || fileType === 'text' || fileType === 'markdown') {
+    return fileType;
+  }
+  
+  // Otherwise, detect from filename
+  const ext = fileName.toLowerCase().split('.').pop();
+  if (ext === 'pdf') {
+    return 'pdf';
+  }
+  if (ext === 'md' || ext === 'markdown') {
+    return 'markdown';
+  }
+  if (ext === 'txt' || ext === 'text') {
+    return 'text';
+  }
+  
+  // Default to text for unknown types (safer than assuming PDF)
+  return 'text';
+};
+
 const viewFileInPdfViewer = (file: UserFile) => {
   viewingFile.value = {
     bucketKey: file.bucketKey,
-    name: file.fileName
+    name: file.fileName,
+    type: detectFileTypeFromMetadata(file.fileName, file.fileType)
   };
-  showPdfViewer.value = true;
+  
+  // Determine file type and open appropriate viewer
+  const fileType = detectFileTypeFromMetadata(file.fileName, file.fileType);
+  if (fileType === 'pdf') {
+    showPdfViewer.value = true;
+    showTextViewer.value = false;
+  } else {
+    // Default to text viewer for text, markdown, and unknown types
+    showTextViewer.value = true;
+    showPdfViewer.value = false;
+  }
 };
 
 const confirmDeleteFile = (file: UserFile) => {

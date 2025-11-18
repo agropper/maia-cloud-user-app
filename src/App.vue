@@ -77,7 +77,7 @@
                     <div class="col-12 col-md-7">
                       <div class="text-body2 text-grey-7 q-pa-md" style="background-color: #f5f5f5; border-radius: 4px; height: 100%; display: flex; align-items: center;">
                         <p class="q-ma-none">
-                          First, download your records from your patient portal. This can take 48 hours or more. You will then import your records for indexing into a private knowledge base that your private AI agent can access. The other, public AIs like ChatGPT, will not have access to your records except as part of a chat that you see and control. Doctors and other users you invite by sharing a deep link will have access to your records by asking your Private AI questions in the chat. You can disable this option in your My Agent settings.
+                          {{ welcomeCaption || 'Loading...' }}
                         </p>
                       </div>
                     </div>
@@ -159,6 +159,7 @@ const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
 const showPrivacyDialog = ref(false);
 const showAdminPage = ref(false);
+const welcomeCaption = ref<string>('');
 
 const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = null) => {
   if (!userData) return;
@@ -281,6 +282,25 @@ const handleDeepLinkInfoUpdate = (info: DeepLinkInfo | null) => {
   deepLinkInfo.value = info;
 };
 
+const loadWelcomeCaption = async () => {
+  try {
+    const response = await fetch('/api/welcome-caption', {
+      credentials: 'include'
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      welcomeCaption.value = data.caption || '';
+    } else {
+      console.warn('Failed to load welcome caption:', response.statusText);
+      // Fallback to empty string - will show "Loading..." in template
+    }
+  } catch (error) {
+    console.error('Error loading welcome caption:', error);
+    // Fallback to empty string - will show "Loading..." in template
+  }
+};
+
 const hydrateDeepLinkSession = async (share: string) => {
   try {
     const sessionResponse = await fetch(`/api/deep-link/session?shareId=${encodeURIComponent(share)}`, {
@@ -307,6 +327,9 @@ if (typeof document !== 'undefined') {
 }
 
 onMounted(async () => {
+  // Load welcome caption
+  loadWelcomeCaption();
+  
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';

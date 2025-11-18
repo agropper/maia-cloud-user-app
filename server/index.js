@@ -8084,6 +8084,71 @@ if (isProduction) {
       res.status(404).json({ error: 'Privacy policy not found' });
     }
   });
+
+  // Serve welcome page video caption from NEW-AGENT.txt
+  app.get('/api/welcome-caption', (req, res) => {
+    const newAgentPath = path.join(__dirname, '../NEW-AGENT.txt');
+    console.log(`📄 [WELCOME] Request for welcome caption, checking: ${newAgentPath}`);
+    
+    if (!existsSync(newAgentPath)) {
+      console.log(`⚠️ [WELCOME] NEW-AGENT.txt not found at ${newAgentPath}`);
+      return res.status(404).json({ error: 'Welcome caption not found' });
+    }
+
+    try {
+      const content = readFileSync(newAgentPath, 'utf-8');
+      const lines = content.split('\n');
+      
+      // Find the "## Welcome Page Video Caption" section
+      let captionStartIndex = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim() === '## Welcome Page Video Caption') {
+          captionStartIndex = i + 1;
+          break;
+        }
+      }
+
+      if (captionStartIndex === -1) {
+        console.log(`⚠️ [WELCOME] Welcome Page Video Caption section not found in NEW-AGENT.txt`);
+        return res.status(404).json({ error: 'Welcome caption section not found' });
+      }
+
+      // Extract caption text (until next section or end of file)
+      const captionLines = [];
+      for (let i = captionStartIndex; i < lines.length; i++) {
+        const line = lines[i].trim();
+        // Stop at next section header or empty line followed by section
+        if (line.startsWith('##') && line !== '## Welcome Page Video Caption') {
+          break;
+        }
+        if (line) {
+          captionLines.push(line);
+        } else if (captionLines.length > 0) {
+          // Allow one empty line, but stop at multiple empty lines
+          const nextNonEmpty = lines.slice(i + 1).find(l => l.trim());
+          if (nextNonEmpty && nextNonEmpty.trim().startsWith('##')) {
+            break;
+          }
+          captionLines.push('');
+        }
+      }
+
+      const caption = captionLines.join(' ').trim();
+      
+      if (!caption) {
+        console.log(`⚠️ [WELCOME] Welcome caption is empty`);
+        return res.status(404).json({ error: 'Welcome caption is empty' });
+      }
+
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+      res.json({ caption });
+      console.log(`✅ [WELCOME] Served welcome caption from NEW-AGENT.txt`);
+    } catch (err) {
+      console.error(`❌ [WELCOME] Error reading NEW-AGENT.txt:`, err);
+      res.status(500).json({ error: 'Error loading welcome caption' });
+    }
+  });
   
   // Serve static assets (JS, CSS, images, etc.)
   // fallthrough: true allows requests to continue to the catch-all if file not found
@@ -8155,6 +8220,71 @@ if (isProduction) {
     } else {
       console.log(`⚠️ [PRIVACY] Privacy.md not found at ${privacyPath}`);
       res.status(404).send('Privacy policy not found');
+    }
+  });
+
+  // Serve welcome page video caption from NEW-AGENT.txt (dev mode)
+  app.get('/api/welcome-caption', (req, res) => {
+    const newAgentPath = path.join(__dirname, '../NEW-AGENT.txt');
+    console.log(`📄 [WELCOME] Request for welcome caption, checking: ${newAgentPath}`);
+    
+    if (!existsSync(newAgentPath)) {
+      console.log(`⚠️ [WELCOME] NEW-AGENT.txt not found at ${newAgentPath}`);
+      return res.status(404).json({ error: 'Welcome caption not found' });
+    }
+
+    try {
+      const content = readFileSync(newAgentPath, 'utf-8');
+      const lines = content.split('\n');
+      
+      // Find the "## Welcome Page Video Caption" section
+      let captionStartIndex = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].trim() === '## Welcome Page Video Caption') {
+          captionStartIndex = i + 1;
+          break;
+        }
+      }
+
+      if (captionStartIndex === -1) {
+        console.log(`⚠️ [WELCOME] Welcome Page Video Caption section not found in NEW-AGENT.txt`);
+        return res.status(404).json({ error: 'Welcome caption section not found' });
+      }
+
+      // Extract caption text (until next section or end of file)
+      const captionLines = [];
+      for (let i = captionStartIndex; i < lines.length; i++) {
+        const line = lines[i].trim();
+        // Stop at next section header or empty line followed by section
+        if (line.startsWith('##') && line !== '## Welcome Page Video Caption') {
+          break;
+        }
+        if (line) {
+          captionLines.push(line);
+        } else if (captionLines.length > 0) {
+          // Allow one empty line, but stop at multiple empty lines
+          const nextNonEmpty = lines.slice(i + 1).find(l => l.trim());
+          if (nextNonEmpty && nextNonEmpty.trim().startsWith('##')) {
+            break;
+          }
+          captionLines.push('');
+        }
+      }
+
+      const caption = captionLines.join(' ').trim();
+      
+      if (!caption) {
+        console.log(`⚠️ [WELCOME] Welcome caption is empty`);
+        return res.status(404).json({ error: 'Welcome caption is empty' });
+      }
+
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+      res.json({ caption });
+      console.log(`✅ [WELCOME] Served welcome caption from NEW-AGENT.txt`);
+    } catch (err) {
+      console.error(`❌ [WELCOME] Error reading NEW-AGENT.txt:`, err);
+      res.status(500).json({ error: 'Error loading welcome caption' });
     }
   });
 }
