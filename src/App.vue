@@ -106,9 +106,14 @@
           </template>
         </div>
 
-        <!-- Authenticated - show main interface or admin page -->
+        <!-- Authenticated - show main interface, admin page, or lists page -->
         <div v-else class="full-width full-height">
           <AdminUsers v-if="showAdminPage" />
+          <Lists
+            v-else-if="showListsPage"
+            :user-id="user?.userId || ''"
+            @back-to-chat="showListsPage = false"
+          />
           <ChatInterface
             v-else
             :user="user"
@@ -133,6 +138,7 @@ import ChatInterface from './components/ChatInterface.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
 import PrivacyDialog from './components/PrivacyDialog.vue';
 import AdminUsers from './components/AdminUsers.vue';
+import Lists from './components/Lists.vue';
 
 interface User {
   userId: string;
@@ -159,6 +165,7 @@ const deepLinkLoading = ref(false);
 const deepLinkError = ref('');
 const showPrivacyDialog = ref(false);
 const showAdminPage = ref(false);
+const showListsPage = ref(false);
 const welcomeCaption = ref<string>('');
 
 const setAuthenticatedUser = (userData: any, deepLink: DeepLinkInfo | null = null) => {
@@ -332,6 +339,7 @@ onMounted(async () => {
   
   // Check for admin page route
   const isAdminPage = window.location.pathname === '/admin';
+  const isListsPage = window.location.pathname === '/lists';
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
   
   if (isAdminPage) {
@@ -341,6 +349,10 @@ onMounted(async () => {
       authenticated.value = true;
       return;
     }
+  }
+  
+  if (isListsPage) {
+    showListsPage.value = true;
   }
   
   const params = new URLSearchParams(window.location.search);
@@ -392,6 +404,20 @@ onMounted(async () => {
     showDeepLinkAccess.value = true;
     await checkDeepLinkSession(share);
   }
+  
+  // Watch for route changes
+  const checkRoute = () => {
+    const path = window.location.pathname;
+    showAdminPage.value = path === '/admin';
+    showListsPage.value = path === '/lists';
+  };
+  
+  // Check route on mount and when it changes
+  checkRoute();
+  window.addEventListener('popstate', checkRoute);
+  
+  // Also check periodically in case of programmatic navigation
+  setInterval(checkRoute, 100);
 });
 </script>
 

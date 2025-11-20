@@ -7,6 +7,7 @@ import multer from 'multer';
 import pdf from 'pdf-parse';
 import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { extractPdfWithPages, extractEncounters } from '../utils/pdf-parser.js';
 
 // User storage limit: 1 GB
 const USER_STORAGE_LIMIT = 1024 * 1024 * 1024; // 1 GB in bytes
@@ -398,6 +399,124 @@ export default function setupFileRoutes(app) {
     } catch (error) {
       console.error('❌ Get signed URL error:', error);
       res.status(500).json({ error: `Failed to get file URL: ${error.message}` });
+    }
+  });
+
+  /**
+   * Extract PDF to markdown with page boundaries preserved
+   * POST /api/files/pdf-to-markdown
+   */
+  app.post('/api/files/pdf-to-markdown', upload.single('pdfFile'), async (req, res) => {
+    try {
+      // Require authentication (regular user or deep-link user)
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No PDF file provided' });
+      }
+
+      // Security checks
+      if (req.file.size === 0) {
+        return res.status(400).json({ error: 'Empty file provided' });
+      }
+      
+      if (req.file.size > 50 * 1024 * 1024) {
+        return res.status(400).json({ error: 'File too large (max 50MB)' });
+      }
+
+      console.log(`📄 [PDF-MD] Extracting PDF to markdown with page boundaries for user ${userId}`);
+
+      // Extract PDF with page boundaries
+      const result = await extractPdfWithPages(req.file.buffer);
+
+      // Extract encounters if requested
+      const extractEncountersParam = req.query.extractEncounters === 'true';
+      let encounters = [];
+      if (extractEncountersParam) {
+        encounters = extractEncounters(result.pages);
+        console.log(`📋 [PDF-MD] Extracted ${encounters.length} encounters`);
+      }
+
+      res.json({
+        success: true,
+        totalPages: result.totalPages,
+        pages: result.pages,
+        encounters: encounters,
+        fullMarkdown: result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n')
+      });
+    } catch (error) {
+      console.error('❌ PDF to markdown extraction error:', error);
+      res.status(500).json({ error: `Failed to extract PDF: ${error.message}` });
+    }
+  });
+
+  /**
+   * Extract PDF to markdown from bucket file
+   * POST /api/files/pdf-to-markdown/:bucketKey(*)
+   */
+  app.post('/api/files/pdf-to-markdown/:bucketKey(*)', async (req, res) => {
+    try {
+      // Require authentication (regular user or deep-link user)
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { bucketKey } = req.params;
+      
+      const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+
+      const s3Client = new S3Client({
+        endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
+        region: 'us-east-1',
+        forcePathStyle: false,
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: bucketKey
+      });
+      
+      const response = await s3Client.send(getCommand);
+      
+      // Read the PDF file content
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const pdfBuffer = Buffer.concat(chunks);
+
+      console.log(`📄 [PDF-MD] Extracting PDF to markdown from bucket file ${bucketKey} for user ${userId}`);
+
+      // Extract PDF with page boundaries
+      const result = await extractPdfWithPages(pdfBuffer);
+
+      // Extract encounters if requested
+      const extractEncountersParam = req.query.extractEncounters === 'true';
+      let encounters = [];
+      if (extractEncountersParam) {
+        encounters = extractEncounters(result.pages);
+        console.log(`📋 [PDF-MD] Extracted ${encounters.length} encounters`);
+      }
+
+      res.json({
+        success: true,
+        totalPages: result.totalPages,
+        pages: result.pages,
+        encounters: encounters,
+        fullMarkdown: result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n')
+      });
+    } catch (error) {
+      console.error('❌ PDF to markdown extraction error:', error);
+      res.status(500).json({ error: `Failed to extract PDF: ${error.message}` });
     }
   });
 }
