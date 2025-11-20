@@ -693,7 +693,7 @@ setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, emailService)
 setupChatRoutes(app, chatClient, cloudant, doClient);
 
 // File routes
-setupFileRoutes(app);
+setupFileRoutes(app, cloudant, doClient);
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;

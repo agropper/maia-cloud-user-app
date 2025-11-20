@@ -7,7 +7,7 @@ import multer from 'multer';
 import pdf from 'pdf-parse';
 import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { extractPdfWithPages, extractEncounters } from '../utils/pdf-parser.js';
+import { extractPdfWithPages } from '../utils/pdf-parser.js';
 
 // User storage limit: 1 GB
 const USER_STORAGE_LIMIT = 1024 * 1024 * 1024; // 1 GB in bytes
@@ -55,7 +55,96 @@ const upload = multer({
   }
 });
 
-export default function setupFileRoutes(app) {
+/**
+ * Extract markdown categories using Private AI
+ * @param {string} markdown - Full markdown content
+ * @param {string} userId - User ID
+ * @param {object} cloudant - Cloudant client
+ * @param {object} doClient - DigitalOcean client
+ * @returns {Promise<Array<{category: string, count: number}>>} Array of categories with counts
+ */
+async function extractMarkdownCategories(markdown, userId, cloudant, doClient) {
+  try {
+    // Get user document to access agent info
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc || !userDoc.assignedAgentId || !userDoc.agentEndpoint || !userDoc.agentApiKey) {
+      throw new Error('Private AI agent not configured for user');
+    }
+
+    // Import DigitalOcean provider
+    const { DigitalOceanProvider } = await import('../../lib/chat-client/providers/digitalocean.js');
+    const { getOrCreateAgentApiKey } = await import('../utils/agent-helper.js');
+    
+    // Get or create API key
+    const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+    
+    // Create provider
+    const agentProvider = new DigitalOceanProvider(apiKey, {
+      baseURL: userDoc.agentEndpoint
+    });
+
+    // Create prompt
+    const prompt = `List the top-level (### ....) markdown categories and the number of occurrences of that heading in the file.
+
+Here is the markdown file:
+
+${markdown}
+
+Please provide a list of all top-level markdown categories (### headings) and the count of each one. Format your response as a simple list, one category per line, with the format: "Category Name: count"`;
+
+    console.log(`🤖 [PDF-MD] Calling Private AI to extract markdown categories for user ${userId}`);
+
+    // Call the agent
+    const response = await agentProvider.chat(
+      [{ role: 'user', content: prompt }],
+      { 
+        model: userDoc.agentModelName || 'openai-gpt-oss-120b',
+        stream: false
+      }
+    );
+
+    const aiResponse = response.content || response.text || '';
+    
+    if (!aiResponse || aiResponse.trim().length === 0) {
+      throw new Error('Empty response from Private AI');
+    }
+
+    // Parse the AI response to extract categories and counts
+    const categories = [];
+    const lines = aiResponse.split('\n');
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      
+      // Look for patterns like "Category Name: count" or "Category Name - count"
+      const match = trimmed.match(/^(.+?)[:\-]\s*(\d+)$/);
+      if (match) {
+        const category = match[1].trim();
+        const count = parseInt(match[2], 10);
+        if (category && !isNaN(count)) {
+          categories.push({ category, count });
+        }
+      } else {
+        // Try to extract just the category name if no count format found
+        // Remove markdown formatting if present
+        const cleanCategory = trimmed.replace(/^###\s*/, '').replace(/^\*\s*/, '').replace(/^-\s*/, '').trim();
+        if (cleanCategory) {
+          categories.push({ category: cleanCategory, count: 0 });
+        }
+      }
+    }
+
+    console.log(`✅ [PDF-MD] Extracted ${categories.length} markdown categories`);
+    return categories;
+  } catch (error) {
+    console.error('❌ [PDF-MD] Error extracting markdown categories:', error);
+    throw error;
+  }
+}
+
+export default function setupFileRoutes(app, cloudant, doClient) {
   /**
    * PDF parsing endpoint
    * POST /api/files/parse-pdf
@@ -431,21 +520,26 @@ export default function setupFileRoutes(app) {
 
       // Extract PDF with page boundaries
       const result = await extractPdfWithPages(req.file.buffer);
+      const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
 
-      // Extract encounters if requested
-      const extractEncountersParam = req.query.extractEncounters === 'true';
-      let encounters = [];
-      if (extractEncountersParam) {
-        encounters = extractEncounters(result.pages);
-        console.log(`📋 [PDF-MD] Extracted ${encounters.length} encounters`);
+      // Extract markdown categories using Private AI if requested
+      const extractCategoriesParam = req.query.extractCategories === 'true';
+      let categories = [];
+      if (extractCategoriesParam && cloudant && doClient) {
+        try {
+          categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
+        } catch (error) {
+          console.error('❌ [PDF-MD] Failed to extract categories:', error);
+          // Continue without categories rather than failing the whole request
+        }
       }
 
       res.json({
         success: true,
         totalPages: result.totalPages,
         pages: result.pages,
-        encounters: encounters,
-        fullMarkdown: result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n')
+        categories: categories,
+        fullMarkdown: fullMarkdown
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);
@@ -498,21 +592,26 @@ export default function setupFileRoutes(app) {
 
       // Extract PDF with page boundaries
       const result = await extractPdfWithPages(pdfBuffer);
+      const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
 
-      // Extract encounters if requested
-      const extractEncountersParam = req.query.extractEncounters === 'true';
-      let encounters = [];
-      if (extractEncountersParam) {
-        encounters = extractEncounters(result.pages);
-        console.log(`📋 [PDF-MD] Extracted ${encounters.length} encounters`);
+      // Extract markdown categories using Private AI if requested
+      const extractCategoriesParam = req.query.extractCategories === 'true';
+      let categories = [];
+      if (extractCategoriesParam && cloudant && doClient) {
+        try {
+          categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
+        } catch (error) {
+          console.error('❌ [PDF-MD] Failed to extract categories:', error);
+          // Continue without categories rather than failing the whole request
+        }
       }
 
       res.json({
         success: true,
         totalPages: result.totalPages,
         pages: result.pages,
-        encounters: encounters,
-        fullMarkdown: result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n')
+        categories: categories,
+        fullMarkdown: fullMarkdown
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);

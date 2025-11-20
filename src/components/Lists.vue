@@ -126,33 +126,23 @@
         </q-card-section>
       </q-card>
 
-      <!-- Encounters List -->
-      <q-card v-if="encounters.length > 0" class="q-mb-md">
+      <!-- Markdown Categories List -->
+      <q-card v-if="categories.length > 0" class="q-mb-md">
         <q-card-section>
-          <div class="text-h6 q-mb-md">Encounters ({{ encounters.length }})</div>
+          <div class="text-h6 q-mb-md">Markdown Categories ({{ categories.length }})</div>
           
-          <q-table
-            :rows="encounters"
-            :columns="encounterColumns"
-            row-key="index"
-            :pagination="{ rowsPerPage: 10 }"
-            flat
-            bordered
-          >
-            <template v-slot:body-cell-page="props">
-              <q-td :props="props">
-                Page {{ props.value }}
-              </q-td>
-            </template>
-            
-            <template v-slot:body-cell-notes="props">
-              <q-td :props="props">
-                <div class="text-caption" style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
-                  {{ props.value || '-' }}
-                </div>
-              </q-td>
-            </template>
-          </q-table>
+          <q-list bordered separator>
+            <q-item v-for="(cat, index) in categories" :key="index">
+              <q-item-section>
+                <q-item-label>{{ cat.category }}</q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-item-label>
+                  <q-badge color="primary">{{ cat.count }}</q-badge>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
         </q-card-section>
       </q-card>
 
@@ -216,20 +206,15 @@ interface PdfPage {
   itemCount: number;
 }
 
-interface Encounter {
-  page: number;
-  date: string;
-  provider: string;
-  location: string;
-  diagnosis: string;
-  notes: string;
-  rawText: string;
+interface MarkdownCategory {
+  category: string;
+  count: number;
 }
 
 interface PdfData {
   totalPages: number;
   pages: PdfPage[];
-  encounters: Encounter[];
+  categories: MarkdownCategory[];
   fullMarkdown: string;
 }
 
@@ -240,17 +225,8 @@ const userFiles = ref<UserFile[]>([]);
 const isProcessing = ref(false);
 const error = ref<string>('');
 const pdfData = ref<PdfData | null>(null);
-const encounters = ref<Encounter[]>([]);
+const categories = ref<MarkdownCategory[]>([]);
 const activePageTab = ref<number>(1);
-
-const encounterColumns = [
-  { name: 'page', label: 'Page', field: 'page', align: 'center' as const },
-  { name: 'date', label: 'Date', field: 'date', align: 'left' as const },
-  { name: 'provider', label: 'Provider', field: 'provider', align: 'left' as const },
-  { name: 'location', label: 'Location', field: 'location', align: 'left' as const },
-  { name: 'diagnosis', label: 'Diagnosis', field: 'diagnosis', align: 'left' as const },
-  { name: 'notes', label: 'Notes', field: 'notes', align: 'left' as const }
-];
 
 const loadUserFiles = async () => {
   try {
@@ -313,7 +289,7 @@ const processPdfFile = async (file: File) => {
   isProcessing.value = true;
   error.value = '';
   pdfData.value = null;
-  encounters.value = [];
+  categories.value = [];
 
   try {
     console.log('Starting PDF processing for file:', file.name, 'Size:', file.size);
@@ -321,7 +297,7 @@ const processPdfFile = async (file: File) => {
     formData.append('pdfFile', file);
 
     console.log('Sending request to /api/files/pdf-to-markdown');
-    const response = await fetch('/api/files/pdf-to-markdown?extractEncounters=true', {
+    const response = await fetch('/api/files/pdf-to-markdown?extractCategories=true', {
       method: 'POST',
       body: formData,
       credentials: 'include'
@@ -338,11 +314,11 @@ const processPdfFile = async (file: File) => {
     console.log('PDF processing successful:', {
       totalPages: data.totalPages,
       pagesCount: data.pages?.length,
-      encountersCount: data.encounters?.length
+      categoriesCount: data.categories?.length
     });
     
     pdfData.value = data;
-    encounters.value = data.encounters || [];
+    categories.value = data.categories || [];
     
     if (data.pages && data.pages.length > 0) {
       activePageTab.value = data.pages[0].page;
@@ -360,11 +336,11 @@ const processPdfFromBucket = async (bucketKey: string) => {
   isProcessing.value = true;
   error.value = '';
   pdfData.value = null;
-  encounters.value = [];
+  categories.value = [];
 
   try {
     console.log('Starting PDF processing for bucket file:', bucketKey);
-    const url = `/api/files/pdf-to-markdown/${encodeURIComponent(bucketKey)}?extractEncounters=true`;
+    const url = `/api/files/pdf-to-markdown/${encodeURIComponent(bucketKey)}?extractCategories=true`;
     console.log('Sending request to:', url);
     
     const response = await fetch(url, {
@@ -383,11 +359,11 @@ const processPdfFromBucket = async (bucketKey: string) => {
     console.log('PDF processing successful:', {
       totalPages: data.totalPages,
       pagesCount: data.pages?.length,
-      encountersCount: data.encounters?.length
+      categoriesCount: data.categories?.length
     });
     
     pdfData.value = data;
-    encounters.value = data.encounters || [];
+    categories.value = data.categories || [];
     
     if (data.pages && data.pages.length > 0) {
       activePageTab.value = data.pages[0].page;
