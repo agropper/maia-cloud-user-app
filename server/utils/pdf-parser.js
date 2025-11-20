@@ -305,3 +305,389 @@ function extractEncounterContext(lines, index) {
   return context;
 }
 
+/**
+ * Extract individual clinical notes from markdown
+ * Parses the "Clinical Notes" category and splits into individual notes
+ * Clinical notes typically start with dates like "Oct 27, 2025" or "10/27/2025"
+ * and contain structured fields like "Author:", "Category:", "Created:", etc.
+ * @param {string} fullMarkdown - Full markdown text from PDF
+ * @param {Array} pages - Array of page objects with page numbers
+ * @returns {Array<{fileName: string, page: number, category: string, content: string, markdown: string, noteIndex: number}>} Array of individual clinical notes
+ */
+export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '') {
+  const notes = [];
+  
+  // [INDEXING] Debug: Count "Category: " instances
+  const categoryPattern = /Category:\s+/gi;
+  const allCategoryMatches = [];
+  let categoryMatch;
+  while ((categoryMatch = categoryPattern.exec(fullMarkdown)) !== null) {
+    allCategoryMatches.push(categoryMatch.index);
+  }
+  
+  // Count categories in first 40 pages
+  let categoriesInFirst40Pages = 0;
+  let charCount = 0;
+  for (let i = 0; i < Math.min(40, pages.length); i++) {
+    const pageMarkdown = `## Page ${pages[i].page}\n\n${pages[i].markdown}`;
+    const pageStart = charCount;
+    const pageEnd = charCount + pageMarkdown.length;
+    
+    // Count categories in this page
+    const categoriesInPage = allCategoryMatches.filter(idx => idx >= pageStart && idx < pageEnd).length;
+    categoriesInFirst40Pages += categoriesInPage;
+    
+    charCount = pageEnd + 10; // Add padding
+  }
+  
+  console.log(`[INDEXING] Found ${allCategoryMatches.length} instances of "Category: " in the whole document`);
+  console.log(`[INDEXING] Found ${categoriesInFirst40Pages} instances of "Category: " in the first 40 pages`);
+  
+  // Find ALL "Clinical Notes" sections
+  // Look for headings like "### Clinical Notes", "## Clinical Notes", etc.
+  // Use global flag to find all occurrences
+  const clinicalNotesPattern = /(?:^|\n)(?:#{1,3})\s*Clinical\s+Notes\s*(?:\n|$)/gi;
+  const allMatches = [];
+  let match;
+  
+  // Find all matches
+  while ((match = clinicalNotesPattern.exec(fullMarkdown)) !== null) {
+    allMatches.push({
+      index: match.index,
+      length: match[0].length,
+      start: match.index + match[0].length
+    });
+  }
+  
+  if (allMatches.length === 0) {
+    console.log('⚠️ No "Clinical Notes" section found in markdown');
+    return notes;
+  }
+  
+  console.log(`📝 Found ${allMatches.length} "Clinical Notes" section(s) in markdown`);
+  
+  // Process each Clinical Notes section
+  for (let sectionIdx = 0; sectionIdx < allMatches.length; sectionIdx++) {
+    const notesBeforeThisSection = notes.length;
+    const sectionMatch = allMatches[sectionIdx];
+    const sectionStart = sectionMatch.start;
+    
+    // Find the end of this section (next major heading or next Clinical Notes section or end of document)
+    let sectionEnd = fullMarkdown.length;
+    
+    // Check if there's a next Clinical Notes section
+    if (sectionIdx < allMatches.length - 1) {
+      sectionEnd = allMatches[sectionIdx + 1].index;
+    } else {
+      // Last section - find next major heading (## or #) or end of document
+      const restOfMarkdown = fullMarkdown.substring(sectionStart);
+      const nextMajorSectionMatch = restOfMarkdown.match(/\n(?:##|#)\s+/);
+      if (nextMajorSectionMatch) {
+        sectionEnd = sectionStart + nextMajorSectionMatch.index;
+      }
+    }
+    
+    // Extract this Clinical Notes section
+    let clinicalNotesSection = fullMarkdown.substring(sectionStart, sectionEnd);
+    
+    // Filter out common headers and footers
+    // Headers/footers are typically repeated patterns that appear on every page
+    // Common patterns: page numbers, dates, institution names at top/bottom
+    const headerFooterPatterns = [
+      /^Page\s+\d+/i, // "Page 1", "Page 2", etc.
+      /^\d+\s*$/m, // Standalone page numbers
+      /^Apple\s+Health/i, // Common header
+      /^Adrian\s+Gropper/i, // Common header
+      /^\d{4}-\d{2}-\d{2}/, // Date-only lines (likely headers/footers)
+      /^Generated\s+on/i, // Footer text
+      /^Exported\s+on/i, // Footer text
+    ];
+    
+    // Remove header/footer lines
+    const lines = clinicalNotesSection.split('\n');
+    const filteredLines = [];
+    const lineFrequency = new Map(); // Track line frequency to identify repeated headers/footers
+    
+    // First pass: count line frequencies
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.length > 0) {
+        const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+        lineFrequency.set(normalized, (lineFrequency.get(normalized) || 0) + 1);
+      }
+    }
+    
+    // Second pass: filter out headers/footers
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.length === 0) {
+        filteredLines.push(line); // Keep blank lines
+        continue;
+      }
+      
+      // Check if it matches header/footer patterns
+      const isHeaderFooter = headerFooterPatterns.some(pattern => pattern.test(trimmed));
+      
+      // Check if line appears too frequently (likely a header/footer)
+      const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+      const frequency = lineFrequency.get(normalized) || 0;
+      const isRepeated = frequency > 5; // If appears more than 5 times, likely header/footer
+      
+      // Keep the line if it's not a header/footer pattern and not too frequently repeated
+      if (!isHeaderFooter && !isRepeated) {
+        filteredLines.push(line);
+      }
+    }
+    
+    clinicalNotesSection = filteredLines.join('\n');
+    
+    // Split into lines for better processing
+    const processedLines = clinicalNotesSection.split('\n');
+    
+    // Pattern to identify the start of a new clinical note:
+    // 1. Date patterns at the start of a line (various formats):
+    //    - "Oct 27, 2025" or "October 27, 2025"
+    //    - "10/27/2025" or "10-27-2025"
+    //    - "2025-10-27"
+    // 2. Followed by institution name or encounter type
+    // 3. Or directly followed by "Author:", "Category:", etc.
+    
+    const datePatterns = [
+      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}/i, // "Oct 27, 2025" or "October 27, 2025"
+      /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/, // "10/27/2025" or "10-27-2025"
+      /^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/, // "2025-10-27"
+    ];
+    
+    // Additional patterns that indicate a new note (removed Category: Clinical Note requirement):
+    const noteStartPatterns = [
+      /^Author:\s+/i,
+      /^Category:\s+/i, // Accept any category, not just "Clinical Note"
+      /^Created:\s+/i,
+      /^Status:\s+/i,
+      /Telephone\s+Encounter/i,
+      /In-Person\s+Encounter/i,
+      /Video\s+Encounter/i,
+    ];
+  
+    // Find all potential note start positions
+    // Use "Created:" as the primary indicator of a new note
+    // The note starts with a date line followed by a location, just a few lines before "Created:"
+    const noteStarts = [];
+    
+    for (let i = 0; i < processedLines.length; i++) {
+      const line = processedLines[i].trim();
+      if (!line) continue;
+      
+      // Look for "Created:" as the primary note start indicator
+      if (/^Created:\s+/i.test(line)) {
+        // Found a "Created:" line - this indicates a new note
+        // Each "Created:" is a unique note, even if multiple notes share the same date header
+        // Look backwards up to 20 lines to find the date line
+        let noteStartLine = i; // Default to "Created:" line itself if no date found
+        
+        // Look backwards up to 20 lines to find the date line
+        for (let j = i - 1; j >= Math.max(0, i - 20); j--) {
+          const prevLine = processedLines[j].trim();
+          if (!prevLine) continue;
+          
+          // Stop if we hit another "Created:" line (that's a different note)
+          if (/^Created:\s+/i.test(prevLine)) {
+            break;
+          }
+          
+          // Check if this line is a date (at the start of the line)
+          const isDate = datePatterns.some(pattern => pattern.test(prevLine));
+          
+          if (isDate) {
+            // Found a date - use it as the note start
+            // Multiple notes can share the same date header - that's OK, they're still separate notes
+            noteStartLine = j;
+            break; // Use the first (closest) date we find going backwards
+          }
+        }
+        
+        // Always add the note start - each "Created:" is a unique note
+        // Even if multiple notes share the same date header, they're still separate notes
+        noteStarts.push(noteStartLine);
+      }
+    }
+    
+    console.log(`[INDEXING] Found ${noteStarts.length} note starts via "Created:" method`);
+    
+    // Sort note starts
+    noteStarts.sort((a, b) => a - b);
+    
+    // [INDEXING] Debug: Count date patterns in this section
+    let datePatternCount = 0;
+    for (const line of processedLines) {
+      const trimmed = line.trim();
+      if (trimmed && datePatterns.some(pattern => pattern.test(trimmed))) {
+        datePatternCount++;
+      }
+    }
+    
+    if (sectionIdx === 0 || sectionIdx < 3) {
+      console.log(`[INDEXING] Section ${sectionIdx + 1}: Found ${datePatternCount} date patterns, identified ${noteStarts.length} note starts`);
+    }
+    
+    // Extract notes between start positions
+    for (let i = 0; i < noteStarts.length; i++) {
+      const startLine = noteStarts[i];
+      const endLine = i < noteStarts.length - 1 ? noteStarts[i + 1] : processedLines.length;
+      
+      // Extract note content
+      const noteLines = processedLines.slice(startLine, endLine);
+      let noteText = noteLines.join('\n').trim();
+      
+      // Extract metadata: find the last date and location in the note
+      let lastDate = '';
+      let lastLocation = '';
+      
+      // Location patterns
+      const locationPatterns = [
+        /mass general/i,
+        /brigham/i,
+        /hospital/i,
+        /medical center/i,
+        /clinic/i,
+      ];
+      
+      // Look through all lines in the note to find dates and locations
+      for (const line of noteLines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        
+        // Check if this line is a date
+        const isDate = datePatterns.some(pattern => pattern.test(trimmed));
+        if (isDate) {
+          // Extract the date (take the first match)
+          for (const pattern of datePatterns) {
+            const match = trimmed.match(pattern);
+            if (match) {
+              lastDate = match[0].trim();
+              break;
+            }
+          }
+        }
+        
+        // Check if this line contains a location
+        for (const locationPattern of locationPatterns) {
+          if (locationPattern.test(trimmed)) {
+            // Extract location - try to get a meaningful phrase
+            // Look for common patterns like "Mass General Brigham" or institution names
+            let locationText = trimmed;
+            
+            // Try to extract just the institution name part
+            const locationMatch = trimmed.match(/(?:mass general\s+brigham|brigham|mass general|hospital|medical center|clinic)[^,\n]*/i);
+            if (locationMatch) {
+              locationText = locationMatch[0].trim();
+            }
+            
+            // Only update if we found a substantial location (not just a word)
+            if (locationText.length > 5) {
+              lastLocation = locationText;
+            }
+            break;
+          }
+        }
+      }
+      
+      // Clean up the note - remove any remaining header/footer artifacts
+      // Remove lines that are just dates or page numbers at the start/end
+      const noteLinesArray = noteText.split('\n');
+      const cleanedLines = [];
+      for (let j = 0; j < noteLinesArray.length; j++) {
+        const line = noteLinesArray[j].trim();
+        if (!line) {
+          cleanedLines.push('');
+          continue;
+        }
+        
+        // Skip lines that are just dates or page numbers (likely artifacts)
+        const isJustDate = datePatterns.some(pattern => pattern.test(line) && line.length < 30);
+        const isPageNumber = /^Page\s+\d+$/i.test(line) || /^\d+$/.test(line);
+        
+        if (!isJustDate && !isPageNumber) {
+          cleanedLines.push(noteLinesArray[j]);
+        }
+      }
+      
+      noteText = cleanedLines.join('\n').trim();
+    
+    // Skip very short notes (likely false positives)
+    if (noteText.length < 30) continue;
+    
+    // Find which page this note belongs to
+    // Count characters up to this note in the current clinical notes section
+    let charCountInSection = 0;
+    for (let j = 0; j < startLine; j++) {
+      charCountInSection += processedLines[j].length + 1; // +1 for newline
+    }
+    
+    // Calculate absolute position in full markdown
+    const notePositionInFull = sectionStart + charCountInSection;
+    
+    let notePage = 1;
+    let accumulatedLength = 0;
+    
+    for (const page of pages) {
+      const pageMarkdown = `## Page ${page.page}\n\n${page.markdown}`;
+      accumulatedLength += pageMarkdown.length + 10;
+      
+      // Check if this note's position in the full markdown falls within this page
+      if (notePositionInFull <= accumulatedLength) {
+        notePage = page.page;
+        break;
+      }
+    }
+    
+    // Extract plain text from markdown (remove markdown syntax)
+    const plainText = noteText
+      .replace(/^#{1,6}\s+/gm, '') // Remove headings
+      .replace(/\*\*(.+?)\*\*/g, '$1') // Remove bold
+      .replace(/\*(.+?)\*/g, '$1') // Remove italic
+      .replace(/\[(.+?)\]\(.+?\)/g, '$1') // Remove links
+      .replace(/`(.+?)`/g, '$1') // Remove code
+      .trim();
+    
+    notes.push({
+      fileName: fileName,
+      page: notePage,
+      category: 'Clinical Notes',
+      content: plainText,
+      markdown: noteText,
+      noteIndex: notes.length + 1,
+      date: lastDate || '',
+      location: lastLocation || ''
+    });
+    }
+    
+    const notesAddedInThisSection = notes.length - notesBeforeThisSection;
+    
+    // [INDEXING] Debug: Count categories in this section
+    const categoriesInSection = (clinicalNotesSection.match(/Category:\s+/gi) || []).length;
+    
+    if (notesAddedInThisSection > 0) {
+      console.log(`📝 Extracted ${notesAddedInThisSection} notes from Clinical Notes section ${sectionIdx + 1}/${allMatches.length} (${categoriesInSection} "Category: " instances in section)`);
+    } else {
+      console.log(`[INDEXING] No notes extracted from Clinical Notes section ${sectionIdx + 1}/${allMatches.length} (${categoriesInSection} "Category: " instances in section)`);
+    }
+  }
+  
+  console.log(`📝 Extracted ${notes.length} total individual clinical notes from ${allMatches.length} section(s)`);
+  console.log(`[INDEXING] Total "Category: " instances found: ${allCategoryMatches.length}, Notes extracted: ${notes.length}`);
+  
+  // Debug: Log first few note starts if we found any
+  if (notes.length > 0) {
+    console.log(`📝 First note preview (first 200 chars): ${notes[0].markdown.substring(0, 200)}...`);
+    if (notes.length > 1) {
+      console.log(`📝 Second note preview (first 200 chars): ${notes[1].markdown.substring(0, 200)}...`);
+    }
+    if (notes.length > 2) {
+      console.log(`📝 Third note preview (first 200 chars): ${notes[2].markdown.substring(0, 200)}...`);
+    }
+  }
+  
+  return notes;
+}
+

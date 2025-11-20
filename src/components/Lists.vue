@@ -135,6 +135,28 @@
             <q-item v-for="(cat, index) in categories" :key="index">
               <q-item-section>
                 <q-item-label>{{ cat.category }}</q-item-label>
+                <!-- Show indexing results for Clinical Notes -->
+                <q-item-label 
+                  v-if="cat.category.toLowerCase().includes('clinical notes') && pdfData?.clinicalNotesIndexed"
+                  caption
+                  class="q-mt-xs"
+                >
+                  <div v-if="pdfData.clinicalNotesIndexed.indexed > 0" class="text-positive">
+                    ✅ Indexed {{ pdfData.clinicalNotesIndexed.indexed }} of {{ pdfData.clinicalNotesIndexed.total }} notes
+                  </div>
+                  <div v-else-if="pdfData.clinicalNotesIndexed.total > 0" class="text-warning">
+                    ⚠️ Failed to index notes
+                  </div>
+                  <div v-else class="text-grey">
+                    No notes extracted
+                  </div>
+                  <div 
+                    v-if="pdfData.clinicalNotesIndexed.errors && pdfData.clinicalNotesIndexed.errors.length > 0"
+                    class="text-negative q-mt-xs"
+                  >
+                    Errors: {{ pdfData.clinicalNotesIndexed.errors.join(', ') }}
+                  </div>
+                </q-item-label>
               </q-item-section>
               <q-item-section side>
                 <q-item-label>
@@ -211,11 +233,18 @@ interface MarkdownCategory {
   count: number;
 }
 
+interface ClinicalNotesIndexed {
+  total: number;
+  indexed: number;
+  errors: string[];
+}
+
 interface PdfData {
   totalPages: number;
   pages: PdfPage[];
   categories: MarkdownCategory[];
   fullMarkdown: string;
+  clinicalNotesIndexed?: ClinicalNotesIndexed;
 }
 
 const selectedFile = ref<File | null>(null);

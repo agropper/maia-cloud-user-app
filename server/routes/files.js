@@ -7,7 +7,8 @@ import multer from 'multer';
 import pdf from 'pdf-parse';
 import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { extractPdfWithPages } from '../utils/pdf-parser.js';
+import { extractPdfWithPages, extractIndividualClinicalNotes } from '../utils/pdf-parser.js';
+import { ClinicalNotesClient } from '../../lib/opensearch/clinical-notes.js';
 
 // User storage limit: 1 GB
 const USER_STORAGE_LIMIT = 1024 * 1024 * 1024; // 1 GB in bytes
@@ -141,6 +142,33 @@ Please provide a list of all top-level markdown categories (### headings) and th
   } catch (error) {
     console.error('❌ [PDF-MD] Error extracting markdown categories:', error);
     throw error;
+  }
+}
+
+// Lazy initialization of OpenSearch client for clinical notes
+let clinicalNotesClient = null;
+
+function getClinicalNotesClient() {
+  if (clinicalNotesClient) {
+    return clinicalNotesClient;
+  }
+
+  if (!process.env.OPENSEARCH_ENDPOINT) {
+    return null;
+  }
+
+  try {
+    clinicalNotesClient = new ClinicalNotesClient({
+      endpoint: process.env.OPENSEARCH_ENDPOINT,
+      username: process.env.OPENSEARCH_USERNAME,
+      password: process.env.OPENSEARCH_PASSWORD,
+      databaseId: process.env.DO_DATABASE_ID
+    });
+    console.log('✅ Clinical Notes OpenSearch client initialized');
+    return clinicalNotesClient;
+  } catch (error) {
+    console.warn('⚠️  Failed to initialize Clinical Notes client:', error.message);
+    return null;
   }
 }
 
@@ -534,12 +562,64 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         }
       }
 
+      // Extract and index individual clinical notes if "Clinical Notes" category exists
+      let clinicalNotesIndexed = null;
+      const notesClient = getClinicalNotesClient();
+      const clinicalNotesCategory = categories.find(cat => 
+        cat.category.toLowerCase().includes('clinical notes') || 
+        cat.category.toLowerCase() === 'clinical notes'
+      );
+      
+      if (clinicalNotesCategory && notesClient) {
+        try {
+          // Delete existing notes for this file before indexing new ones
+          console.log(`🗑️ [CLINICAL-NOTES] Deleting existing notes for file: ${req.file.originalname}`);
+          const deleteResult = await notesClient.deleteNotesByFileName(userId, req.file.originalname);
+          console.log(`🗑️ [CLINICAL-NOTES] Deleted ${deleteResult.deleted} existing notes for file`);
+          
+          console.log(`📝 [CLINICAL-NOTES] Extracting individual notes from Clinical Notes category (${clinicalNotesCategory.count} entries)`);
+          const individualNotes = extractIndividualClinicalNotes(
+            fullMarkdown,
+            result.pages,
+            req.file.originalname
+          );
+          
+          if (individualNotes.length > 0) {
+            console.log(`📝 [CLINICAL-NOTES] Found ${individualNotes.length} individual clinical notes to index`);
+            const bulkResult = await notesClient.indexNotesBulk(userId, individualNotes);
+            clinicalNotesIndexed = {
+              total: individualNotes.length,
+              indexed: bulkResult.indexed,
+              errors: bulkResult.errors || [],
+              deleted: deleteResult.deleted
+            };
+            console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} individual clinical notes`);
+          } else {
+            console.log('⚠️ [CLINICAL-NOTES] No individual notes extracted from Clinical Notes section');
+            clinicalNotesIndexed = {
+              total: 0,
+              indexed: 0,
+              errors: ['No individual notes could be extracted from Clinical Notes section'],
+              deleted: deleteResult.deleted
+            };
+          }
+        } catch (error) {
+          console.error('❌ [CLINICAL-NOTES] Error indexing individual clinical notes:', error);
+          clinicalNotesIndexed = {
+            total: 0,
+            indexed: 0,
+            errors: [error.message]
+          };
+        }
+      }
+
       res.json({
         success: true,
         totalPages: result.totalPages,
         pages: result.pages,
         categories: categories,
-        fullMarkdown: fullMarkdown
+        fullMarkdown: fullMarkdown,
+        clinicalNotesIndexed
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);
@@ -593,6 +673,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Extract PDF with page boundaries
       const result = await extractPdfWithPages(pdfBuffer);
       const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+      const fileName = bucketKey.split('/').pop() || 'unknown.pdf';
 
       // Extract markdown categories using Private AI if requested
       const extractCategoriesParam = req.query.extractCategories === 'true';
@@ -606,16 +687,338 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         }
       }
 
+      // Extract and index individual clinical notes if "Clinical Notes" category exists
+      let clinicalNotesIndexed = null;
+      const notesClient = getClinicalNotesClient();
+      const clinicalNotesCategory = categories.find(cat => 
+        cat.category.toLowerCase().includes('clinical notes') || 
+        cat.category.toLowerCase() === 'clinical notes'
+      );
+      
+      if (clinicalNotesCategory && notesClient) {
+        try {
+          // Delete existing notes for this file before indexing new ones
+          console.log(`🗑️ [CLINICAL-NOTES] Deleting existing notes for file: ${fileName}`);
+          const deleteResult = await notesClient.deleteNotesByFileName(userId, fileName);
+          console.log(`🗑️ [CLINICAL-NOTES] Deleted ${deleteResult.deleted} existing notes for file`);
+          
+          console.log(`📝 [CLINICAL-NOTES] Extracting individual notes from Clinical Notes category (${clinicalNotesCategory.count} entries)`);
+          const individualNotes = extractIndividualClinicalNotes(
+            fullMarkdown,
+            result.pages,
+            fileName
+          );
+          
+          if (individualNotes.length > 0) {
+            console.log(`📝 [CLINICAL-NOTES] Found ${individualNotes.length} individual clinical notes to index`);
+            const bulkResult = await notesClient.indexNotesBulk(userId, individualNotes);
+            clinicalNotesIndexed = {
+              total: individualNotes.length,
+              indexed: bulkResult.indexed,
+              errors: bulkResult.errors || [],
+              deleted: deleteResult.deleted
+            };
+            console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} individual clinical notes`);
+          } else {
+            console.log('⚠️ [CLINICAL-NOTES] No individual notes extracted from Clinical Notes section');
+            clinicalNotesIndexed = {
+              total: 0,
+              indexed: 0,
+              errors: ['No individual notes could be extracted from Clinical Notes section'],
+              deleted: deleteResult.deleted
+            };
+          }
+        } catch (error) {
+          console.error('❌ [CLINICAL-NOTES] Error indexing individual clinical notes:', error);
+          clinicalNotesIndexed = {
+            total: 0,
+            indexed: 0,
+            errors: [error.message]
+          };
+        }
+      }
+
       res.json({
         success: true,
         totalPages: result.totalPages,
         pages: result.pages,
         categories: categories,
-        fullMarkdown: fullMarkdown
+        fullMarkdown: fullMarkdown,
+        clinicalNotesIndexed
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);
       res.status(500).json({ error: `Failed to extract PDF: ${error.message}` });
+    }
+  });
+
+  /**
+   * Index clinical notes from PDF markdown
+   * POST /api/files/index-clinical-notes
+   */
+  app.post('/api/files/index-clinical-notes', upload.single('pdfFile'), async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const notesClient = getClinicalNotesClient();
+      if (!notesClient) {
+        return res.status(503).json({ 
+          error: 'Clinical Notes indexing not configured',
+          message: 'OPENSEARCH_ENDPOINT environment variable is required'
+        });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: 'No PDF file provided' });
+      }
+
+      // Security checks
+      if (req.file.size === 0) {
+        return res.status(400).json({ error: 'Empty file provided' });
+      }
+      
+      if (req.file.size > 50 * 1024 * 1024) {
+        return res.status(400).json({ error: 'File too large (max 50MB)' });
+      }
+
+      console.log(`📝 [CLINICAL-NOTES] Indexing clinical notes from PDF for user ${userId}`);
+
+      // Extract PDF with page boundaries
+      const result = await extractPdfWithPages(req.file.buffer);
+      const fileName = req.file.originalname;
+
+      // Extract categories using Private AI if available
+      const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+      let categories = [];
+      
+      if (cloudant && doClient) {
+        try {
+          categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
+          console.log(`📋 [CLINICAL-NOTES] Extracted ${categories.length} categories`);
+        } catch (error) {
+          console.warn('⚠️ [CLINICAL-NOTES] Failed to extract categories, continuing without them:', error.message);
+        }
+      }
+
+      // Prepare notes for indexing
+      // Each page becomes a note, and we can also create notes per category
+      const notesToIndex = [];
+      
+      // Index each page as a note
+      for (const page of result.pages) {
+        // Find category for this page (if available)
+        const pageCategory = categories.find(cat => 
+          fullMarkdown.substring(0, fullMarkdown.indexOf(`## Page ${page.page}`)).includes(`### ${cat.category}`)
+        )?.category || '';
+
+        notesToIndex.push({
+          fileName: fileName,
+          page: page.page,
+          category: pageCategory,
+          content: page.text,
+          markdown: page.markdown
+        });
+      }
+
+      // Bulk index all notes
+      const bulkResult = await notesClient.indexNotesBulk(userId, notesToIndex);
+
+      console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} notes for user ${userId}`);
+
+      res.json({
+        success: true,
+        indexed: bulkResult.indexed,
+        errors: bulkResult.errors || [],
+        fileName: fileName,
+        totalPages: result.totalPages,
+        categories: categories
+      });
+    } catch (error) {
+      console.error('❌ [CLINICAL-NOTES] Error indexing clinical notes:', error);
+      res.status(500).json({ error: `Failed to index clinical notes: ${error.message}` });
+    }
+  });
+
+  /**
+   * Index clinical notes from bucket file
+   * POST /api/files/index-clinical-notes/:bucketKey(*)
+   */
+  app.post('/api/files/index-clinical-notes/:bucketKey(*)', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const notesClient = getClinicalNotesClient();
+      if (!notesClient) {
+        return res.status(503).json({ 
+          error: 'Clinical Notes indexing not configured',
+          message: 'OPENSEARCH_ENDPOINT environment variable is required'
+        });
+      }
+
+      const { bucketKey } = req.params;
+      
+      const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
+      const bucketName = bucketUrl?.split('//')[1]?.split('.')[0] || 'maia';
+
+      const s3Client = new S3Client({
+        endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
+        region: 'us-east-1',
+        forcePathStyle: false,
+        credentials: {
+          accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+          secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+        }
+      });
+
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: bucketKey
+      });
+      
+      const response = await s3Client.send(getCommand);
+      
+      // Read the PDF file content
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const pdfBuffer = Buffer.concat(chunks);
+      const fileName = bucketKey.split('/').pop() || 'unknown.pdf';
+
+      console.log(`📝 [CLINICAL-NOTES] Indexing clinical notes from bucket file ${bucketKey} for user ${userId}`);
+
+      // Extract PDF with page boundaries
+      const result = await extractPdfWithPages(pdfBuffer);
+      const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+
+      // Extract categories using Private AI if available
+      let categories = [];
+      if (cloudant && doClient) {
+        try {
+          categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
+          console.log(`📋 [CLINICAL-NOTES] Extracted ${categories.length} categories`);
+        } catch (error) {
+          console.warn('⚠️ [CLINICAL-NOTES] Failed to extract categories, continuing without them:', error.message);
+        }
+      }
+
+      // Prepare notes for indexing
+      const notesToIndex = [];
+      
+      for (const page of result.pages) {
+        // Find category for this page (if available)
+        const pageCategory = categories.find(cat => 
+          fullMarkdown.substring(0, fullMarkdown.indexOf(`## Page ${page.page}`)).includes(`### ${cat.category}`)
+        )?.category || '';
+
+        notesToIndex.push({
+          fileName: fileName,
+          page: page.page,
+          category: pageCategory,
+          content: page.text,
+          markdown: page.markdown
+        });
+      }
+
+      // Bulk index all notes
+      const bulkResult = await notesClient.indexNotesBulk(userId, notesToIndex);
+
+      console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} notes for user ${userId}`);
+
+      res.json({
+        success: true,
+        indexed: bulkResult.indexed,
+        errors: bulkResult.errors || [],
+        fileName: fileName,
+        totalPages: result.totalPages,
+        categories: categories
+      });
+    } catch (error) {
+      console.error('❌ [CLINICAL-NOTES] Error indexing clinical notes:', error);
+      res.status(500).json({ error: `Failed to index clinical notes: ${error.message}` });
+    }
+  });
+
+  /**
+   * Search clinical notes
+   * POST /api/files/search-clinical-notes
+   */
+  app.post('/api/files/search-clinical-notes', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const notesClient = getClinicalNotesClient();
+      if (!notesClient) {
+        return res.status(503).json({ 
+          error: 'Clinical Notes search not configured',
+          message: 'OPENSEARCH_ENDPOINT environment variable is required'
+        });
+      }
+
+      const { query, category, fileName, page, size, from } = req.body;
+
+      // Search notes (userId is automatically enforced by the client)
+      const searchResult = await notesClient.searchNotes(userId, {
+        query: query,
+        category: category,
+        fileName: fileName,
+        page: page,
+        size: size || 100,
+        from: from || 0
+      });
+
+      res.json({
+        success: true,
+        total: searchResult.total,
+        hits: searchResult.hits
+      });
+    } catch (error) {
+      console.error('❌ [CLINICAL-NOTES] Error searching clinical notes:', error);
+      res.status(500).json({ error: `Failed to search clinical notes: ${error.message}` });
+    }
+  });
+
+  /**
+   * Get categories for user's clinical notes
+   * GET /api/files/clinical-notes-categories
+   */
+  app.get('/api/files/clinical-notes-categories', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const notesClient = getClinicalNotesClient();
+      if (!notesClient) {
+        return res.status(503).json({ 
+          error: 'Clinical Notes not configured',
+          message: 'OPENSEARCH_ENDPOINT environment variable is required'
+        });
+      }
+
+      const categories = await notesClient.getCategories(userId);
+
+      res.json({
+        success: true,
+        categories: categories
+      });
+    } catch (error) {
+      console.error('❌ [CLINICAL-NOTES] Error getting categories:', error);
+      res.status(500).json({ error: `Failed to get categories: ${error.message}` });
     }
   });
 }
