@@ -553,11 +553,14 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Extract markdown categories using Private AI if requested
       const extractCategoriesParam = req.query.extractCategories === 'true';
       let categories = [];
+      let categoryError = null;
       if (extractCategoriesParam && cloudant && doClient) {
         try {
           categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
         } catch (error) {
           console.error('❌ [PDF-MD] Failed to extract categories:', error);
+          // Store error message to return to client
+          categoryError = error.message || error.toString();
           // Continue without categories rather than failing the whole request
         }
       }
@@ -619,7 +622,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         pages: result.pages,
         categories: categories,
         fullMarkdown: fullMarkdown,
-        clinicalNotesIndexed
+        clinicalNotesIndexed,
+        categoryError: categoryError || undefined
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);
@@ -678,11 +682,14 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Extract markdown categories using Private AI if requested
       const extractCategoriesParam = req.query.extractCategories === 'true';
       let categories = [];
+      let categoryError = null;
       if (extractCategoriesParam && cloudant && doClient) {
         try {
           categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
         } catch (error) {
           console.error('❌ [PDF-MD] Failed to extract categories:', error);
+          // Store error message to return to client
+          categoryError = error.message || error.toString();
           // Continue without categories rather than failing the whole request
         }
       }
@@ -744,7 +751,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         pages: result.pages,
         categories: categories,
         fullMarkdown: fullMarkdown,
-        clinicalNotesIndexed
+        clinicalNotesIndexed,
+        categoryError: categoryError || undefined
       });
     } catch (error) {
       console.error('❌ PDF to markdown extraction error:', error);

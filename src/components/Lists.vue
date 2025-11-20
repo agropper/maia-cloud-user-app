@@ -127,11 +127,20 @@
       </q-card>
 
       <!-- Markdown Categories List -->
-      <q-card v-if="categories.length > 0" class="q-mb-md">
+      <q-card v-if="categories.length > 0 || pdfData?.categoryError" class="q-mb-md">
         <q-card-section>
           <div class="text-h6 q-mb-md">Markdown Categories ({{ categories.length }})</div>
           
-          <q-list bordered separator>
+          <!-- Show category extraction error if present -->
+          <q-banner v-if="pdfData?.categoryError" rounded class="bg-negative text-white q-mb-md">
+            <template v-slot:avatar>
+              <q-icon name="error" />
+            </template>
+            <div class="text-subtitle2 q-mb-xs">Failed to extract categories:</div>
+            {{ pdfData.categoryError }}
+          </q-banner>
+          
+          <q-list v-if="categories.length > 0" bordered separator>
             <q-item v-for="(cat, index) in categories" :key="index">
               <q-item-section>
                 <q-item-label>{{ cat.category }}</q-item-label>
@@ -245,6 +254,7 @@ interface PdfData {
   categories: MarkdownCategory[];
   fullMarkdown: string;
   clinicalNotesIndexed?: ClinicalNotesIndexed;
+  categoryError?: string;
 }
 
 const selectedFile = ref<File | null>(null);

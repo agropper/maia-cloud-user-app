@@ -317,32 +317,6 @@ function extractEncounterContext(lines, index) {
 export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '') {
   const notes = [];
   
-  // [INDEXING] Debug: Count "Category: " instances
-  const categoryPattern = /Category:\s+/gi;
-  const allCategoryMatches = [];
-  let categoryMatch;
-  while ((categoryMatch = categoryPattern.exec(fullMarkdown)) !== null) {
-    allCategoryMatches.push(categoryMatch.index);
-  }
-  
-  // Count categories in first 40 pages
-  let categoriesInFirst40Pages = 0;
-  let charCount = 0;
-  for (let i = 0; i < Math.min(40, pages.length); i++) {
-    const pageMarkdown = `## Page ${pages[i].page}\n\n${pages[i].markdown}`;
-    const pageStart = charCount;
-    const pageEnd = charCount + pageMarkdown.length;
-    
-    // Count categories in this page
-    const categoriesInPage = allCategoryMatches.filter(idx => idx >= pageStart && idx < pageEnd).length;
-    categoriesInFirst40Pages += categoriesInPage;
-    
-    charCount = pageEnd + 10; // Add padding
-  }
-  
-  console.log(`[INDEXING] Found ${allCategoryMatches.length} instances of "Category: " in the whole document`);
-  console.log(`[INDEXING] Found ${categoriesInFirst40Pages} instances of "Category: " in the first 40 pages`);
-  
   // Find ALL "Clinical Notes" sections
   // Look for headings like "### Clinical Notes", "## Clinical Notes", etc.
   // Use global flag to find all occurrences
@@ -512,23 +486,8 @@ export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '
       }
     }
     
-    console.log(`[INDEXING] Found ${noteStarts.length} note starts via "Created:" method`);
-    
     // Sort note starts
     noteStarts.sort((a, b) => a - b);
-    
-    // [INDEXING] Debug: Count date patterns in this section
-    let datePatternCount = 0;
-    for (const line of processedLines) {
-      const trimmed = line.trim();
-      if (trimmed && datePatterns.some(pattern => pattern.test(trimmed))) {
-        datePatternCount++;
-      }
-    }
-    
-    if (sectionIdx === 0 || sectionIdx < 3) {
-      console.log(`[INDEXING] Section ${sectionIdx + 1}: Found ${datePatternCount} date patterns, identified ${noteStarts.length} note starts`);
-    }
     
     // Extract notes between start positions
     for (let i = 0; i < noteStarts.length; i++) {
@@ -662,31 +621,9 @@ export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '
     });
     }
     
-    const notesAddedInThisSection = notes.length - notesBeforeThisSection;
-    
-    // [INDEXING] Debug: Count categories in this section
-    const categoriesInSection = (clinicalNotesSection.match(/Category:\s+/gi) || []).length;
-    
-    if (notesAddedInThisSection > 0) {
-      console.log(`📝 Extracted ${notesAddedInThisSection} notes from Clinical Notes section ${sectionIdx + 1}/${allMatches.length} (${categoriesInSection} "Category: " instances in section)`);
-    } else {
-      console.log(`[INDEXING] No notes extracted from Clinical Notes section ${sectionIdx + 1}/${allMatches.length} (${categoriesInSection} "Category: " instances in section)`);
-    }
   }
   
   console.log(`📝 Extracted ${notes.length} total individual clinical notes from ${allMatches.length} section(s)`);
-  console.log(`[INDEXING] Total "Category: " instances found: ${allCategoryMatches.length}, Notes extracted: ${notes.length}`);
-  
-  // Debug: Log first few note starts if we found any
-  if (notes.length > 0) {
-    console.log(`📝 First note preview (first 200 chars): ${notes[0].markdown.substring(0, 200)}...`);
-    if (notes.length > 1) {
-      console.log(`📝 Second note preview (first 200 chars): ${notes[1].markdown.substring(0, 200)}...`);
-    }
-    if (notes.length > 2) {
-      console.log(`📝 Third note preview (first 200 chars): ${notes[2].markdown.substring(0, 200)}...`);
-    }
-  }
   
   return notes;
 }
