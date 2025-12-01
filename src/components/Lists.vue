@@ -154,23 +154,21 @@
             <q-item 
               v-for="(cat, index) in categories" 
               :key="index"
-              :clickable="cat.category.toLowerCase().includes('clinical notes')"
-              @click="cat.category.toLowerCase().includes('clinical notes') ? processCategory(cat.category) : null"
-              :class="{ 'cursor-pointer': cat.category.toLowerCase().includes('clinical notes') }"
+              clickable
+              @click="processCategory(cat.category)"
+              class="cursor-pointer"
             >
               <q-item-section>
                 <q-item-label>
                   {{ cat.category }}
                   <q-icon 
-                    v-if="cat.category.toLowerCase().includes('clinical notes')" 
                     name="play_arrow" 
                     size="sm" 
                     class="q-ml-sm text-primary"
                   />
                 </q-item-label>
-                <!-- Show processing status for Clinical Notes -->
+                <!-- Show processing status for all categories -->
                 <q-item-label 
-                  v-if="cat.category.toLowerCase().includes('clinical notes')"
                   caption
                   class="q-mt-xs"
                 >
@@ -178,13 +176,13 @@
                     <q-spinner size="xs" /> Processing...
                   </div>
                   <div v-else-if="categoryProcessingStatus[cat.category]?.indexed > 0" class="text-positive">
-                    ✅ Indexed {{ categoryProcessingStatus[cat.category].indexed }} of {{ categoryProcessingStatus[cat.category].total }} notes
+                    ✅ Indexed {{ categoryProcessingStatus[cat.category].indexed }} of {{ categoryProcessingStatus[cat.category].total }} items
                   </div>
                   <div v-else-if="categoryProcessingStatus[cat.category]?.total === 0" class="text-grey">
                     Click to process
                   </div>
                   <div v-else-if="categoryProcessingStatus[cat.category]" class="text-warning">
-                    ⚠️ Failed to index notes
+                    ⚠️ Failed to process
                   </div>
                   <div v-else class="text-grey">
                     Click to process
@@ -207,37 +205,45 @@
         </q-card-section>
       </q-card>
 
-      <!-- Clinical Notes List (only shown when processed) -->
-      <q-card v-if="hasCategoryBeenProcessed('clinical notes')" class="q-mb-md">
+      <!-- Category Items List (dynamic - shows currently selected category) -->
+      <q-card v-if="currentCategoryDisplay" class="q-mb-md">
         <q-card-section>
-          <div class="text-h6 q-mb-md">Clinical Notes</div>
+          <div class="text-h6 q-mb-md">{{ currentCategoryDisplay }}</div>
           
-          <div v-if="isLoadingClinicalNotes" class="text-center q-pa-md">
+          <div v-if="isLoadingCategoryItems" class="text-center q-pa-md">
             <q-spinner size="2em" color="primary" />
-            <div class="q-mt-sm text-caption">Loading clinical notes...</div>
+            <div class="q-mt-sm text-caption">Loading {{ currentCategoryDisplay.toLowerCase() }}...</div>
           </div>
           
-          <div v-else-if="clinicalNotes.length === 0" class="text-center q-pa-md text-grey">
-            No clinical notes found. Click "Clinical Notes" in the Markdown Categories list to process.
+          <div v-else-if="categoryItems.length === 0" class="text-center q-pa-md text-grey">
+            No items found. Click "{{ currentCategoryDisplay }}" in the Markdown Categories list to process.
           </div>
           
           <q-list v-else bordered separator>
             <q-item 
-              v-for="note in clinicalNotes" 
-              :key="note.id"
+              v-for="(item, index) in categoryItems" 
+              :key="`${currentCategoryDisplay}-${item.id || item.name || index}-${index}`"
               clickable
-              @click="copyNoteToClipboard(note)"
+              @click="copyItemToClipboard(item, currentCategoryDisplay)"
               class="cursor-pointer"
             >
               <q-item-section>
-                <q-item-label class="text-body2">
-                  {{ formatNoteDescription(note) }}
+                <q-item-label 
+                  class="text-body2"
+                  v-if="currentCategoryDisplay && currentCategoryDisplay.toLowerCase().includes('medication')"
+                  v-html="formatItemDescription(item, currentCategoryDisplay)"
+                />
+                <q-item-label 
+                  v-else
+                  class="text-body2"
+                >
+                  {{ formatItemDescription(item, currentCategoryDisplay) }}
                 </q-item-label>
               </q-item-section>
               <q-item-section side>
                 <q-item-label caption>
-                  <span v-if="note.fileName" class="text-grey">{{ note.fileName }}</span>
-                  <span v-if="note.page > 0" class="text-grey q-ml-sm">Page {{ note.page }}</span>
+                  <span v-if="item.fileName" class="text-grey">{{ item.fileName }}</span>
+                  <span v-if="item.page > 0" class="text-grey q-ml-sm">Page {{ item.page }}</span>
                 </q-item-label>
               </q-item-section>
             </q-item>
@@ -324,6 +330,9 @@ const savedPdfBucketKey = ref<string | null>(null);
 const savedResultsBucketKey = ref<string | null>(null);
 const processingCategory = ref<string | null>(null);
 const categoryProcessingStatus = ref<Record<string, { total: number; indexed: number; errors: string[] }>>({});
+const currentCategoryDisplay = ref<string | null>(null);
+const categoryItems = ref<any[]>([]);
+const isLoadingCategoryItems = ref(false);
 
 const loadUserFiles = async () => {
   try {
@@ -387,12 +396,24 @@ const loadSavedResults = async () => {
 };
 
 const reprocessPdf = async () => {
-  if (!savedPdfBucketKey.value) {
-    error.value = 'No saved PDF found to re-process';
-    return;
-  }
+  // Reset all state to show file selection dialog again
+  hasSavedResults.value = false;
+  pdfData.value = null;
+  categories.value = [];
+  selectedFile.value = null;
+  selectedBucketKey.value = null;
+  savedPdfBucketKey.value = null;
+  savedResultsBucketKey.value = null;
+  selectedFileName.value = '';
+  error.value = '';
+  categoryProcessingStatus.value = {};
+  currentCategoryDisplay.value = null;
+  categoryItems.value = [];
   
-  await handleBucketFileSelected(savedPdfBucketKey.value);
+  // Clear cached lists on backend
+  await clearCachedLists();
+  
+  // File selection dialog will now be visible again
 };
 
 // Helper function to check if a category has been processed (case-insensitive)
@@ -401,6 +422,87 @@ const hasCategoryBeenProcessed = (categoryName: string): boolean => {
   return Object.keys(categoryProcessingStatus.value).some(
     key => key.toLowerCase() === normalized && categoryProcessingStatus.value[key]?.indexed > 0
   );
+};
+
+const formatItemDescription = (item: any, categoryName: string): string => {
+  if (categoryName.toLowerCase().includes('clinical notes')) {
+    return formatNoteDescription(item);
+  } else if (categoryName.toLowerCase().includes('medication')) {
+    const parts: string[] = [];
+    
+    // Extract date without location (remove everything after semicolon or common location patterns)
+    if (item.date) {
+      let dateOnly = item.date.split(';')[0].trim();
+      // Remove common location patterns if they appear after the date
+      dateOnly = dateOnly.replace(/\s+Mass\s+General\s+Brigham.*$/i, '');
+      dateOnly = dateOnly.replace(/\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+.*$/i, ''); // Remove patterns like "Location Name" (2+ capitalized words)
+      parts.push(dateOnly);
+    }
+    
+    // Add name and dosage in bold (HTML format)
+    if (item.name || item.dosage) {
+      const boldParts: string[] = [];
+      if (item.name) boldParts.push(`<strong>${item.name}</strong>`);
+      if (item.dosage) boldParts.push(`<strong>${item.dosage}</strong>`);
+      if (boldParts.length > 0) {
+        parts.push(boldParts.join(' '));
+      }
+    }
+    
+    // Add other fields if present (frequency, status) without prefixes
+    if (item.frequency) parts.push(item.frequency);
+    if (item.status) parts.push(item.status);
+    
+    return parts.join(' ') || 'No details available';
+  }
+  // Generic format for other categories
+  return JSON.stringify(item).substring(0, 100) || 'No details available';
+};
+
+const copyItemToClipboard = async (item: any, categoryName: string) => {
+  if (categoryName.toLowerCase().includes('clinical notes')) {
+    copyNoteToClipboard(item);
+    return;
+  }
+  
+  // For other categories, create a search query using original item data
+  // For medications, use the original item data (with all info) for clipboard
+  let description = '';
+  if (categoryName.toLowerCase().includes('medication')) {
+    // Use original item data for clipboard (keep all information)
+    const parts: string[] = [];
+    if (item.date) parts.push(item.date);
+    if (item.name) parts.push(item.name);
+    if (item.dosage) parts.push(item.dosage);
+    if (item.frequency) parts.push(item.frequency);
+    if (item.status) parts.push(item.status);
+    description = parts.join(' ');
+  } else {
+    // For other categories, use formatItemDescription and strip HTML tags
+    description = formatItemDescription(item, categoryName);
+    description = description.replace(/<[^>]*>/g, '');
+  }
+  
+  const excludeFile = item.fileName ? ` (excluding ${item.fileName})` : '';
+  const query = `Find information about: ${description} in your knowledge base${excludeFile} and return the filename and page number in that file.`;
+  
+  try {
+    await navigator.clipboard.writeText(query);
+    $q.notify({
+      message: 'Copied to clipboard!',
+      type: 'positive',
+      position: 'top',
+      timeout: 2000
+    });
+  } catch (err) {
+    console.error('Failed to copy to clipboard:', err);
+    $q.notify({
+      message: 'Failed to copy to clipboard',
+      type: 'negative',
+      position: 'top',
+      timeout: 2000
+    });
+  }
 };
 
 const handleFileSelected = async (file: File | null) => {
@@ -421,15 +523,61 @@ const handleBucketFileSelected = async (bucketKey: string | null) => {
     return;
   }
   
-  const file = userFiles.value.find(f => f.bucketKey === bucketKey);
-  if (file) {
-    console.log('Processing bucket file:', file.fileName, bucketKey);
-    selectedFileName.value = file.fileName;
+  // Check if file is in Lists folder - if so, we can process it directly
+  // Otherwise, try to find it in userFiles
+  const isListsFile = bucketKey.includes('/Lists/');
+  
+  if (isListsFile) {
+    // File is in Lists folder - process directly
+    console.log('Processing Lists folder file:', bucketKey);
+    const fileName = bucketKey.split('/').pop() || 'unknown.pdf';
+    selectedFileName.value = fileName;
     selectedFile.value = null;
+    
+    // Clear cached lists when re-processing
+    await clearCachedLists();
+    
     await processPdfFromBucket(bucketKey);
   } else {
-    console.error('File not found for bucket key:', bucketKey);
-    error.value = 'Selected file not found';
+    // File is in regular user files - find it in userFiles list
+    const file = userFiles.value.find(f => f.bucketKey === bucketKey);
+    if (file) {
+      console.log('Processing bucket file:', file.fileName, bucketKey);
+      selectedFileName.value = file.fileName;
+      selectedFile.value = null;
+      
+      // Clear cached lists when re-processing
+      await clearCachedLists();
+      
+      await processPdfFromBucket(bucketKey);
+    } else {
+      console.error('File not found for bucket key:', bucketKey);
+      error.value = 'Selected file not found';
+    }
+  }
+};
+
+const clearCachedLists = async () => {
+  try {
+    // Call backend to clear cached list files
+    const response = await fetch('/api/files/lists/clear-cache', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include'
+    });
+    
+    if (response.ok) {
+      console.log('✅ Cleared cached list files');
+      // Reset processing status
+      categoryProcessingStatus.value = {};
+      currentCategoryDisplay.value = null;
+      categoryItems.value = [];
+    }
+  } catch (err) {
+    console.warn('Failed to clear cached lists:', err);
+    // Continue anyway - the cache will be invalidated by timestamp check
   }
 };
 
@@ -574,9 +722,18 @@ const processCategory = async (categoryName: string) => {
       errors: result.indexed.errors || []
     };
 
-    // If it's Clinical Notes, reload the clinical notes list
+    // Update current category display and items
+    currentCategoryDisplay.value = categoryName;
+    categoryItems.value = result.list || [];
+
+    // If it's Clinical Notes, also reload the clinical notes list for the existing component
     if (categoryName.toLowerCase().includes('clinical notes')) {
       loadClinicalNotes();
+      // Also update categoryItems with clinical notes format
+      categoryItems.value = result.list.map((note: any) => ({
+        id: note.id || `${note.fileName}-${note.page}-${note.noteIndex || 0}`,
+        ...note
+      }));
     }
 
     if ($q && typeof $q.notify === 'function') {

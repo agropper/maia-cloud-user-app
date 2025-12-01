@@ -10,6 +10,424 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { extractPdfWithPages, extractIndividualClinicalNotes } from '../utils/pdf-parser.js';
 import { ClinicalNotesClient } from '../../lib/opensearch/clinical-notes.js';
 
+/**
+ * Extract medication records from markdown
+ * Follows the same pattern as extractIndividualClinicalNotes
+ * Each medication record has: date, medication name, and dose
+ * @param {string} fullMarkdown - Full markdown text from PDF
+ * @param {Array} pages - Array of page objects with page numbers
+ * @param {string} fileName - Source file name
+ * @returns {Array} Array of medication objects
+ */
+function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
+  const medications = [];
+  
+  console.log(`💊 [MEDICATIONS] Starting medication extraction for file: ${fileName}`);
+  
+  // Find ALL "Medication" or "Medication Records" sections
+  // Look for headings like "### Medication Records", "## Medications", etc.
+  const medicationPattern = /(?:^|\n)(?:#{1,3})\s*Medication\s+Records?\s*(?:\n|$)/gi;
+  const allMatches = [];
+  let match;
+  
+  // Find all matches
+  while ((match = medicationPattern.exec(fullMarkdown)) !== null) {
+    allMatches.push({
+      index: match.index,
+      length: match[0].length,
+      start: match.index + match[0].length
+    });
+  }
+  
+  // Also try "Medications" (without "Records")
+  const medicationsPattern = /(?:^|\n)(?:#{1,3})\s*Medications\s*(?:\n|$)/gi;
+  while ((match = medicationsPattern.exec(fullMarkdown)) !== null) {
+    // Check if this is already in allMatches
+    const alreadyFound = allMatches.some(m => Math.abs(m.index - match.index) < 10);
+    if (!alreadyFound) {
+      allMatches.push({
+        index: match.index,
+        length: match[0].length,
+        start: match.index + match[0].length
+      });
+    }
+  }
+  
+  if (allMatches.length === 0) {
+    console.log('💊 [MEDICATIONS] ⚠️ No "Medication Records" or "Medications" section found in markdown');
+    return medications;
+  }
+  
+  console.log(`💊 [MEDICATIONS] 📝 Found ${allMatches.length} Medication section(s) in markdown`);
+  
+  // Process each Medication section
+  for (let sectionIdx = 0; sectionIdx < allMatches.length; sectionIdx++) {
+    const medicationsBeforeThisSection = medications.length;
+    const sectionMatch = allMatches[sectionIdx];
+    const sectionStart = sectionMatch.start;
+    
+    console.log(`💊 [MEDICATIONS] Processing section ${sectionIdx + 1}/${allMatches.length}, starting at position ${sectionStart}`);
+    
+    // Find the end of this section (next major heading or next Medication section or end of document)
+    let sectionEnd = fullMarkdown.length;
+    
+    // Check if there's a next Medication section
+    if (sectionIdx < allMatches.length - 1) {
+      sectionEnd = allMatches[sectionIdx + 1].index;
+    } else {
+      // Last section - find next major heading (## or #) or end of document
+      const restOfMarkdown = fullMarkdown.substring(sectionStart);
+      const nextMajorSectionMatch = restOfMarkdown.match(/\n(?:##|#)\s+/);
+      if (nextMajorSectionMatch) {
+        sectionEnd = sectionStart + nextMajorSectionMatch.index;
+      }
+    }
+    
+    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} spans from position ${sectionStart} to ${sectionEnd} (${sectionEnd - sectionStart} characters)`);
+    
+    // Extract this Medications section
+    let medicationsSection = fullMarkdown.substring(sectionStart, sectionEnd);
+    
+    // Filter out common headers and footers (similar to Clinical Notes)
+    const headerFooterPatterns = [
+      /^Page\s+\d+/i,
+      /^\d+\s*$/m,
+      /^Apple\s+Health/i,
+      /^Adrian\s+Gropper/i,
+      /^\d{4}-\d{2}-\d{2}/,
+      /^Generated\s+on/i,
+      /^Exported\s+on/i,
+    ];
+    
+    const lines = medicationsSection.split('\n');
+    const filteredLines = [];
+    const lineFrequency = new Map();
+    
+    // First pass: count line frequencies
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.length > 0) {
+        const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+        lineFrequency.set(normalized, (lineFrequency.get(normalized) || 0) + 1);
+      }
+    }
+    
+    // Second pass: filter out headers/footers
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.length === 0) {
+        filteredLines.push(line);
+        continue;
+      }
+      
+      const isHeaderFooter = headerFooterPatterns.some(pattern => pattern.test(trimmed));
+      const normalized = trimmed.toLowerCase().replace(/\s+/g, ' ');
+      const frequency = lineFrequency.get(normalized) || 0;
+      const isRepeated = frequency > 5;
+      
+      if (!isHeaderFooter && !isRepeated) {
+        filteredLines.push(line);
+      }
+    }
+    
+    medicationsSection = filteredLines.join('\n');
+    const processedLines = medicationsSection.split('\n');
+    
+    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} has ${processedLines.length} lines after filtering`);
+    
+    // Date patterns (same as Clinical Notes)
+    const datePatterns = [
+      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}/i,
+      /^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/,
+      /^\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}/,
+    ];
+    
+    // Pattern to identify medication entries:
+    // Each medication record typically starts with a date line
+    // Followed by location (which we'll skip)
+    // Then medication name and dose on the same or next line
+    let medicationIndex = 0;
+    let currentDate = '';
+    let currentMedication = null;
+    let linesSinceDate = 0; // Track how many lines since we found a date
+    
+    for (let i = 0; i < processedLines.length; i++) {
+      const line = processedLines[i].trim();
+      if (!line) continue;
+      
+      // Check if this line is a date (at the start of the line)
+      const isDate = datePatterns.some(pattern => pattern.test(line));
+      
+      if (isDate && line.length < 50) {
+        // Found a date - this likely starts a new medication record
+        // Save previous medication if exists
+        if (currentMedication && currentMedication.name) {
+          medications.push(currentMedication);
+          console.log(`💊 [MEDICATIONS] Added medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
+        }
+        
+        currentDate = line;
+        currentMedication = null; // Reset for new medication
+        linesSinceDate = 0; // Reset counter
+        console.log(`💊 [MEDICATIONS] Found date: ${currentDate} at line ${i}`);
+        continue;
+      }
+      
+      // If we have a date, look for medication name and dose
+      if (currentDate) {
+        linesSinceDate++;
+        
+        // If we've gone more than 5 lines without finding a valid medication, reset
+        // This prevents us from treating headers/footers as medications
+        if (linesSinceDate > 5 && !currentMedication) {
+          console.log(`💊 [MEDICATIONS] No medication found after ${linesSinceDate} lines, resetting date`);
+          currentDate = '';
+          currentMedication = null;
+          linesSinceDate = 0;
+          continue;
+        }
+        // Skip location lines (common location patterns)
+        const isLocation = /mass general|brigham|hospital|medical center|clinic|health center/i.test(line);
+        if (isLocation) {
+          console.log(`💊 [MEDICATIONS] Skipping location line: ${line.substring(0, 50)}`);
+          continue;
+        }
+        
+        // Skip page markers and continuation markers
+        const isPageMarker = /(?:^|\s)(?:##\s*)?Page\s+\d+|Continued\s+(?:on|from)\s+Page\s+\d+|Page\s+\d+\s+of/i.test(line);
+        if (isPageMarker) {
+          console.log(`💊 [MEDICATIONS] Skipping page marker: ${line.substring(0, 50)}`);
+          // Reset current date if we hit a page marker - it's not a medication entry
+          currentDate = '';
+          currentMedication = null;
+          continue;
+        }
+        
+        // Skip header/footer patterns
+        const isHeaderFooter = /Health\s+Page|Date\s+of\s+Birth|Patient\s+Name|Medical\s+Record|Chart\s+Number|MRN|Account\s+Number/i.test(line);
+        if (isHeaderFooter) {
+          console.log(`💊 [MEDICATIONS] Skipping header/footer: ${line.substring(0, 50)}`);
+          // Reset current date if we hit header/footer - it's not a medication entry
+          currentDate = '';
+          currentMedication = null;
+          continue;
+        }
+        
+        // Skip lines that are too short (likely not medications) or too long (likely paragraphs)
+        if (line.length < 3 || line.length > 200) {
+          console.log(`💊 [MEDICATIONS] Skipping line (too short/long): ${line.substring(0, 50)}`);
+          continue;
+        }
+        
+        // Skip lines that look like dates only (no medication info)
+        const isDateOnly = datePatterns.some(pattern => pattern.test(line) && line.length < 30);
+        if (isDateOnly) {
+          console.log(`💊 [MEDICATIONS] Skipping date-only line: ${line.substring(0, 50)}`);
+          continue;
+        }
+        
+        // Skip common non-medication patterns
+        const nonMedicationPatterns = [
+          /^Date\s+of\s+Birth/i,
+          /^Patient\s+ID/i,
+          /^MRN/i,
+          /^Account/i,
+          /^Chart/i,
+          /^Record\s+Date/i,
+          /^Printed/i,
+          /^Generated/i,
+          /^Confidential/i,
+          /^Page\s+\d+/i,
+          /^##\s*Page/i,
+          /Continued\s+(on|from)/i,
+        ];
+        const isNonMedication = nonMedicationPatterns.some(pattern => pattern.test(line));
+        if (isNonMedication) {
+          console.log(`💊 [MEDICATIONS] Skipping non-medication pattern: ${line.substring(0, 50)}`);
+          // Reset current date - this is not a medication entry
+          currentDate = '';
+          currentMedication = null;
+          continue;
+        }
+        
+        // Look for medication name and dose patterns
+        // Medication name is typically at the start of the line
+        // Dose might be on the same line or next line
+        // Pattern: medication name, possibly followed by dose (e.g., "Aspirin 81 mg" or "hydroCHLOROthiazide 12.5 mg")
+        // Updated to support decimal doses: \d+\.?\d* matches integers and decimals like 12, 12.5, 0.5
+        const medicationWithDoseMatch = line.match(/^(.+?)\s+(\d+\.?\d*(?:\s*mg|\s*mcg|\s*units?|\s*ml|\s*tablets?|\s*IU|\s*MEQ)?(?:\s+[a-z]+)?)/i);
+        const medicationNameOnlyMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/);
+        
+        if (medicationWithDoseMatch) {
+          // Found medication with dose on same line
+          const medName = medicationWithDoseMatch[1].trim();
+          const dose = medicationWithDoseMatch[2].trim();
+          
+          // Validate that this looks like a real medication name
+          // Exclude common non-medication patterns
+          const invalidMedicationPatterns = [
+            /^Page\s+\d+/i,
+            /^##\s*Page/i,
+            /Continued\s+(on|from)/i,
+            /Date\s+of\s+Birth/i,
+            /Health\s+Page/i,
+            /^[A-Z][a-z]+\s+Page/i, // "Health Page", "Patient Page", etc.
+            /^\d+\s*$/i, // Just numbers
+            /^[A-Z]{1,3}\s*$/i, // Just initials
+          ];
+          
+          const isInvalid = invalidMedicationPatterns.some(pattern => pattern.test(medName));
+          if (isInvalid) {
+            console.log(`💊 [MEDICATIONS] Skipping invalid medication name: ${medName}`);
+            continue;
+          }
+          
+          // Medication names should be at least 2 characters and not just numbers
+          if (medName.length < 2 || /^\d+$/.test(medName)) {
+            console.log(`💊 [MEDICATIONS] Skipping invalid medication name (too short or just numbers): ${medName}`);
+            continue;
+          }
+          
+          // Save previous medication if exists
+          if (currentMedication && currentMedication.name) {
+            medications.push(currentMedication);
+            console.log(`💊 [MEDICATIONS] Added medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
+          }
+          
+          currentMedication = {
+            id: `${fileName}-med-${medicationIndex++}`,
+            name: medName,
+            dosage: dose,
+            date: currentDate,
+            fileName: fileName,
+            page: 0, // Will be determined later
+            category: 'Medications',
+            content: line,
+            markdown: line
+          };
+          
+          linesSinceDate = 0; // Reset counter since we found a valid medication
+          console.log(`💊 [MEDICATIONS] Found medication with dose: ${medName} - ${dose} on ${currentDate}`);
+        } else if (medicationNameOnlyMatch && !currentMedication) {
+          // Found medication name without dose (dose might be on next line)
+          const medName = medicationNameOnlyMatch[1].trim();
+          
+          // Validate medication name
+          const invalidMedicationPatterns = [
+            /^Page\s+\d+/i,
+            /^##\s*Page/i,
+            /Continued\s+(on|from)/i,
+            /Date\s+of\s+Birth/i,
+            /Health\s+Page/i,
+            /^[A-Z][a-z]+\s+Page/i,
+            /^\d+\s*$/i,
+            /^[A-Z]{1,3}\s*$/i,
+          ];
+          
+          const isInvalid = invalidMedicationPatterns.some(pattern => pattern.test(medName));
+          if (isInvalid || medName.length < 2 || /^\d+$/.test(medName)) {
+            console.log(`💊 [MEDICATIONS] Skipping invalid medication name: ${medName}`);
+            continue;
+          }
+          
+          currentMedication = {
+            id: `${fileName}-med-${medicationIndex++}`,
+            name: medName,
+            dosage: '',
+            date: currentDate,
+            fileName: fileName,
+            page: 0,
+            category: 'Medications',
+            content: line,
+            markdown: line
+          };
+          
+          linesSinceDate = 0; // Reset counter since we found a valid medication
+          console.log(`💊 [MEDICATIONS] Found medication name: ${medName} on ${currentDate}, looking for dose`);
+        } else if (currentMedication && !currentMedication.dosage) {
+          // We have a medication but no dose yet - check if this line has a dose
+          // Updated to support decimal doses: \d+\.?\d* matches integers and decimals like 12, 12.5, 0.5
+          const doseMatch = line.match(/(\d+\.?\d*(?:\s*mg|\s*mcg|\s*units?|\s*ml|\s*tablets?|\s*IU|\s*MEQ)?(?:\s+[a-z]+)?)/i);
+          if (doseMatch) {
+            currentMedication.dosage = doseMatch[1].trim();
+            currentMedication.content += '\n' + line;
+            currentMedication.markdown += '\n' + line;
+            console.log(`💊 [MEDICATIONS] Found dose for ${currentMedication.name}: ${currentMedication.dosage}`);
+          } else {
+            // Not a dose line, might be continuation - append to content
+            currentMedication.content += '\n' + line;
+            currentMedication.markdown += '\n' + line;
+          }
+        } else if (currentMedication) {
+          // Continuation line - append to content
+          currentMedication.content += '\n' + line;
+          currentMedication.markdown += '\n' + line;
+        }
+      }
+    }
+    
+    // Add last medication if exists
+    if (currentMedication && currentMedication.name) {
+      medications.push(currentMedication);
+      console.log(`💊 [MEDICATIONS] Added final medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
+    }
+    
+    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} extracted ${medications.length - medicationsBeforeThisSection} medications`);
+  }
+  
+  // Determine page numbers for medications (similar to Clinical Notes)
+  console.log(`💊 [MEDICATIONS] Determining page numbers for ${medications.length} medications`);
+  for (let medIdx = 0; medIdx < medications.length; medIdx++) {
+    const med = medications[medIdx];
+    
+    // Calculate the character position of this medication in the full markdown
+    // We need to find which section it came from and its position within that section
+    let medPage = 1;
+    
+    // Find which section this medication came from by checking its content
+    for (let sectionIdx = 0; sectionIdx < allMatches.length; sectionIdx++) {
+      const sectionStart = allMatches[sectionIdx].start;
+      const sectionEnd = sectionIdx < allMatches.length - 1 
+        ? allMatches[sectionIdx + 1].index 
+        : fullMarkdown.length;
+      
+      const sectionContent = fullMarkdown.substring(sectionStart, sectionEnd);
+      
+      // Check if this medication's content appears in this section
+      if (sectionContent.includes(med.content.substring(0, 50))) {
+        // Find position within section
+        const positionInSection = sectionContent.indexOf(med.content.substring(0, 50));
+        const absolutePosition = sectionStart + positionInSection;
+        
+        // Find which page this position corresponds to
+        let accumulatedLength = 0;
+        for (const page of pages) {
+          const pageHeader = `## Page ${page.page}\n\n`;
+          const pageSeparator = `\n\n---\n\n`;
+          const pageLength = pageHeader.length + page.markdown.length + pageSeparator.length;
+          
+          if (absolutePosition >= accumulatedLength && absolutePosition < accumulatedLength + pageLength) {
+            medPage = page.page;
+            break;
+          }
+          
+          accumulatedLength += pageLength;
+        }
+        break;
+      }
+    }
+    
+    med.page = medPage;
+    if (medIdx < 5 || medIdx % 10 === 0) {
+      console.log(`💊 [MEDICATIONS] Medication ${medIdx + 1}: ${med.name} assigned to page ${medPage}`);
+    }
+  }
+  
+  console.log(`💊 [MEDICATIONS] ✅ Extracted ${medications.length} total medication records from ${allMatches.length} section(s)`);
+  
+  return medications;
+}
+
 // User storage limit: 1 GB
 const USER_STORAGE_LIMIT = 1024 * 1024 * 1024; // 1 GB in bytes
 
@@ -634,12 +1052,39 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
 
       // Note: Clinical Notes processing is now done on-demand when user clicks the category
+      // Clear existing files in Lists folder before saving new ones
+      const { client: s3Client, bucketName } = getS3Client();
+      const listsFolder = `${userId}/Lists/`;
+      try {
+        const listCommand = new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: listsFolder
+        });
+        const listResult = await s3Client.send(listCommand);
+        const existingFiles = (listResult.Contents || [])
+          .filter(obj => obj.Key && !obj.Key.endsWith('.keep'));
+        
+        const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        for (const file of existingFiles) {
+          try {
+            await s3Client.send(new DeleteObjectCommand({
+              Bucket: bucketName,
+              Key: file.Key
+            }));
+            console.log(`🗑️ [LISTS] Deleted existing file before processing: ${file.Key}`);
+          } catch (err) {
+            console.warn(`⚠️ [LISTS] Failed to delete existing file ${file.Key}:`, err);
+          }
+        }
+      } catch (clearError) {
+        console.warn('⚠️ [LISTS] Failed to clear Lists folder before processing:', clearError);
+        // Continue with processing even if clearing fails
+      }
+
       // Save PDF and processing results to Lists folder
       let savedPdfBucketKey = null;
       let savedResultsBucketKey = null;
       try {
-        const { client: s3Client, bucketName } = getS3Client();
-        const listsFolder = `${userId}/Lists/`;
         const cleanFileName = req.file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
         
         // Save PDF file to Lists folder
@@ -721,12 +1166,52 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       
       const { client: s3Client, bucketName } = getS3Client();
 
+      // Clear cached list files when re-processing
+      try {
+        const listsFolder = `${userId}/Lists/`;
+        if (bucketKey.startsWith(listsFolder)) {
+          // List all _list.json files and delete them
+          const listCommand = new ListObjectsV2Command({
+            Bucket: bucketName,
+            Prefix: listsFolder
+          });
+          const listResult = await s3Client.send(listCommand);
+          const listFiles = (listResult.Contents || [])
+            .filter(obj => obj.Key && obj.Key.endsWith('_list.json'));
+          
+          const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+          for (const file of listFiles) {
+            try {
+              await s3Client.send(new DeleteObjectCommand({
+                Bucket: bucketName,
+                Key: file.Key
+              }));
+              console.log(`🗑️ [LISTS] Deleted cached list file during re-process: ${file.Key}`);
+            } catch (err) {
+              console.warn(`⚠️ [LISTS] Failed to delete cached list file ${file.Key}:`, err);
+            }
+          }
+        }
+      } catch (cacheError) {
+        console.warn('⚠️ [LISTS] Failed to clear cache during re-process:', cacheError);
+        // Continue with processing even if cache clearing fails
+      }
+
       const getCommand = new GetObjectCommand({
         Bucket: bucketName,
         Key: bucketKey
       });
       
-      const response = await s3Client.send(getCommand);
+      let response;
+      try {
+        response = await s3Client.send(getCommand);
+      } catch (s3Error) {
+        if (s3Error.name === 'NoSuchKey' || s3Error.$metadata?.httpStatusCode === 404) {
+          console.error(`❌ [PDF-MD] File not found: ${bucketKey}`);
+          return res.status(404).json({ error: `File not found: ${bucketKey}` });
+        }
+        throw s3Error;
+      }
       
       // Read the PDF file content
       const chunks = [];
@@ -758,11 +1243,38 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
 
       // Note: Clinical Notes processing is now done on-demand when user clicks the category
+      // Clear existing files in Lists folder before saving new ones
+      const listsFolder = `${userId}/Lists/`;
+      try {
+        const listCommand = new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: listsFolder
+        });
+        const listResult = await s3Client.send(listCommand);
+        const existingFiles = (listResult.Contents || [])
+          .filter(obj => obj.Key && !obj.Key.endsWith('.keep'));
+        
+        const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        for (const file of existingFiles) {
+          try {
+            await s3Client.send(new DeleteObjectCommand({
+              Bucket: bucketName,
+              Key: file.Key
+            }));
+            console.log(`🗑️ [LISTS] Deleted existing file before processing: ${file.Key}`);
+          } catch (err) {
+            console.warn(`⚠️ [LISTS] Failed to delete existing file ${file.Key}:`, err);
+          }
+        }
+      } catch (clearError) {
+        console.warn('⚠️ [LISTS] Failed to clear Lists folder before processing:', clearError);
+        // Continue with processing even if clearing fails
+      }
+
       // Save PDF and processing results to Lists folder
       let savedPdfBucketKey = null;
       let savedResultsBucketKey = null;
       try {
-        const listsFolder = `${userId}/Lists/`;
         const cleanFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
         
         // Copy PDF file to Lists folder (if not already there)
@@ -850,9 +1362,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         return res.status(400).json({ error: 'categoryName and resultsBucketKey are required' });
       }
 
-      // Only process Clinical Notes for now
-      if (!categoryName.toLowerCase().includes('clinical notes')) {
-        return res.status(400).json({ error: 'Only Clinical Notes category is supported' });
+      // Support Clinical Notes and Medication Records for now
+      const normalizedCategory = categoryName.toLowerCase();
+      const isClinicalNotes = normalizedCategory.includes('clinical notes');
+      const isMedicationRecords = normalizedCategory.includes('medication');
+      
+      if (!isClinicalNotes && !isMedicationRecords) {
+        return res.status(400).json({ error: 'Only Clinical Notes and Medication Records categories are supported' });
       }
 
       const { client: s3Client, bucketName } = getS3Client();
@@ -926,43 +1442,72 @@ export default function setupFileRoutes(app, cloudant, doClient) {
 
       console.log(`📝 [LISTS] Processing ${categoryName} category on demand`);
       
-      // Delete existing notes for this file before indexing new ones
-      const deleteResult = await notesClient.deleteNotesByFileName(userId, processingResults.fileName);
-      console.log(`🗑️ [CLINICAL-NOTES] Deleted ${deleteResult.deleted} existing notes for file`);
-      
-      // Extract individual notes
-      const individualNotes = extractIndividualClinicalNotes(
-        processingResults.fullMarkdown,
-        processingResults.pages,
-        processingResults.fileName
-      );
-      
+      let individualItems = [];
       let indexedResult = null;
-      if (individualNotes.length > 0) {
-        console.log(`📝 [CLINICAL-NOTES] Found ${individualNotes.length} individual clinical notes to index`);
-        const bulkResult = await notesClient.indexNotesBulk(userId, individualNotes);
+      
+      if (isClinicalNotes) {
+        // Process Clinical Notes
+        const notesClient = getClinicalNotesClient();
+        if (!notesClient) {
+          return res.status(503).json({ 
+            error: 'Clinical Notes indexing not configured',
+            message: 'OPENSEARCH_ENDPOINT environment variable is required'
+          });
+        }
+        
+        // Delete existing notes for this file before indexing new ones
+        const deleteResult = await notesClient.deleteNotesByFileName(userId, processingResults.fileName);
+        console.log(`🗑️ [CLINICAL-NOTES] Deleted ${deleteResult.deleted} existing notes for file`);
+        
+        // Extract individual notes
+        individualItems = extractIndividualClinicalNotes(
+          processingResults.fullMarkdown,
+          processingResults.pages,
+          processingResults.fileName
+        );
+        
+        if (individualItems.length > 0) {
+          console.log(`📝 [CLINICAL-NOTES] Found ${individualItems.length} individual clinical notes to index`);
+          const bulkResult = await notesClient.indexNotesBulk(userId, individualItems);
+          indexedResult = {
+            total: individualItems.length,
+            indexed: bulkResult.indexed,
+            errors: bulkResult.errors || [],
+            deleted: deleteResult.deleted
+          };
+          console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} individual clinical notes`);
+        } else {
+          console.log('⚠️ [CLINICAL-NOTES] No individual notes extracted from Clinical Notes section');
+          indexedResult = {
+            total: 0,
+            indexed: 0,
+            errors: ['No individual notes could be extracted from Clinical Notes section'],
+            deleted: deleteResult.deleted
+          };
+        }
+      } else if (isMedicationRecords) {
+        // Process Medication Records
+        console.log(`💊 [MEDICATIONS] Extracting medication records`);
+        individualItems = extractMedicationRecords(
+          processingResults.fullMarkdown,
+          processingResults.pages,
+          processingResults.fileName
+        );
+        
         indexedResult = {
-          total: individualNotes.length,
-          indexed: bulkResult.indexed,
-          errors: bulkResult.errors || [],
-          deleted: deleteResult.deleted
+          total: individualItems.length,
+          indexed: individualItems.length, // Medications are just extracted, not indexed to OpenSearch
+          errors: [],
+          deleted: 0
         };
-        console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} individual clinical notes`);
-      } else {
-        console.log('⚠️ [CLINICAL-NOTES] No individual notes extracted from Clinical Notes section');
-        indexedResult = {
-          total: 0,
-          indexed: 0,
-          errors: ['No individual notes could be extracted from Clinical Notes section'],
-          deleted: deleteResult.deleted
-        };
+        console.log(`✅ [MEDICATIONS] Extracted ${individualItems.length} medication records`);
       }
 
       // Save the processed list to file
       const listData = {
         categoryName,
         fileName: processingResults.fileName,
-        list: individualNotes,
+        list: individualItems,
         indexed: indexedResult,
         processedAt: new Date().toISOString(),
         pdfProcessedAt: processingResults.pdfProcessedAt
@@ -985,7 +1530,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       res.json({
         success: true,
         categoryName,
-        list: individualNotes,
+        list: individualItems,
         indexed: indexedResult,
         processedAt: listData.processedAt,
         fromCache: false
@@ -993,6 +1538,59 @@ export default function setupFileRoutes(app, cloudant, doClient) {
     } catch (error) {
       console.error('❌ Error processing category:', error);
       res.status(500).json({ error: `Failed to process category: ${error.message}` });
+    }
+  });
+
+  /**
+   * Clear all files in Lists folder when PDF is re-processed
+   * POST /api/files/lists/clear-cache
+   */
+  app.post('/api/files/lists/clear-cache', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const listsFolder = `${userId}/Lists/`;
+
+      // List all files in Lists folder
+      const listCommand = new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: listsFolder
+      });
+
+      const listResult = await s3Client.send(listCommand);
+      
+      // Delete ALL files in Lists folder (PDF, results, and cached lists)
+      const allFiles = (listResult.Contents || [])
+        .filter(obj => obj.Key && !obj.Key.endsWith('.keep'));
+
+      const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+      let deletedCount = 0;
+      
+      for (const file of allFiles) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: bucketName,
+            Key: file.Key
+          }));
+          deletedCount++;
+          console.log(`🗑️ [LISTS] Deleted file: ${file.Key}`);
+        } catch (err) {
+          console.error(`❌ [LISTS] Failed to delete file ${file.Key}:`, err);
+        }
+      }
+
+      res.json({
+        success: true,
+        deletedCount
+      });
+    } catch (error) {
+      console.error('❌ Error clearing Lists folder:', error);
+      res.status(500).json({ error: `Failed to clear Lists folder: ${error.message}` });
     }
   });
 
