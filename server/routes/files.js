@@ -22,8 +22,6 @@ import { ClinicalNotesClient } from '../../lib/opensearch/clinical-notes.js';
 function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
   const medications = [];
   
-  console.log(`💊 [MEDICATIONS] Starting medication extraction for file: ${fileName}`);
-  
   // Find ALL "Medication" or "Medication Records" sections
   // Look for headings like "### Medication Records", "## Medications", etc.
   const medicationPattern = /(?:^|\n)(?:#{1,3})\s*Medication\s+Records?\s*(?:\n|$)/gi;
@@ -54,19 +52,14 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
   }
   
   if (allMatches.length === 0) {
-    console.log('💊 [MEDICATIONS] ⚠️ No "Medication Records" or "Medications" section found in markdown');
     return medications;
   }
-  
-  console.log(`💊 [MEDICATIONS] 📝 Found ${allMatches.length} Medication section(s) in markdown`);
   
   // Process each Medication section
   for (let sectionIdx = 0; sectionIdx < allMatches.length; sectionIdx++) {
     const medicationsBeforeThisSection = medications.length;
     const sectionMatch = allMatches[sectionIdx];
     const sectionStart = sectionMatch.start;
-    
-    console.log(`💊 [MEDICATIONS] Processing section ${sectionIdx + 1}/${allMatches.length}, starting at position ${sectionStart}`);
     
     // Find the end of this section (next major heading or next Medication section or end of document)
     let sectionEnd = fullMarkdown.length;
@@ -82,8 +75,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         sectionEnd = sectionStart + nextMajorSectionMatch.index;
       }
     }
-    
-    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} spans from position ${sectionStart} to ${sectionEnd} (${sectionEnd - sectionStart} characters)`);
     
     // Extract this Medications section
     let medicationsSection = fullMarkdown.substring(sectionStart, sectionEnd);
@@ -133,8 +124,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
     medicationsSection = filteredLines.join('\n');
     const processedLines = medicationsSection.split('\n');
     
-    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} has ${processedLines.length} lines after filtering`);
-    
     // Date patterns (same as Clinical Notes)
     const datePatterns = [
       /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}/i,
@@ -163,13 +152,11 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         // Save previous medication if exists
         if (currentMedication && currentMedication.name) {
           medications.push(currentMedication);
-          console.log(`💊 [MEDICATIONS] Added medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
         }
         
         currentDate = line;
         currentMedication = null; // Reset for new medication
         linesSinceDate = 0; // Reset counter
-        console.log(`💊 [MEDICATIONS] Found date: ${currentDate} at line ${i}`);
         continue;
       }
       
@@ -180,7 +167,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         // If we've gone more than 5 lines without finding a valid medication, reset
         // This prevents us from treating headers/footers as medications
         if (linesSinceDate > 5 && !currentMedication) {
-          console.log(`💊 [MEDICATIONS] No medication found after ${linesSinceDate} lines, resetting date`);
           currentDate = '';
           currentMedication = null;
           linesSinceDate = 0;
@@ -189,14 +175,12 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         // Skip location lines (common location patterns)
         const isLocation = /mass general|brigham|hospital|medical center|clinic|health center/i.test(line);
         if (isLocation) {
-          console.log(`💊 [MEDICATIONS] Skipping location line: ${line.substring(0, 50)}`);
           continue;
         }
         
         // Skip page markers and continuation markers
         const isPageMarker = /(?:^|\s)(?:##\s*)?Page\s+\d+|Continued\s+(?:on|from)\s+Page\s+\d+|Page\s+\d+\s+of/i.test(line);
         if (isPageMarker) {
-          console.log(`💊 [MEDICATIONS] Skipping page marker: ${line.substring(0, 50)}`);
           // Reset current date if we hit a page marker - it's not a medication entry
           currentDate = '';
           currentMedication = null;
@@ -206,7 +190,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         // Skip header/footer patterns
         const isHeaderFooter = /Health\s+Page|Date\s+of\s+Birth|Patient\s+Name|Medical\s+Record|Chart\s+Number|MRN|Account\s+Number/i.test(line);
         if (isHeaderFooter) {
-          console.log(`💊 [MEDICATIONS] Skipping header/footer: ${line.substring(0, 50)}`);
           // Reset current date if we hit header/footer - it's not a medication entry
           currentDate = '';
           currentMedication = null;
@@ -215,14 +198,12 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         
         // Skip lines that are too short (likely not medications) or too long (likely paragraphs)
         if (line.length < 3 || line.length > 200) {
-          console.log(`💊 [MEDICATIONS] Skipping line (too short/long): ${line.substring(0, 50)}`);
           continue;
         }
         
         // Skip lines that look like dates only (no medication info)
         const isDateOnly = datePatterns.some(pattern => pattern.test(line) && line.length < 30);
         if (isDateOnly) {
-          console.log(`💊 [MEDICATIONS] Skipping date-only line: ${line.substring(0, 50)}`);
           continue;
         }
         
@@ -243,7 +224,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
         ];
         const isNonMedication = nonMedicationPatterns.some(pattern => pattern.test(line));
         if (isNonMedication) {
-          console.log(`💊 [MEDICATIONS] Skipping non-medication pattern: ${line.substring(0, 50)}`);
           // Reset current date - this is not a medication entry
           currentDate = '';
           currentMedication = null;
@@ -278,20 +258,17 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
           
           const isInvalid = invalidMedicationPatterns.some(pattern => pattern.test(medName));
           if (isInvalid) {
-            console.log(`💊 [MEDICATIONS] Skipping invalid medication name: ${medName}`);
             continue;
           }
           
           // Medication names should be at least 2 characters and not just numbers
           if (medName.length < 2 || /^\d+$/.test(medName)) {
-            console.log(`💊 [MEDICATIONS] Skipping invalid medication name (too short or just numbers): ${medName}`);
             continue;
           }
           
           // Save previous medication if exists
           if (currentMedication && currentMedication.name) {
             medications.push(currentMedication);
-            console.log(`💊 [MEDICATIONS] Added medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
           }
           
           currentMedication = {
@@ -307,7 +284,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
           };
           
           linesSinceDate = 0; // Reset counter since we found a valid medication
-          console.log(`💊 [MEDICATIONS] Found medication with dose: ${medName} - ${dose} on ${currentDate}`);
         } else if (medicationNameOnlyMatch && !currentMedication) {
           // Found medication name without dose (dose might be on next line)
           const medName = medicationNameOnlyMatch[1].trim();
@@ -326,7 +302,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
           
           const isInvalid = invalidMedicationPatterns.some(pattern => pattern.test(medName));
           if (isInvalid || medName.length < 2 || /^\d+$/.test(medName)) {
-            console.log(`💊 [MEDICATIONS] Skipping invalid medication name: ${medName}`);
             continue;
           }
           
@@ -343,7 +318,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
           };
           
           linesSinceDate = 0; // Reset counter since we found a valid medication
-          console.log(`💊 [MEDICATIONS] Found medication name: ${medName} on ${currentDate}, looking for dose`);
         } else if (currentMedication && !currentMedication.dosage) {
           // We have a medication but no dose yet - check if this line has a dose
           // Updated to support decimal doses: \d+\.?\d* matches integers and decimals like 12, 12.5, 0.5
@@ -352,7 +326,6 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
             currentMedication.dosage = doseMatch[1].trim();
             currentMedication.content += '\n' + line;
             currentMedication.markdown += '\n' + line;
-            console.log(`💊 [MEDICATIONS] Found dose for ${currentMedication.name}: ${currentMedication.dosage}`);
           } else {
             // Not a dose line, might be continuation - append to content
             currentMedication.content += '\n' + line;
@@ -369,14 +342,10 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
     // Add last medication if exists
     if (currentMedication && currentMedication.name) {
       medications.push(currentMedication);
-      console.log(`💊 [MEDICATIONS] Added final medication ${medicationIndex}: ${currentMedication.name} (${currentMedication.dosage || 'no dose'}) on ${currentMedication.date || 'no date'}`);
     }
-    
-    console.log(`💊 [MEDICATIONS] Section ${sectionIdx + 1} extracted ${medications.length - medicationsBeforeThisSection} medications`);
   }
   
   // Determine page numbers for medications (similar to Clinical Notes)
-  console.log(`💊 [MEDICATIONS] Determining page numbers for ${medications.length} medications`);
   for (let medIdx = 0; medIdx < medications.length; medIdx++) {
     const med = medications[medIdx];
     
@@ -418,12 +387,7 @@ function extractMedicationRecords(fullMarkdown, pages, fileName = '') {
     }
     
     med.page = medPage;
-    if (medIdx < 5 || medIdx % 10 === 0) {
-      console.log(`💊 [MEDICATIONS] Medication ${medIdx + 1}: ${med.name} assigned to page ${medPage}`);
-    }
   }
-  
-  console.log(`💊 [MEDICATIONS] ✅ Extracted ${medications.length} total medication records from ${allMatches.length} section(s)`);
   
   return medications;
 }
@@ -1457,7 +1421,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         
         // Delete existing notes for this file before indexing new ones
         const deleteResult = await notesClient.deleteNotesByFileName(userId, processingResults.fileName);
-        console.log(`🗑️ [CLINICAL-NOTES] Deleted ${deleteResult.deleted} existing notes for file`);
         
         // Extract individual notes
         individualItems = extractIndividualClinicalNotes(
@@ -1467,7 +1430,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         );
         
         if (individualItems.length > 0) {
-          console.log(`📝 [CLINICAL-NOTES] Found ${individualItems.length} individual clinical notes to index`);
           const bulkResult = await notesClient.indexNotesBulk(userId, individualItems);
           indexedResult = {
             total: individualItems.length,
@@ -1475,9 +1437,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             errors: bulkResult.errors || [],
             deleted: deleteResult.deleted
           };
-          console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} individual clinical notes`);
         } else {
-          console.log('⚠️ [CLINICAL-NOTES] No individual notes extracted from Clinical Notes section');
           indexedResult = {
             total: 0,
             indexed: 0,
@@ -1487,7 +1447,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         }
       } else if (isMedicationRecords) {
         // Process Medication Records
-        console.log(`💊 [MEDICATIONS] Extracting medication records`);
         individualItems = extractMedicationRecords(
           processingResults.fullMarkdown,
           processingResults.pages,
@@ -1500,7 +1459,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           errors: [],
           deleted: 0
         };
-        console.log(`✅ [MEDICATIONS] Extracted ${individualItems.length} medication records`);
       }
 
       // Save the processed list to file
@@ -1694,8 +1652,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         return res.status(400).json({ error: 'File too large (max 50MB)' });
       }
 
-      console.log(`📝 [CLINICAL-NOTES] Indexing clinical notes from PDF for user ${userId}`);
-
       // Extract PDF with page boundaries
       const result = await extractPdfWithPages(req.file.buffer);
       const fileName = req.file.originalname;
@@ -1707,9 +1663,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       if (cloudant && doClient) {
         try {
           categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
-          console.log(`📋 [CLINICAL-NOTES] Extracted ${categories.length} categories`);
         } catch (error) {
-          console.warn('⚠️ [CLINICAL-NOTES] Failed to extract categories, continuing without them:', error.message);
+          // Failed to extract categories, continuing without them
         }
       }
 
@@ -1736,8 +1691,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Bulk index all notes
       const bulkResult = await notesClient.indexNotesBulk(userId, notesToIndex);
 
-      console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} notes for user ${userId}`);
-
       res.json({
         success: true,
         indexed: bulkResult.indexed,
@@ -1747,7 +1700,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         categories: categories
       });
     } catch (error) {
-      console.error('❌ [CLINICAL-NOTES] Error indexing clinical notes:', error);
+      console.error('Error indexing clinical notes:', error);
       res.status(500).json({ error: `Failed to index clinical notes: ${error.message}` });
     }
   });
@@ -1802,8 +1755,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const pdfBuffer = Buffer.concat(chunks);
       const fileName = bucketKey.split('/').pop() || 'unknown.pdf';
 
-      console.log(`📝 [CLINICAL-NOTES] Indexing clinical notes from bucket file ${bucketKey} for user ${userId}`);
-
       // Extract PDF with page boundaries
       const result = await extractPdfWithPages(pdfBuffer);
       const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
@@ -1813,9 +1764,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       if (cloudant && doClient) {
         try {
           categories = await extractMarkdownCategories(fullMarkdown, userId, cloudant, doClient);
-          console.log(`📋 [CLINICAL-NOTES] Extracted ${categories.length} categories`);
         } catch (error) {
-          console.warn('⚠️ [CLINICAL-NOTES] Failed to extract categories, continuing without them:', error.message);
+          // Failed to extract categories, continuing without them
         }
       }
 
@@ -1840,8 +1790,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Bulk index all notes
       const bulkResult = await notesClient.indexNotesBulk(userId, notesToIndex);
 
-      console.log(`✅ [CLINICAL-NOTES] Indexed ${bulkResult.indexed} notes for user ${userId}`);
-
       res.json({
         success: true,
         indexed: bulkResult.indexed,
@@ -1851,7 +1799,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         categories: categories
       });
     } catch (error) {
-      console.error('❌ [CLINICAL-NOTES] Error indexing clinical notes:', error);
+      console.error('Error indexing clinical notes:', error);
       res.status(500).json({ error: `Failed to index clinical notes: ${error.message}` });
     }
   });
@@ -1894,7 +1842,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         hits: searchResult.hits
       });
     } catch (error) {
-      console.error('❌ [CLINICAL-NOTES] Error searching clinical notes:', error);
+      console.error('Error searching clinical notes:', error);
       res.status(500).json({ error: `Failed to search clinical notes: ${error.message}` });
     }
   });
@@ -1978,7 +1926,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         notes: notes
       });
     } catch (error) {
-      console.error('❌ [CLINICAL-NOTES] Error fetching clinical notes:', error);
+      console.error('Error fetching clinical notes:', error);
       res.status(500).json({ error: `Failed to fetch clinical notes: ${error.message}` });
     }
   });
@@ -2010,7 +1958,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         categories: categories
       });
     } catch (error) {
-      console.error('❌ [CLINICAL-NOTES] Error getting categories:', error);
+      console.error('Error getting categories:', error);
       res.status(500).json({ error: `Failed to get categories: ${error.message}` });
     }
   });

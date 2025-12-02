@@ -605,13 +605,7 @@ export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '
     // 2. Effective content length is less than 30 characters
     // Notes with Created: fields are always valid (they're real clinical notes)
     if (!hasCreatedField && effectiveLength < 30) {
-      console.log(`⚠️ [CLINICAL-NOTES] Skipping short note (${noteText.length} chars, ${effectiveLength} effective): Type=${noteType}, Author=${noteAuthor}, Category=${noteCategory}, Created=${noteCreated}`);
       continue;
-    }
-    
-    // If we have a Created: field but content is very short, log it for debugging
-    if (hasCreatedField && noteText.length < 30) {
-      console.log(`ℹ️ [CLINICAL-NOTES] Including note with Created: field despite short content (${noteText.length} chars): Created=${noteCreated}, Author=${noteAuthor}, Category=${noteCategory}`);
     }
     
     // Find which page this note belongs to

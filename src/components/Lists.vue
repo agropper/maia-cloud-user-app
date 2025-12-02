@@ -426,7 +426,24 @@ const hasCategoryBeenProcessed = (categoryName: string): boolean => {
 
 const formatItemDescription = (item: any, categoryName: string): string => {
   if (categoryName.toLowerCase().includes('clinical notes')) {
-    return formatNoteDescription(item);
+    const parts: string[] = [];
+    
+    // Date first (from created field)
+    if (item.created) {
+      parts.push(item.created);
+    }
+    
+    // Then Author
+    if (item.author) {
+      parts.push(item.author);
+    }
+    
+    // Then Category (only if it's not "Clinical Note")
+    if (item.category && item.category !== 'Clinical Note') {
+      parts.push(item.category);
+    }
+    
+    return parts.join(' ') || 'No details available';
   } else if (categoryName.toLowerCase().includes('medication')) {
     const parts: string[] = [];
     
