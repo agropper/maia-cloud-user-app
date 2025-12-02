@@ -551,7 +551,7 @@ export function extractIndividualClinicalNotes(fullMarkdown, pages, fileName = '
         if (createdMatch) {
           noteCreated = createdMatch[1].trim();
           // Extract date from Created field (e.g., "Aug 16, 2022 at 5:00 PM" -> "Aug 16, 2022")
-          const createdDateMatch = noteCreated.match(/^([^a]+?)(?:\s+at\s+|$)/i);
+          const createdDateMatch = noteCreated.match(/^(.+?)(?:\s+at\s+|$)/i);
           if (createdDateMatch) {
             lastDate = createdDateMatch[1].trim();
           } else {

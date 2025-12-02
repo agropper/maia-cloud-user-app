@@ -1334,7 +1334,7 @@ const processPageReferences = (content: string): string => {
   // Do NOT match "page" followed by other words and then a number later
   // The pattern allows: whitespace (\s), colons (:), asterisks (* for markdown), dashes (-), but NOT other letters/words
   // Note: - is at the end of character class to avoid being interpreted as a range
-  const pageReferencePattern = /(Page|page)[\s:*:-]*(\d+)/gi;
+  const pageReferencePattern = /(Page|page)[\s:*-]*(\d+)/gi;
   const pageReferences: Array<{ fullMatch: string; pageWord: string; pageNum: number; index: number }> = [];
   
   let match;
@@ -1364,12 +1364,12 @@ const processPageReferences = (content: string): string => {
   
   // First, find filenames with labels (including markdown)
   for (const pattern of pdfFilenamePatterns) {
-    let filenameMatch;
     pattern.lastIndex = 0;
+    let filenameMatch: RegExpExecArray | null;
     while ((filenameMatch = pattern.exec(content)) !== null) {
       const filename = filenameMatch[1] || filenameMatch[0];
       // Avoid duplicates
-      if (!pdfFilenames.some(f => f.filename === filename && f.index === filenameMatch.index)) {
+      if (!pdfFilenames.some(f => f.filename === filename && f.index === filenameMatch!.index)) {
         pdfFilenames.push({ 
           filename: filename, 
           index: filenameMatch.index,
@@ -1401,7 +1401,6 @@ const processPageReferences = (content: string): string => {
     
     const contextStart = Math.max(0, index - 200);
     const contextEnd = Math.min(content.length, index + fullMatch.length + 200);
-    const contextText = content.substring(contextStart, contextEnd);
     
     // Find all filenames in the context
     const filenamesInContext = pdfFilenames.filter(f => 
@@ -1423,7 +1422,7 @@ const processPageReferences = (content: string): string => {
       if (!matchedFile && matchedFilename && availableUserFiles.value.length > 0) {
         const matchedUserFile = availableUserFiles.value.find(f => {
           const fileUpper = f.fileName?.toUpperCase();
-          const filenameUpper = matchedFilename.toUpperCase();
+          const filenameUpper = matchedFilename!.toUpperCase();
           return fileUpper === filenameUpper || 
                  fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
                  filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');

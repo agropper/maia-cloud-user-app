@@ -1103,7 +1103,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         pages: result.pages,
         categories: categories,
         fullMarkdown: fullMarkdown,
-        clinicalNotesIndexed,
         categoryError: categoryError || undefined,
         savedPdfBucketKey,
         savedResultsBucketKey

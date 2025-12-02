@@ -127,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import PasskeyAuth from './components/PasskeyAuth.vue';
 import ChatInterface from './components/ChatInterface.vue';
 import DeepLinkAccess from './components/DeepLinkAccess.vue';
@@ -404,7 +404,13 @@ onMounted(async () => {
   window.addEventListener('popstate', checkRoute);
   
   // Also check periodically in case of programmatic navigation
-  setInterval(checkRoute, 100);
+  const routeCheckInterval = setInterval(checkRoute, 100);
+  
+  // Clean up interval on unmount
+  onUnmounted(() => {
+    clearInterval(routeCheckInterval);
+    window.removeEventListener('popstate', checkRoute);
+  });
 });
 </script>
 
