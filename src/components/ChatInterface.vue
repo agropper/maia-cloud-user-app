@@ -299,9 +299,7 @@
         fileUrl: viewingFile.fileUrl,
         bucketKey: viewingFile.bucketKey,
         originalFile: viewingFile.originalFile ?? undefined,
-        name: viewingFile.name,
-        content: viewingFile.content,
-        type: viewingFile.type
+        name: viewingFile.name
       } : undefined"
       :initial-page="pdfInitialPage"
     />
