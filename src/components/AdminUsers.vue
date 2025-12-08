@@ -2,8 +2,11 @@
   <q-page class="q-pa-md">
     <div class="q-mb-lg">
       <div class="text-h4 q-mb-sm">User Administration</div>
-      <div class="text-body2 text-grey-7">
+      <div class="text-body2 text-grey-7 q-mb-xs">
         Total Users: {{ totalUsers }} | Deep Link Users: {{ totalDeepLinkUsers }}
+      </div>
+      <div class="text-body2 text-grey-7" v-if="passkeyConfig">
+        Passkey rpID: {{ passkeyConfig.rpID }} | Passkey Origin: {{ passkeyConfig.origin }}
       </div>
     </div>
 
@@ -15,6 +18,13 @@
       :pagination="{ rowsPerPage: 50 }"
       class="admin-users-table"
     >
+      <template v-slot:body-cell-userId="props">
+        <q-td :props="props">
+          <span class="text-weight-bold">{{ props.value }}</span>
+          <span v-if="props.row.domain" class="text-grey-7"> ({{ props.row.domain }})</span>
+        </q-td>
+      </template>
+
       <template v-slot:body-cell-workflowStage="props">
         <q-td :props="props">
           <q-badge :color="getWorkflowStageColor(props.value)" :label="props.value" />
@@ -72,6 +82,7 @@ const $q = useQuasar();
 
 interface User {
   userId: string;
+  domain: string | null;
   workflowStage: string;
   lastActivity: string;
   provisionedDate: string | null;
@@ -81,10 +92,16 @@ interface User {
   deepLinkUsersCount: number;
 }
 
+interface PasskeyConfig {
+  rpID: string;
+  origin: string;
+}
+
 const users = ref<User[]>([]);
 const loading = ref(false);
 const totalUsers = ref(0);
 const totalDeepLinkUsers = ref(0);
+const passkeyConfig = ref<PasskeyConfig | null>(null);
 const deletingUsers = ref(new Set<string>());
 
 const columns = [
@@ -188,6 +205,7 @@ async function loadUsers() {
       users.value = data.users;
       totalUsers.value = data.totalUsers;
       totalDeepLinkUsers.value = data.totalDeepLinkUsers;
+      passkeyConfig.value = data.passkeyConfig || null;
     } else {
       if ($q && typeof $q.notify === 'function') {
         $q.notify({
