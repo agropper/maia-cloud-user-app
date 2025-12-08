@@ -18,6 +18,13 @@
       :pagination="{ rowsPerPage: 50 }"
       class="admin-users-table"
     >
+      <template v-slot:body-cell-userId="props">
+        <q-td :props="props">
+          <span class="text-weight-bold">{{ props.value }}</span>
+          <span v-if="props.row.domain" class="text-grey-7"> ({{ props.row.domain }})</span>
+        </q-td>
+      </template>
+
       <template v-slot:body-cell-workflowStage="props">
         <q-td :props="props">
           <q-badge :color="getWorkflowStageColor(props.value)" :label="props.value" />
@@ -75,6 +82,7 @@ const $q = useQuasar();
 
 interface User {
   userId: string;
+  domain: string | null;
   workflowStage: string;
   lastActivity: string;
   provisionedDate: string | null;

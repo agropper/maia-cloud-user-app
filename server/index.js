@@ -7071,6 +7071,7 @@ app.get('/api/admin/users', async (req, res) => {
       
       return {
         userId: userId,
+        domain: userDoc.domain || null,
         workflowStage: userDoc.workflowStage || 'unknown',
         lastActivity: lastActivity || 'Never',
         provisionedDate: provisionedDate,
