@@ -295,14 +295,28 @@
     <!-- PDF Viewer Modal -->
     <PdfViewerModal
       v-model="showPdfViewer"
-      :file="viewingFile || undefined"
+      :file="viewingFile ? {
+        fileUrl: viewingFile.fileUrl,
+        bucketKey: viewingFile.bucketKey,
+        originalFile: viewingFile.originalFile ?? undefined,
+        name: viewingFile.name,
+        content: viewingFile.content,
+        type: viewingFile.type
+      } : undefined"
       :initial-page="pdfInitialPage"
     />
 
     <!-- Text/Markdown Viewer Modal -->
     <TextViewerModal
       v-model="showTextViewer"
-      :file="viewingFile || undefined"
+      :file="viewingFile ? {
+        fileUrl: viewingFile.fileUrl,
+        bucketKey: viewingFile.bucketKey,
+        originalFile: viewingFile.originalFile ?? undefined,
+        name: viewingFile.name,
+        content: viewingFile.content,
+        type: viewingFile.type
+      } : undefined"
     />
 
     <!-- Saved Chats Modal -->

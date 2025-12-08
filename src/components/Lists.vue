@@ -289,12 +289,6 @@ interface MarkdownCategory {
   count: number;
 }
 
-interface ClinicalNotesIndexed {
-  total: number;
-  indexed: number;
-  errors: string[];
-}
-
 interface ClinicalNote {
   id: string;
   type: string;
@@ -414,14 +408,6 @@ const reprocessPdf = async () => {
   await clearCachedLists();
   
   // File selection dialog will now be visible again
-};
-
-// Helper function to check if a category has been processed (case-insensitive)
-const hasCategoryBeenProcessed = (categoryName: string): boolean => {
-  const normalized = categoryName.toLowerCase();
-  return Object.keys(categoryProcessingStatus.value).some(
-    key => key.toLowerCase() === normalized && categoryProcessingStatus.value[key]?.indexed > 0
-  );
 };
 
 const formatItemDescription = (item: any, categoryName: string): string => {
