@@ -647,13 +647,18 @@ app.use(cors({
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      // In production, be more strict
-      if (isProductionForCors) {
-        console.warn(`⚠️ [CORS] Blocked origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
-      } else {
-        // In development, allow all origins
+      // Allow DigitalOcean App Platform URLs (ending with .ondigitalocean.app)
+      if (origin.endsWith('.ondigitalocean.app')) {
         callback(null, true);
+      } else {
+        // In production, be more strict
+        if (isProductionForCors) {
+          console.warn(`⚠️ [CORS] Blocked origin: ${origin}`);
+          callback(new Error('Not allowed by CORS'));
+        } else {
+          // In development, allow all origins
+          callback(null, true);
+        }
       }
     }
   },
@@ -693,7 +698,7 @@ setupAuthRoutes(app, passkeyService, cloudant, doClient, auditLog, emailService)
 setupChatRoutes(app, chatClient, cloudant, doClient);
 
 // File routes
-setupFileRoutes(app);
+setupFileRoutes(app, cloudant, doClient);
 
 const DEEP_LINK_COOKIE = 'maia_deep_link_user';
 const DEEP_LINK_COOKIE_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
@@ -4359,7 +4364,7 @@ const verificationCache = new Map(); // userId -> { timestamp, indexedFiles }
 // Get user files
 app.get('/api/user-files', async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId, subfolder } = req.query;
     
     if (!userId) {
       return res.status(400).json({ 
@@ -4380,7 +4385,32 @@ app.get('/api/user-files', async (req, res) => {
       });
     }
 
-    const files = userDoc.files || [];
+    let files = userDoc.files || [];
+    
+    // Filter by subfolder if specified
+    if (subfolder) {
+      const subfolderPath = `${userId}/${subfolder}/`;
+      files = files.filter((file) => {
+        const bucketKey = file.bucketKey || '';
+        return bucketKey.startsWith(subfolderPath);
+      });
+    } else {
+      // When NO subfolder is specified (e.g., SAVED FILES tab), exclude References folder files
+      // References files should never appear in SAVED FILES because they're not for KB indexing
+      const referencesPath = `${userId}/References/`;
+      files = files.filter((file) => {
+        const bucketKey = file.bucketKey || '';
+        // Exclude files in References subfolder
+        if (bucketKey.startsWith(referencesPath)) {
+          return false;
+        }
+        // Also exclude files explicitly marked as references
+        if (file.isReference === true) {
+          return false;
+        }
+        return true;
+      });
+    }
     
     // Sync indexed files with DO API state (source of truth)
     let indexedFiles = userDoc.kbIndexedFiles || [];
@@ -8082,6 +8112,360 @@ if (isProduction) {
     } else {
       console.log(`⚠️ [PRIVACY] Privacy.md not found at ${privacyPath}`);
       res.status(404).json({ error: 'Privacy policy not found' });
+    }
+  });
+
+  // Get patient diary entries
+  app.get('/api/patient-diary', async (req, res) => {
+    try {
+      // Security: Only use userId from authenticated session, never from query parameters
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Return diary entries if they exist
+      const entries = userDoc.patientDiary?.entries || [];
+      
+      // Sort by dateTime (oldest first, like a chat)
+      const sortedEntries = [...entries].sort((a, b) => {
+        const dateA = new Date(a.dateTime);
+        const dateB = new Date(b.dateTime);
+        return dateA.getTime() - dateB.getTime();
+      });
+      
+      // Ensure all entries have a posted flag (for backward compatibility)
+      sortedEntries.forEach(entry => {
+        if (entry.posted === undefined) {
+          entry.posted = false;
+        }
+      });
+
+      res.json({
+        success: true,
+        entries: sortedEntries,
+        entryCount: sortedEntries.length
+      });
+    } catch (error) {
+      console.error('Error loading patient diary:', error);
+      res.status(500).json({ error: `Failed to load diary: ${error.message}` });
+    }
+  });
+
+  // Add patient diary entry
+  app.post('/api/patient-diary', async (req, res) => {
+    try {
+      // Security: Only use userId from authenticated session, never from request body
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { entry } = req.body;
+      if (!entry || !entry.message || !entry.dateTime) {
+        return res.status(400).json({ error: 'Entry with message and dateTime is required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Initialize patientDiary object if it doesn't exist
+      if (!userDoc.patientDiary) {
+        userDoc.patientDiary = {
+          entries: []
+        };
+      }
+
+      // Generate entry ID
+      const entryId = `diary-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Add the new entry
+      const newEntry = {
+        id: entryId,
+        message: entry.message.trim(),
+        dateTime: entry.dateTime,
+        bubbleId: entry.bubbleId || null // Will be set by frontend if not provided
+      };
+
+      userDoc.patientDiary.entries.push(newEntry);
+      userDoc.patientDiary.lastUpdated = new Date().toISOString();
+      userDoc.updatedAt = new Date().toISOString();
+
+      await cloudant.saveDocument('maia_users', userDoc);
+
+      res.json({
+        success: true,
+        message: 'Diary entry saved successfully',
+        entryId: entryId,
+        entry: newEntry
+      });
+    } catch (error) {
+      console.error('Error saving patient diary entry:', error);
+      res.status(500).json({ error: `Failed to save diary entry: ${error.message}` });
+    }
+  });
+
+  // Mark diary entries as posted
+  app.post('/api/patient-diary/mark-posted', async (req, res) => {
+    try {
+      // Security: Only use userId from authenticated session, never from request body
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { entryIds } = req.body;
+      if (!entryIds || !Array.isArray(entryIds)) {
+        return res.status(400).json({ error: 'Entry IDs array is required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Initialize patientDiary if it doesn't exist
+      if (!userDoc.patientDiary) {
+        userDoc.patientDiary = { entries: [] };
+      }
+
+      // Mark entries as posted
+      let updated = false;
+      userDoc.patientDiary.entries.forEach(entry => {
+        if (entryIds.includes(entry.id)) {
+          entry.posted = true;
+          updated = true;
+        }
+      });
+
+      if (updated) {
+        userDoc.patientDiary.lastUpdated = new Date().toISOString();
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', userDoc);
+      }
+
+      res.json({
+        success: true,
+        message: 'Entries marked as posted',
+        markedCount: entryIds.length
+      });
+    } catch (error) {
+      console.error('Error marking diary entries as posted:', error);
+      res.status(500).json({ error: `Failed to mark entries as posted: ${error.message}` });
+    }
+  });
+
+  // Update entry bubbleId
+  app.post('/api/patient-diary/update-bubble-id', async (req, res) => {
+    try {
+      // Security: Only use userId from authenticated session, never from request body
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { entryId, bubbleId } = req.body;
+      if (!entryId || !bubbleId) {
+        return res.status(400).json({ error: 'Entry ID and bubble ID are required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Initialize patientDiary if it doesn't exist
+      if (!userDoc.patientDiary) {
+        userDoc.patientDiary = { entries: [] };
+      }
+
+      // Find and update the entry
+      const entry = userDoc.patientDiary.entries.find(e => e.id === entryId);
+      if (!entry) {
+        return res.status(404).json({ error: 'Entry not found' });
+      }
+
+      entry.bubbleId = bubbleId;
+      userDoc.patientDiary.lastUpdated = new Date().toISOString();
+      userDoc.updatedAt = new Date().toISOString();
+      await cloudant.saveDocument('maia_users', userDoc);
+
+      res.json({
+        success: true,
+        message: 'Entry bubbleId updated successfully'
+      });
+    } catch (error) {
+      console.error('Error updating entry bubbleId:', error);
+      res.status(500).json({ error: `Failed to update bubbleId: ${error.message}` });
+    }
+  });
+
+  // Delete diary entries
+  app.post('/api/patient-diary/delete', async (req, res) => {
+    try {
+      // Security: Only use userId from authenticated session, never from request body
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { entryIds } = req.body;
+      if (!entryIds || !Array.isArray(entryIds)) {
+        return res.status(400).json({ error: 'Entry IDs array is required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Initialize patientDiary if it doesn't exist
+      if (!userDoc.patientDiary) {
+        userDoc.patientDiary = { entries: [] };
+      }
+
+      // Remove entries
+      const initialLength = userDoc.patientDiary.entries.length;
+      userDoc.patientDiary.entries = userDoc.patientDiary.entries.filter(
+        entry => !entryIds.includes(entry.id)
+      );
+
+      const deletedCount = initialLength - userDoc.patientDiary.entries.length;
+
+      if (deletedCount > 0) {
+        userDoc.patientDiary.lastUpdated = new Date().toISOString();
+        userDoc.updatedAt = new Date().toISOString();
+        await cloudant.saveDocument('maia_users', userDoc);
+      }
+
+      res.json({
+        success: true,
+        message: 'Entries deleted successfully',
+        deletedCount
+      });
+    } catch (error) {
+      console.error('Error deleting diary entries:', error);
+      res.status(500).json({ error: `Failed to delete entries: ${error.message}` });
+    }
+  });
+
+  // Save privacy filter pseudonym mapping
+  app.post('/api/privacy-filter-mapping', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { mapping } = req.body;
+      if (!mapping || !Array.isArray(mapping)) {
+        return res.status(400).json({ error: 'Mapping array is required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Initialize privacyFilter object if it doesn't exist
+      if (!userDoc.privacyFilter) {
+        userDoc.privacyFilter = {};
+      }
+
+      // Save the mapping
+      userDoc.privacyFilter.pseudonymMapping = mapping;
+      userDoc.privacyFilter.lastUpdated = new Date().toISOString();
+      userDoc.updatedAt = new Date().toISOString();
+
+      await cloudant.saveDocument('maia_users', userDoc);
+
+      res.json({
+        success: true,
+        message: 'Pseudonym mapping saved successfully',
+        mappingCount: mapping.length
+      });
+    } catch (error) {
+      console.error('Error saving privacy filter mapping:', error);
+      res.status(500).json({ error: `Failed to save mapping: ${error.message}` });
+    }
+  });
+
+  // Load privacy filter pseudonym mapping
+  app.get('/api/privacy-filter-mapping', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      // Get the user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Return the mapping if it exists
+      const mapping = userDoc.privacyFilter?.pseudonymMapping || [];
+      const lastUpdated = userDoc.privacyFilter?.lastUpdated || null;
+
+      res.json({
+        success: true,
+        mapping,
+        lastUpdated,
+        mappingCount: mapping.length
+      });
+    } catch (error) {
+      console.error('Error loading privacy filter mapping:', error);
+      res.status(500).json({ error: `Failed to load mapping: ${error.message}` });
+    }
+  });
+
+  // Serve random names from NEW-AGENT.txt for privacy filtering
+  app.get('/api/random-names', (req, res) => {
+    const newAgentPath = path.join(__dirname, '../NEW-AGENT.txt');
+    
+    if (!existsSync(newAgentPath)) {
+      return res.status(404).json({ error: 'NEW-AGENT.txt not found' });
+    }
+
+    try {
+      const content = readFileSync(newAgentPath, 'utf-8');
+      
+      // Find the "## Random Names" section
+      const randomNamesSection = content.match(/## Random Names\s*\n([\s\S]*?)(?=\n---|\n##|$)/i);
+      if (!randomNamesSection) {
+        return res.status(404).json({ error: 'Random Names section not found' });
+      }
+
+      // Extract names (one per line, filter out empty lines and section headers)
+      const names = randomNamesSection[1]
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#'))
+        .map(line => {
+          // Extract just the name (remove any trailing notes in parentheses)
+          const nameMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+(?:\.[A-Z])?)+)/);
+          return nameMatch ? nameMatch[1] : null;
+        })
+        .filter(name => name !== null);
+
+      res.json({ names });
+    } catch (err) {
+      console.error('Error reading random names:', err);
+      res.status(500).json({ error: 'Error loading random names' });
     }
   });
 

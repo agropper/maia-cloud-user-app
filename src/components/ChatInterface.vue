@@ -295,14 +295,26 @@
     <!-- PDF Viewer Modal -->
     <PdfViewerModal
       v-model="showPdfViewer"
-      :file="viewingFile || undefined"
+      :file="viewingFile ? {
+        fileUrl: viewingFile.fileUrl,
+        bucketKey: viewingFile.bucketKey,
+        originalFile: viewingFile.originalFile ?? undefined,
+        name: viewingFile.name
+      } : undefined"
       :initial-page="pdfInitialPage"
     />
 
     <!-- Text/Markdown Viewer Modal -->
     <TextViewerModal
       v-model="showTextViewer"
-      :file="viewingFile || undefined"
+      :file="viewingFile ? {
+        fileUrl: viewingFile.fileUrl,
+        bucketKey: viewingFile.bucketKey,
+        originalFile: viewingFile.originalFile ?? undefined,
+        name: viewingFile.name,
+        content: viewingFile.content,
+        type: viewingFile.type
+      } : undefined"
     />
 
     <!-- Saved Chats Modal -->
@@ -319,11 +331,16 @@
       v-model="showMyStuffDialog"
       :userId="props.user?.userId || ''"
       :initial-tab="myStuffInitialTab"
+      :messages="messages"
+      :original-messages="originalMessages"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
       @indexing-finished="handleIndexingFinished"
       @files-archived="handleFilesArchived"
+      @messages-filtered="handleMessagesFiltered"
+      @diary-posted="handleDiaryPosted"
+      @reference-file-added="handleReferenceFileAdded"
       v-if="canAccessMyStuff"
     />
 
@@ -451,11 +468,12 @@ interface UploadedFile {
   type: 'text' | 'pdf' | 'markdown';
   content: string;
   transcript?: string;
-  originalFile: File;
+  originalFile: File | null;
   bucketKey?: string;
   bucketPath?: string;
   fileUrl?: string;
   uploadedAt: Date;
+  isReference?: boolean;
 }
 
 interface Props {
@@ -474,6 +492,7 @@ const emit = defineEmits<{
 const providers = ref<string[]>([]);
 const selectedProvider = ref<string>('Private AI');
 const messages = ref<Message[]>([]);
+const originalMessages = ref<Message[]>([]); // Store original unfiltered messages for privacy filtering
 const inputMessage = ref('');
 const isStreaming = ref(false);
 const uploadedFiles = ref<UploadedFile[]>([]);
@@ -808,6 +827,7 @@ const sendMessage = async () => {
   // Check if this is a patient summary request
   const isPatientSummaryRequest = /patient\s+summary/i.test(inputMessage.value);
   messages.value.push(userMessage);
+  originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
   inputMessage.value = '';
   // Defer snapshot updates so save buttons stay enabled until the user chooses how to persist the chat
   
@@ -927,6 +947,7 @@ const sendMessage = async () => {
       name: providerLabel
     };
     messages.value.push(assistantMessage);
+    // DO NOT update originalMessages here - wait until streaming completes
 
     // Read stream
     while (true) {
@@ -951,10 +972,29 @@ const sendMessage = async () => {
               const responseTime = Date.now() - startTime;
               console.log(`[*] AI Response time: ${responseTime}ms`);
               
+              // [RAG] Debug: Log the full response for RAG queries
+              const lastUserMessage = messages.value.filter(m => m.role === 'user').pop()?.content || '';
+              if (lastUserMessage.toLowerCase().includes('find the encounter note') || 
+                  lastUserMessage.toLowerCase().includes('document and page')) {
+                console.log('[RAG] Full AI response:', assistantMessage.content);
+                console.log('[RAG] Original query:', lastUserMessage);
+                
+                // Extract filename and page from response if present
+                const filenameMatch = assistantMessage.content.match(/(?:File|Filename|Document|Source):\s*([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/i);
+                const pageMatch = assistantMessage.content.match(/Page:\s*(\d+)/i);
+                if (filenameMatch || pageMatch) {
+                  console.log('[RAG] Extracted filename:', filenameMatch?.[1] || 'not found');
+                  console.log('[RAG] Extracted page:', pageMatch?.[1] || 'not found');
+                }
+              }
+              
               // Save patient summary if this was a summary request
               if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
                 savePatientSummary(assistantMessage.content);
               }
+              
+              // Update originalMessages AFTER streaming completes with full content
+              originalMessages.value = JSON.parse(JSON.stringify(messages.value));
               
               return;
             }
@@ -973,6 +1013,9 @@ const sendMessage = async () => {
     if (isPatientSummaryRequest && props.user?.userId && assistantMessage.content) {
       savePatientSummary(assistantMessage.content);
     }
+    
+    // Update originalMessages AFTER streaming completes with full content
+    originalMessages.value = JSON.parse(JSON.stringify(messages.value));
   } catch (error) {
     const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
@@ -1005,6 +1048,7 @@ const sendMessage = async () => {
       authorLabel: errorProviderLabel,
       name: errorProviderLabel
     });
+    originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
     isStreaming.value = false;
   }
 };
@@ -1312,9 +1356,12 @@ const processPageReferences = (content: string): string => {
   const pdfFiles = uploadedFiles.value.filter(f => f.type === 'pdf');
   
   // Find all occurrences of "page" or "Page" followed by a number
-  // Pattern matches: "Page 24", "page 24", "Page: 24", "page:24", "Page:** 24", etc.
-  // Match "Page" or "page" followed by any characters (including markdown) then digits
-  const pageReferencePattern = /(Page|page).*?(\d+)/gi;
+  // Pattern matches: "Page 24", "page 24", "Page: 24", "page:24", "Page:** 24", "**Page:** 27", etc.
+  // IMPORTANT: Only match when "page" is directly followed by a number (with optional whitespace/punctuation/markdown)
+  // Do NOT match "page" followed by other words and then a number later
+  // The pattern allows: whitespace (\s), colons (:), asterisks (* for markdown), dashes (-), but NOT other letters/words
+  // Note: - is at the end of character class to avoid being interpreted as a range
+  const pageReferencePattern = /(Page|page)[\s:*-]*(\d+)/gi;
   const pageReferences: Array<{ fullMatch: string; pageWord: string; pageNum: number; index: number }> = [];
   
   let match;
@@ -1333,13 +1380,34 @@ const processPageReferences = (content: string): string => {
   }
   
   // Find PDF filenames in the content
-  const pdfFilenamePattern = /([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/gi;
-  const pdfFilenames: Array<{ filename: string; index: number }> = [];
-  let filenameMatch;
-  pdfFilenamePattern.lastIndex = 0;
-  while ((filenameMatch = pdfFilenamePattern.exec(content)) !== null) {
-    pdfFilenames.push({ filename: filenameMatch[1], index: filenameMatch.index });
+  // Look for filenames with various labels: File:, Filename:, Document:, or standalone
+  // Also handle markdown formatting like **Filename:** or **File:**
+  const pdfFilenamePatterns = [
+    /\*\*(?:File|Filename|Document|Source):\*\*\s*([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/gi, // Markdown bold with label
+    /(?:File|Filename|Document|Source):\s*([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/gi, // With label (no markdown)
+    /([A-Za-z0-9_\-\.]+\.(?:PDF|pdf))/gi // Standalone
+  ];
+  const pdfFilenames: Array<{ filename: string; index: number; label?: string }> = [];
+  
+  // First, find filenames with labels (including markdown)
+  for (const pattern of pdfFilenamePatterns) {
+    pattern.lastIndex = 0;
+    let filenameMatch: RegExpExecArray | null;
+    while ((filenameMatch = pattern.exec(content)) !== null) {
+      const filename = filenameMatch[1] || filenameMatch[0];
+      // Avoid duplicates
+      if (!pdfFilenames.some(f => f.filename === filename && f.index === filenameMatch!.index)) {
+        pdfFilenames.push({ 
+          filename: filename, 
+          index: filenameMatch.index,
+          label: filenameMatch[0].includes(':') ? filenameMatch[0].split(':')[0].replace(/\*/g, '') : undefined
+        });
+      }
+    }
   }
+  
+  // Sort by index
+  pdfFilenames.sort((a, b) => a.index - b.index);
   
   // Process page references in reverse order to preserve indices
   let processedContent = content;
@@ -1353,13 +1421,22 @@ const processPageReferences = (content: string): string => {
       continue;
     }
     
-    // Find the closest PDF filename before this page reference
+    // Find the closest PDF filename before or after this page reference
+    // If there's only one filename in the context (within 200 chars before/after), use it regardless of label
     let matchedFilename: string | null = null;
     let matchedFile: UploadedFile | null = null;
     
-    const filenameBefore = pdfFilenames.filter(f => f.index < index);
-    if (filenameBefore.length > 0) {
-      matchedFilename = filenameBefore[filenameBefore.length - 1].filename;
+    const contextStart = Math.max(0, index - 200);
+    const contextEnd = Math.min(content.length, index + fullMatch.length + 200);
+    
+    // Find all filenames in the context
+    const filenamesInContext = pdfFilenames.filter(f => 
+      f.index >= contextStart && f.index <= contextEnd
+    );
+    
+    // If there's exactly one filename in context, use it (regardless of label or position)
+    if (filenamesInContext.length === 1) {
+      matchedFilename = filenamesInContext[0].filename;
       matchedFile = pdfFiles.find(f => {
         const nameUpper = f.name?.toUpperCase();
         const filenameUpper = matchedFilename!.toUpperCase();
@@ -1367,6 +1444,38 @@ const processPageReferences = (content: string): string => {
                nameUpper.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
                filenameUpper.includes(nameUpper.replace(/\.(PDF|pdf)$/, ''));
       }) || null;
+      
+      // If not found in uploadedFiles, check availableUserFiles (if already loaded)
+      if (!matchedFile && matchedFilename && availableUserFiles.value.length > 0) {
+        const matchedUserFile = availableUserFiles.value.find(f => {
+          const fileUpper = f.fileName?.toUpperCase();
+          const filenameUpper = matchedFilename!.toUpperCase();
+          return fileUpper === filenameUpper || 
+                 fileUpper?.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
+                 filenameUpper.includes(fileUpper?.replace(/\.(PDF|pdf)$/, '') || '');
+        });
+        
+        if (matchedUserFile) {
+          // Create a pseudo-file object for matching
+          matchedFile = {
+            name: matchedUserFile.fileName,
+            bucketKey: matchedUserFile.bucketKey
+          } as UploadedFile;
+        }
+      }
+    } else {
+      // Multiple filenames or none - use the closest one before the page reference
+      const filenameBefore = pdfFilenames.filter(f => f.index < index);
+      if (filenameBefore.length > 0) {
+        matchedFilename = filenameBefore[filenameBefore.length - 1].filename;
+        matchedFile = pdfFiles.find(f => {
+          const nameUpper = f.name?.toUpperCase();
+          const filenameUpper = matchedFilename!.toUpperCase();
+          return nameUpper === filenameUpper || 
+                 nameUpper.includes(filenameUpper.replace(/\.(PDF|pdf)$/, '')) ||
+                 filenameUpper.includes(nameUpper.replace(/\.(PDF|pdf)$/, ''));
+        }) || null;
+      }
     }
     
     // Create the HTML link (markdown allows raw HTML)
@@ -1395,8 +1504,13 @@ const processPageReferences = (content: string): string => {
         // Found a match in user files - create direct link
         const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         linkHtml = `<a href="#" class="page-link" data-filename="${matchedFilename}" data-page="${pageNum}" data-bucket-key="${matchedUserFile.bucketKey}">${escapedText}</a>`;
+      } else if (matchedFilename) {
+        // We found a filename in the AI response but haven't matched it yet
+        // Store the filename in the link so it can be matched when files are loaded on click
+        const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        linkHtml = `<a href="#" class="page-link page-link-chooser" data-filename="${matchedFilename}" data-page="${pageNum}">${escapedText}</a>`;
       } else {
-        // No match - create chooser link
+        // No filename found - create chooser link without filename
         const escapedText = fullMatch.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         linkHtml = `<a href="#" class="page-link page-link-chooser" data-page="${pageNum}">${escapedText}</a>`;
       }
@@ -2727,6 +2841,7 @@ const handleChatSelected = async (chat: any) => {
   if (chat.chatHistory) {
     const normalizedHistory = chat.chatHistory.map((msg: Message) => normalizeMessage(msg));
     messages.value = normalizedHistory;
+    originalMessages.value = JSON.parse(JSON.stringify(normalizedHistory)); // Keep original in sync
   }
   
   // Load the uploaded files
@@ -2783,6 +2898,10 @@ const saveEditedMessage = (idx: number) => {
     editingMessageIdx.value.splice(editIndex, 1);
   }
   delete editingOriginalContent.value[idx];
+  // Sync originalMessages when message is edited (edited content becomes the new "original")
+  if (originalMessages.value[idx] && messages.value[idx]) {
+    originalMessages.value[idx].content = messages.value[idx].content;
+  }
 };
 
 const cancelEditing = (idx: number) => {
@@ -2819,12 +2938,20 @@ const deleteMessageConfirmed = () => {
   
   // Remove the message
   messages.value.splice(idx, 1);
+  // Also remove from originalMessages to keep in sync
+  if (originalMessages.value[idx]) {
+    originalMessages.value.splice(idx, 1);
+  }
   
   // If there was a preceding user message, remove it too
   if (precedingUserMessage.value && idx > 0) {
     const userIdx = idx - 1;
     if (messages.value[userIdx]?.role === 'user') {
       messages.value.splice(userIdx, 1);
+      // Also remove from originalMessages
+      if (originalMessages.value[userIdx]) {
+        originalMessages.value.splice(userIdx, 1);
+      }
       delete editingOriginalContent.value[userIdx];
     }
   }
@@ -2947,6 +3074,103 @@ const handleFilesArchived = (archivedBucketKeys: string[]) => {
   
   // Update status tip immediately after files are archived
   updateContextualTip();
+};
+
+const handleMessagesFiltered = (filteredMessages: Message[]) => {
+  // Replace current messages with filtered messages
+  messages.value = filteredMessages;
+  
+  // Keep originalMessages synchronized with filtered messages
+  // The filtered messages become the new "original" state
+  originalMessages.value = JSON.parse(JSON.stringify(filteredMessages));
+  
+  // Scroll to bottom to show the filtered messages
+  setTimeout(() => {
+    if (chatMessagesRef.value) {
+      chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
+    }
+  }, 100);
+};
+
+const handleDiaryPosted = (diaryContent: string) => {
+  // Add diary content as a user message to the chat
+  const diaryMessage: Message = {
+    role: 'user',
+    content: diaryContent,
+    authorType: 'user',
+    authorLabel: 'Patient Diary',
+    name: 'Patient Diary'
+  };
+  
+  messages.value.push(diaryMessage);
+  originalMessages.value.push(diaryMessage);
+  
+  // Scroll to bottom
+  nextTick(() => {
+    if (chatMessagesRef.value) {
+      chatMessagesRef.value.scrollTop = chatMessagesRef.value.scrollHeight;
+    }
+  });
+};
+
+const handleReferenceFileAdded = async (file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }) => {
+  // Add reference file to uploadedFiles (similar to regular file upload)
+  try {
+    // For PDF files, we need to parse them
+    if (file.fileType === 'pdf') {
+      // Fetch and parse PDF from bucket
+      const parseResponse = await fetch(`/api/files/parse-pdf-from-bucket/${encodeURIComponent(file.bucketKey)}`, {
+        method: 'GET',
+        credentials: 'include'
+      });
+      
+      if (parseResponse.ok) {
+        const parseResult = await parseResponse.json();
+        const uploadedFile: UploadedFile = {
+          id: `ref-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+          name: file.fileName,
+          size: file.fileSize,
+          type: 'pdf',
+          content: parseResult.text || '',
+          originalFile: null as any,
+          bucketKey: file.bucketKey,
+          bucketPath: file.bucketKey.split('/').slice(0, -1).join('/'),
+          fileUrl: file.fileUrl,
+          uploadedAt: new Date(file.uploadedAt),
+          isReference: true
+        };
+        uploadedFiles.value.push(uploadedFile);
+      }
+    } else {
+      // For text files, fetch content
+      const textResponse = await fetch(`/api/files/get-text/${encodeURIComponent(file.bucketKey)}`, {
+        method: 'GET',
+        credentials: 'include'
+      });
+      
+      if (textResponse.ok) {
+        const textResult = await textResponse.json();
+        // Determine file type: markdown, text, or other (pdf is already handled in the if branch above)
+        const fileType = file.fileType === 'markdown' ? 'markdown' : 'text';
+        const uploadedFile: UploadedFile = {
+          id: `ref-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+          name: file.fileName,
+          size: file.fileSize,
+          type: fileType,
+          content: textResult.content || textResult.text || '',
+          originalFile: null as any,
+          bucketKey: file.bucketKey,
+          bucketPath: file.bucketKey.split('/').slice(0, -1).join('/'),
+          fileUrl: file.fileUrl,
+          uploadedAt: new Date(file.uploadedAt),
+          isReference: true
+        };
+        uploadedFiles.value.push(uploadedFile);
+      }
+    }
+  } catch (error) {
+    console.error('Error adding reference file to chat:', error);
+  }
 };
 
 // Parse contextual tip to extract clickable links

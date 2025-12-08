@@ -71,6 +71,12 @@ DIGITALOCEAN_TOKEN=...
 DO_REGION=tor1
 DIGITALOCEAN_BUCKET=https://maia.tor1.digitaloceanspaces.com
 DIGITALOCEAN_AWS_ACCESS*=
+DO_DATABASE_ID=...  # OpenSearch database ID for knowledge bases
+
+# OpenSearch for Clinical Notes (optional)
+OPENSEARCH_ENDPOINT=https://your-cluster.region.opensearch.digitalocean.com
+OPENSEARCH_USERNAME=...
+OPENSEARCH_PASSWORD=...
 
 # App + email
 PORT=3001

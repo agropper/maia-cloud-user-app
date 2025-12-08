@@ -21,6 +21,10 @@
           <q-tab name="agent" label="My AI Agent" icon="smart_toy" />
           <q-tab name="chats" label="Saved Chats" icon="chat" />
           <q-tab name="summary" label="Patient Summary" icon="description" />
+          <q-tab name="lists" label="My Lists" icon="list" />
+          <q-tab name="privacy" label="Privacy Filter" icon="privacy_tip" />
+          <q-tab name="diary" label="Patient Diary" icon="book" />
+          <q-tab name="references" label="SHARED REFERENCES" icon="link" />
         </q-tabs>
 
         <q-tab-panels v-model="currentTab" animated>
@@ -402,6 +406,280 @@
             </div>
           </q-tab-panel>
 
+          <!-- My Lists Tab -->
+          <q-tab-panel name="lists">
+            <Lists
+              :userId="userId"
+              @back-to-chat="closeDialog"
+            />
+          </q-tab-panel>
+
+          <!-- Privacy Filter Tab -->
+          <q-tab-panel name="privacy">
+            <!-- Filter Current Chat Button -->
+            <div class="q-pa-md" style="border-bottom: 1px solid #eee;">
+              <q-btn
+                label="Filter Current Chat"
+                color="primary"
+                icon="filter_alt"
+                :disable="!privacyFilterMapping.length || !props.originalMessages || props.originalMessages.length === 0"
+                @click="filterCurrentChat"
+                class="full-width"
+              />
+              <div v-if="!privacyFilterMapping.length" class="text-caption text-grey q-mt-xs text-center">
+                No pseudonym mapping available
+              </div>
+              <div v-else-if="!props.originalMessages || props.originalMessages.length === 0" class="text-caption text-grey q-mt-xs text-center">
+                No chat messages available
+              </div>
+            </div>
+
+            <div v-if="loadingPrivacyFilter" class="text-center q-pa-md">
+              <q-spinner size="2em" />
+              <div class="q-mt-sm">Analyzing chat for names...</div>
+            </div>
+
+            <div v-else-if="privacyFilterError" class="text-center q-pa-md">
+              <q-icon name="error" color="negative" size="40px" />
+              <div class="text-negative q-mt-sm">{{ privacyFilterError }}</div>
+              <q-btn label="Retry" color="primary" @click="loadPrivacyFilter" class="q-mt-md" />
+            </div>
+
+            <div v-else-if="privacyFilterMapping.length > 0" class="q-pa-md">
+              <div class="text-h6 q-mb-md">Privacy Filter - Name Pseudonymization</div>
+              
+              <div v-if="loadingRandomNames" class="text-center q-pa-md">
+                <q-spinner size="1.5em" />
+                <div class="q-mt-sm">Generating pseudonyms...</div>
+              </div>
+              
+              <div v-else class="q-mt-md">
+                <div class="text-body2 text-grey q-mb-sm">
+                  Showing {{ privacyFilterMapping.length }} name{{ privacyFilterMapping.length !== 1 ? 's' : '' }} in pseudonym mapping
+                </div>
+                <q-table
+                  :rows="privacyFilterMapping"
+                  :columns="[
+                    { name: 'original', label: 'Original Name', field: 'original', align: 'left' },
+                    { name: 'pseudonym', label: 'Pseudonym', field: 'pseudonym', align: 'left' }
+                  ]"
+                  row-key="original"
+                  flat
+                  bordered
+                  :rows-per-page-options="[0]"
+                  hide-pagination
+                />
+              </div>
+            </div>
+
+            <div v-else-if="privacyFilterResponse" class="q-pa-md">
+              <div class="text-h6 q-mb-md">Privacy Filter - Name Pseudonymization</div>
+              <div class="text-body2 text-grey q-mb-md">No pseudonym mapping available. Original response:</div>
+              <div class="privacy-filter-response">
+                <vue-markdown :source="privacyFilterResponse" />
+              </div>
+            </div>
+
+            <div v-else class="text-center q-pa-md text-grey">
+              <q-icon name="person_off" size="3em" />
+              <div class="q-mt-sm">No mapping available</div>
+            </div>
+          </q-tab-panel>
+
+          <!-- Patient Diary Tab -->
+          <q-tab-panel name="diary" class="q-pa-none" style="display: flex; flex-direction: column; height: 100%;">
+            <div v-if="loadingDiary" class="text-center q-pa-md">
+              <q-spinner size="2em" />
+              <div class="q-mt-sm">Loading diary...</div>
+            </div>
+
+            <div v-else-if="diaryError" class="text-center q-pa-md">
+              <q-icon name="error" color="negative" size="40px" />
+              <div class="text-negative q-mt-sm">{{ diaryError }}</div>
+              <q-btn label="Retry" color="primary" @click="loadDiary" class="q-mt-md" />
+            </div>
+
+            <div v-else style="display: flex; flex-direction: column; height: 100%;">
+              <!-- Diary Messages Area -->
+              <div 
+                ref="diaryMessagesRef" 
+                class="q-pa-md" 
+                style="flex: 1; overflow-y: auto; min-height: 0;"
+              >
+                <div v-if="diaryEntries.length === 0" class="text-center q-pa-md text-grey">
+                  <q-icon name="book" size="3em" />
+                  <div class="q-mt-sm">No diary entries yet</div>
+                  <div class="text-caption q-mt-xs">Start writing your first entry below</div>
+                </div>
+
+                <template v-for="bubble in diaryBubbles" :key="bubble.entries[bubble.entries.length - 1]?.id || bubble.lastDateTime">
+                  <div class="q-mb-md" style="position: relative;">
+                    <div class="row items-center justify-between q-mb-xs">
+                      <div class="text-caption text-grey-7">
+                        {{ formatDiaryDateTime(bubble.lastDateTime) }}
+                      </div>
+                      <div class="row q-gutter-xs">
+                        <q-btn
+                          flat
+                          dense
+                          size="sm"
+                          icon="send"
+                          color="primary"
+                          label="Post diary to chat"
+                          @click="postBubbleToChat(bubble)"
+                        />
+                        <q-btn
+                          flat
+                          dense
+                          round
+                          size="sm"
+                          icon="delete"
+                          color="negative"
+                          @click="deleteBubble(bubble)"
+                          title="Delete bubble"
+                        />
+                      </div>
+                    </div>
+                    <div 
+                      class="q-pa-md bg-blue-1 rounded-borders"
+                      style="display: inline-block; max-width: 80%;"
+                      :class="{ 'opacity-60': bubble.closed }"
+                    >
+                      <div
+                        v-for="(entry, entryIdx) in bubble.entries" 
+                        :key="entry.id || entryIdx"
+                        class="text-body1"
+                        :class="{ 'q-mb-sm': entryIdx < bubble.entries.length - 1 }"
+                        style="white-space: pre-wrap;"
+                      >
+                        <span class="text-grey-7 text-caption">{{ formatDiaryTime(entry.dateTime) }}</span> {{ entry.message }}
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Text Input Area -->
+              <div class="q-pa-md" style="flex-shrink: 0; border-top: 1px solid #eee;">
+                <q-input
+                  v-model="diaryInputText"
+                  type="textarea"
+                  autogrow
+                  filled
+                  placeholder="Write your diary entry..."
+                  :disable="isSavingDiary"
+                  @keydown.enter.ctrl="addDiaryEntry"
+                  @keydown.enter.meta="addDiaryEntry"
+                  class="q-mb-sm"
+                />
+                <div class="row justify-end">
+                  <q-btn
+                    label="Add Entry"
+                    color="primary"
+                    icon="send"
+                    @click="addDiaryEntry"
+                    :loading="isSavingDiary"
+                    :disable="!diaryInputText.trim() || isSavingDiary"
+                  />
+                </div>
+              </div>
+            </div>
+          </q-tab-panel>
+
+          <!-- SHARED REFERENCES Tab -->
+          <q-tab-panel name="references" class="q-pa-none" style="display: flex; flex-direction: column; height: 100%;">
+            <div v-if="loadingReferences" class="text-center q-pa-md">
+              <q-spinner size="2em" />
+              <div class="q-mt-sm">Loading references...</div>
+            </div>
+
+            <div v-else-if="referencesError" class="text-center q-pa-md">
+              <q-icon name="error" color="negative" size="40px" />
+              <div class="text-negative q-mt-sm">{{ referencesError }}</div>
+              <q-btn label="Retry" color="primary" @click="loadReferences" class="q-mt-md" />
+            </div>
+
+            <div v-else style="display: flex; flex-direction: column; height: 100%;">
+              <!-- Header with paperclip -->
+              <div class="q-pa-md" style="flex-shrink: 0; border-bottom: 1px solid #eee;">
+                <div class="row items-center justify-between">
+                  <div class="text-h6">Shared References</div>
+                  <q-btn 
+                    flat 
+                    dense 
+                    round 
+                    icon="attach_file" 
+                    class="text-grey-6" 
+                    @click="triggerReferenceFileInput"
+                    title="Upload reference file"
+                  >
+                    <q-tooltip>Upload a reference file</q-tooltip>
+                  </q-btn>
+                  <input
+                    ref="referenceFileInput"
+                    type="file"
+                    style="display: none"
+                    @change="handleReferenceFileSelect"
+                    accept=".pdf,.txt,.md"
+                  />
+                </div>
+              </div>
+
+              <!-- References List -->
+              <div class="q-pa-md" style="flex: 1; overflow-y: auto; min-height: 0;">
+                <div v-if="referenceFiles.length === 0" class="text-center q-pa-md text-grey">
+                  <q-icon name="link" size="3em" />
+                  <div class="q-mt-sm">No reference files yet</div>
+                  <div class="text-caption q-mt-xs">Use the paperclip icon to upload reference files</div>
+                </div>
+
+                <q-list v-else>
+                  <q-item 
+                    v-for="file in referenceFiles" 
+                    :key="file.bucketKey" 
+                    class="q-pa-md"
+                    clickable
+                    @click="showAddReferenceToChatDialog(file)"
+                  >
+                    <q-item-section avatar>
+                      <q-icon name="description" size="2em" color="primary" />
+                    </q-item-section>
+                    <q-item-section>
+                      <q-item-label>{{ file.fileName }}</q-item-label>
+                      <q-item-label caption>
+                        {{ formatFileSize(file.fileSize) }} • Uploaded {{ formatDate(file.uploadedAt) }}
+                      </q-item-label>
+                    </q-item-section>
+                    <q-item-section side>
+                      <div class="row items-center q-gutter-xs">
+                        <q-btn 
+                          flat 
+                          dense 
+                          round 
+                          size="sm"
+                          icon="visibility" 
+                          color="primary"
+                          @click.stop="viewReferenceFile(file)"
+                          title="View file"
+                        />
+                        <q-btn 
+                          flat 
+                          dense 
+                          round 
+                          size="sm"
+                          icon="delete" 
+                          color="negative"
+                          @click.stop="deleteReferenceFile(file)"
+                          title="Delete file"
+                        />
+                      </div>
+                    </q-item-section>
+                  </q-item>
+                </q-list>
+              </div>
+            </div>
+          </q-tab-panel>
+
           <!-- Patient Summary Tab -->
           <q-tab-panel name="summary">
             <div v-if="loadingSummary" class="text-center q-pa-md">
@@ -641,10 +919,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
 import VueMarkdown from 'vue-markdown-render';
 import PdfViewerModal from './PdfViewerModal.vue';
 import TextViewerModal from './TextViewerModal.vue';
+import Lists from './Lists.vue';
 import { useQuasar } from 'quasar';
 import { deleteChatById } from '../utils/chatApi';
 
@@ -671,14 +950,28 @@ interface SavedChat {
   isShared?: boolean;
 }
 
+interface Message {
+  role: 'user' | 'assistant';
+  content: string;
+  name?: string;
+  authorId?: string;
+  authorLabel?: string;
+  authorType?: 'user' | 'assistant';
+  providerKey?: string;
+}
+
 interface Props {
   modelValue: boolean;
   userId: string;
   initialTab?: string;
+  messages?: Message[];
+  originalMessages?: Message[]; // Original unfiltered messages for privacy filtering
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  initialTab: 'files'
+  initialTab: 'files',
+  messages: () => [],
+  originalMessages: () => []
 });
 
 const emit = defineEmits<{
@@ -688,6 +981,9 @@ const emit = defineEmits<{
   'indexing-status-update': [data: { jobId: string; phase: string; tokens: string; filesIndexed: number; progress: number }];
   'indexing-finished': [data: { jobId: string; phase: string; error?: string }];
   'files-archived': [archivedFiles: string[]]; // Emit bucketKeys of archived files
+  'messages-filtered': [messages: Message[]]; // Emit filtered messages with pseudonyms
+  'diary-posted': [content: string]; // Emit diary content to add to chat
+  'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
 }>();
 
 const isOpen = ref(props.modelValue);
@@ -725,8 +1021,31 @@ const sharedChats = ref<SavedChat[]>([]);
 // Patient Summary
 const loadingSummary = ref(false);
 const summaryError = ref('');
+
+// Privacy Filter
+const loadingPrivacyFilter = ref(false);
+const privacyFilterError = ref('');
+const privacyFilterResponse = ref('');
+const privacyFilterMapping = ref<Array<{ original: string; pseudonym: string }>>([]);
+const loadingRandomNames = ref(false);
 const patientSummary = ref('');
 const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
+
+// Patient Diary
+const loadingDiary = ref(false);
+const diaryError = ref('');
+const diaryEntries = ref<Array<{ id: string; message: string; dateTime: string; posted?: boolean; bubbleId?: string }>>([]);
+const diaryInputText = ref('');
+const isSavingDiary = ref(false);
+const diaryMessagesRef = ref<HTMLElement | null>(null);
+
+// Shared References
+const loadingReferences = ref(false);
+const referencesError = ref('');
+const referenceFiles = ref<Array<{ fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string }>>([]);
+const referenceFileInput = ref<HTMLInputElement | null>(null);
+const isUploadingReference = ref(false);
+const selectedReferenceForChat = ref<{ fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string } | null>(null);
 const savedCurrentSummaryForUndo = ref<{ text: string; createdAt: string; updatedAt: string } | null>(null);
 const showReplaceSummaryDialog = ref(false);
 const newSummaryToReplace = ref('');
@@ -2524,6 +2843,983 @@ const swapSummary = async (index: number) => {
   }
 };
 
+const loadPrivacyFilter = async () => {
+  loadingPrivacyFilter.value = true;
+  privacyFilterError.value = '';
+  privacyFilterResponse.value = '';
+
+  try {
+    // Always try to load existing mapping first (cumulative - never deleted)
+    try {
+      const loadResponse = await fetch('/api/privacy-filter-mapping', {
+        credentials: 'include'
+      });
+      
+      if (loadResponse.ok) {
+        const loadData = await loadResponse.json();
+        if (loadData.mapping && loadData.mapping.length > 0) {
+          privacyFilterMapping.value = loadData.mapping;
+        }
+      }
+    } catch (loadErr) {
+      console.warn(`[PRIVACY] Could not load existing mapping:`, loadErr);
+      privacyFilterMapping.value = [];
+    }
+
+    // Use originalMessages if available (unfiltered), otherwise fall back to props.messages
+    const messagesToAnalyze = (props.originalMessages && props.originalMessages.length > 0) 
+      ? props.originalMessages 
+      : props.messages;
+    
+    // Check if we have messages to query Private AI
+    if (!messagesToAnalyze || messagesToAnalyze.length === 0) {
+      // Still show existing mapping if available - don't set error if mapping exists
+      if (privacyFilterMapping.value.length === 0) {
+        privacyFilterError.value = 'No chat messages available';
+      }
+      return;
+    }
+
+    // Prepare messages for Private AI query
+    // Include all chat messages plus the privacy filter question
+    // IMPORTANT: We only want names from the chat messages themselves, not from knowledge base documents
+    const chatMessagesOnly = messagesToAnalyze.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }));
+    
+    const queryMessages = [
+      ...chatMessagesOnly,
+      {
+        role: 'user' as const,
+        content: 'Based ONLY on the chat messages above (ignore any information from your knowledge base or retrieved documents), what names of people are explicitly mentioned in this chat conversation? List only names that appear in the chat messages themselves.'
+      }
+    ];
+
+    // Query Private AI
+    const response = await fetch('/api/chat/digitalocean', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        messages: queryMessages,
+        options: {
+          stream: true
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(errorData.error || 'Failed to query Private AI');
+    }
+
+    // Read streaming response
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let responseText = '';
+
+    if (!reader) {
+      throw new Error('Failed to read response stream');
+    }
+
+    let buffer = '';
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      
+      // Process complete lines (ending with \n\n)
+      const lines = buffer.split('\n\n');
+      // Keep the last incomplete line in buffer
+      buffer = lines.pop() || '';
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            
+            // Only use delta for incremental content (like ChatInterface does)
+            // Ignore content field to avoid duplication
+            if (data.delta) {
+              responseText += data.delta;
+            }
+            
+            // Check if response is complete
+            if (data.isComplete) {
+              break;
+            }
+          } catch (e) {
+            // Skip malformed JSON - might be partial chunk
+          }
+        }
+      }
+    }
+    
+    // Store the raw response
+    privacyFilterResponse.value = responseText.trim();
+    
+    // Always check for new names and add them to existing mapping (cumulative)
+    await createPseudonymMapping(responseText.trim());
+  } catch (err) {
+    console.error(`[PRIVACY] Error during privacy filter analysis:`, err);
+    privacyFilterError.value = err instanceof Error ? err.message : 'Failed to analyze chat for names';
+  } finally {
+    loadingPrivacyFilter.value = false;
+  }
+};
+
+const createPseudonymMapping = async (responseText: string) => {
+  loadingRandomNames.value = true;
+  
+  try {
+    // Load random names from backend API
+    const randomNamesResponse = await fetch('/api/random-names');
+    if (!randomNamesResponse.ok) {
+      throw new Error('Failed to load random names');
+    }
+    
+    const randomNamesData = await randomNamesResponse.json();
+    const randomNamesList = randomNamesData.names || [];
+    
+    // Parse names from Privacy Filter response
+    // Split by newlines and extract names (one per line, may have notes in parentheses)
+    const responseLines = responseText.split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#') && !line.startsWith('*'));
+    
+    const extractedNames: string[] = [];
+    for (const line of responseLines) {
+      // Extract name (may have notes in parentheses like "Adrian Gropper (also appears as...)")
+      const nameMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+(?:\.[A-Z])?)+)/);
+      if (nameMatch) {
+        extractedNames.push(nameMatch[1]);
+      }
+    }
+    
+    // Start with existing mapping (cumulative - never delete)
+    const existingMapping = privacyFilterMapping.value || [];
+    const existingOriginals = new Set(existingMapping.map(m => m.original));
+    
+    // Find new names that aren't in existing mapping
+    const newNames = extractedNames.filter(name => !existingOriginals.has(name));
+    
+    if (newNames.length === 0) {
+      return; // No new names, keep existing mapping
+    }
+    
+    // Create pseudonym mapping for new names only
+    const newMappings: Array<{ original: string; pseudonym: string }> = [];
+    const usedRandomNames = new Set<number>();
+    
+    // Track which random names are already used in existing mapping
+    existingMapping.forEach((m: { original: string; pseudonym: string }) => {
+      // Extract the random name from pseudonym (e.g., "Emily45 Johnson67" -> "Emily Johnson")
+      const pseudonymParts = m.pseudonym.split(/\s+/);
+      if (pseudonymParts.length >= 2) {
+        const firstName = pseudonymParts[0].replace(/\d+$/, ''); // Remove trailing numbers
+        const lastName = pseudonymParts[1].replace(/\d+$/, ''); // Remove trailing numbers
+        const randomName = `${firstName} ${lastName}`;
+        const index = randomNamesList.findIndex((name: string) => name === randomName);
+        if (index >= 0) {
+          usedRandomNames.add(index);
+        }
+      }
+    });
+    
+    for (const originalName of newNames) {
+      // Pick a random name from the list (without replacement to avoid duplicates)
+      let randomIndex: number;
+      let attempts = 0;
+      do {
+        randomIndex = Math.floor(Math.random() * randomNamesList.length);
+        attempts++;
+        // If we've used all names, reset (allow reuse)
+        if (attempts > randomNamesList.length * 2) {
+          usedRandomNames.clear();
+          break;
+        }
+      } while (usedRandomNames.has(randomIndex));
+      
+      usedRandomNames.add(randomIndex);
+      const randomName = randomNamesList[randomIndex];
+      
+      // Split into first and last name
+      const nameParts = randomName.split(/\s+/);
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(' ') || nameParts[1] || '';
+      
+      // Generate random numbers (10-99) for first and last name
+      const firstNum = Math.floor(Math.random() * 90) + 10; // 10-99
+      const lastNum = Math.floor(Math.random() * 90) + 10; // 10-99
+      
+      // Create pseudonym: "FirstNameXX LastNameYY"
+      const pseudonym = lastName 
+        ? `${firstName}${firstNum} ${lastName}${lastNum}`
+        : `${firstName}${firstNum}`;
+      
+      // Validate pseudonym before adding
+      if (!pseudonym || pseudonym.trim() === '') {
+        console.error(`[PRIVACY] ERROR: Failed to create pseudonym for "${originalName}" - pseudonym is empty!`);
+        continue; // Skip this name
+      }
+      
+      newMappings.push({ original: originalName, pseudonym });
+    }
+    
+    // Merge new mappings with existing ones (cumulative)
+    const updatedMapping = [...existingMapping, ...newMappings];
+    privacyFilterMapping.value = updatedMapping;
+    
+    // Save updated mapping to user document
+    try {
+      const saveResponse = await fetch('/api/privacy-filter-mapping', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ mapping: updatedMapping })
+      });
+      
+      if (!saveResponse.ok) {
+        console.warn(`[PRIVACY] Failed to save mapping:`, await saveResponse.text());
+      }
+    } catch (saveErr) {
+      console.error(`[PRIVACY] Error saving mapping:`, saveErr);
+      // Don't fail the whole operation if save fails
+    }
+  } catch (err) {
+    console.error(`[PRIVACY] Error creating pseudonym mapping:`, err);
+    privacyFilterMapping.value = [];
+  } finally {
+    loadingRandomNames.value = false;
+  }
+};
+
+const filterCurrentChat = () => {
+  // Use originalMessages if available and has same length as props.messages (unfiltered), otherwise use props.messages
+  // This ensures we always filter the correct number of messages
+  const messagesToFilter = (props.originalMessages && props.originalMessages.length > 0 && props.originalMessages.length === props.messages.length) 
+    ? props.originalMessages 
+    : props.messages;
+  
+  if (!messagesToFilter || messagesToFilter.length === 0) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'warning',
+        message: 'No chat messages available to filter',
+        timeout: 3000
+      });
+    }
+    return;
+  }
+  
+  if (privacyFilterMapping.value.length === 0) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'warning',
+        message: 'No pseudonym mapping available. Please analyze the chat first.',
+        timeout: 3000
+      });
+    }
+    return;
+  }
+  
+  // Track which names were pseudonymized
+  const pseudonymizedNames: Array<{ original: string; pseudonym: string }> = [];
+  
+  // Create filtered messages by replacing names with pseudonyms
+  const filteredMessages: Message[] = messagesToFilter.map(msg => {
+    let filteredContent = msg.content;
+    
+    // Replace each original name with its pseudonym
+    // Sort by length (longest first) to avoid partial replacements
+    // (e.g., "John Smith" before "John")
+    const sortedMappings = [...privacyFilterMapping.value].sort((a, b) => b.original.length - a.original.length);
+    
+    for (const mapping of sortedMappings) {
+      const original = mapping.original;
+      const pseudonym = mapping.pseudonym;
+      
+      // Validate pseudonym before using it
+      if (!pseudonym || typeof pseudonym !== 'string' || pseudonym.trim() === '') {
+        continue; // Skip this mapping
+      }
+      
+      // Escape special regex characters
+      const escapedOriginal = original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      // For multi-word names (e.g., "John Smith"), match as a whole phrase with word boundaries
+      // For single-word names, use word boundaries on both sides
+      // Case-insensitive matching
+      const regex = new RegExp(`\\b${escapedOriginal}\\b`, 'gi');
+      const beforeReplace = filteredContent;
+      filteredContent = filteredContent.replace(regex, pseudonym);
+      
+      // Track if this name was actually replaced in this message
+      if (beforeReplace !== filteredContent && !pseudonymizedNames.some(n => n.original === original)) {
+        pseudonymizedNames.push({ original, pseudonym });
+      }
+    }
+    
+    return {
+      ...msg,
+      content: filteredContent
+    };
+  });
+  
+  
+  // Emit filtered messages to parent component
+  emit('messages-filtered', filteredMessages);
+  
+  if ($q && typeof $q.notify === 'function') {
+    $q.notify({
+      type: 'positive',
+      message: `Filtered ${filteredMessages.length} messages with pseudonyms`,
+      timeout: 3000
+    });
+  }
+};
+
+const loadDiary = async () => {
+  loadingDiary.value = true;
+  diaryError.value = '';
+
+  try {
+    const response = await fetch(`/api/patient-diary?userId=${encodeURIComponent(props.userId)}`, {
+      credentials: 'include'
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch diary: ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    diaryEntries.value = result.entries || [];
+    
+    // Assign bubbleIds to entries that don't have them
+    // Group entries sequentially, but respect closed bubbles
+    let currentBubbleId: string | null = null;
+    for (const entry of diaryEntries.value) {
+      if (!entry.bubbleId) {
+        // Entry doesn't have a bubbleId - assign one
+        if (currentBubbleId && !closedBubbleIds.value.has(currentBubbleId)) {
+          // Last bubble is open - add to it
+          entry.bubbleId = currentBubbleId;
+        } else {
+          // No bubble or last bubble is closed - create new bubble
+          currentBubbleId = `bubble-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          entry.bubbleId = currentBubbleId;
+        }
+      } else {
+        // Entry has a bubbleId - use it as current
+        currentBubbleId = entry.bubbleId;
+      }
+    }
+    
+    // Load closed bubble IDs from entries that have bubbleId and are posted
+    // Mark bubbles as closed if any entry in the bubble is posted
+    const bubbleMap = new Map<string, boolean>();
+    for (const entry of diaryEntries.value) {
+      if (entry.bubbleId) {
+        const hasPosted = entry.posted === true;
+        if (!bubbleMap.has(entry.bubbleId)) {
+          bubbleMap.set(entry.bubbleId, hasPosted);
+        } else {
+          bubbleMap.set(entry.bubbleId, bubbleMap.get(entry.bubbleId) || hasPosted);
+        }
+      }
+    }
+    closedBubbleIds.value = new Set(
+      Array.from(bubbleMap.entries())
+        .filter(([_, hasPosted]) => hasPosted)
+        .map(([bubbleId, _]) => bubbleId)
+    );
+    
+    // Scroll to bottom after loading
+    await nextTick();
+    if (diaryMessagesRef.value) {
+      diaryMessagesRef.value.scrollTop = diaryMessagesRef.value.scrollHeight;
+    }
+  } catch (err) {
+    diaryError.value = err instanceof Error ? err.message : 'Failed to load diary';
+  } finally {
+    loadingDiary.value = false;
+  }
+};
+
+const addDiaryEntry = async () => {
+  const message = diaryInputText.value.trim();
+  if (!message || isSavingDiary.value) {
+    return;
+  }
+
+  isSavingDiary.value = true;
+
+  try {
+    const dateTime = new Date().toISOString();
+    
+    // Determine which bubble this entry belongs to BEFORE creating it
+    // If the last bubble is closed, create a new bubble. Otherwise, add to the last bubble.
+    let bubbleId: string;
+    if (diaryBubbles.value.length > 0) {
+      const lastBubble = diaryBubbles.value[diaryBubbles.value.length - 1];
+      if (lastBubble.closed) {
+        // Last bubble is closed - create new bubble
+        bubbleId = `bubble-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      } else {
+        // Last bubble is open - add to it
+        bubbleId = lastBubble.id;
+      }
+    } else {
+      // No bubbles yet - create first bubble
+      bubbleId = `bubble-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    }
+    
+    const entryData = {
+      message,
+      dateTime,
+      bubbleId
+    };
+
+    const response = await fetch('/api/patient-diary', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        entry: entryData
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(errorData.error || 'Failed to save diary entry');
+    }
+
+    const result = await response.json();
+    
+    // Add the new entry to the list with its bubbleId
+    const newEntry = {
+      id: result.entryId,
+      message,
+      dateTime,
+      bubbleId
+    };
+    diaryEntries.value.push(newEntry);
+
+    // Clear input
+    diaryInputText.value = '';
+
+    // Scroll to bottom to show new entry
+    await nextTick();
+    if (diaryMessagesRef.value) {
+      diaryMessagesRef.value.scrollTop = diaryMessagesRef.value.scrollHeight;
+    }
+
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Diary entry saved',
+        timeout: 2000
+      });
+    }
+  } catch (error) {
+    console.error('[Diary] Error saving entry:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to save diary entry',
+        timeout: 3000
+      });
+    }
+  } finally {
+    isSavingDiary.value = false;
+  }
+};
+
+// Track which bubbles have been closed (posted)
+const closedBubbleIds = ref<Set<string>>(new Set());
+
+// Group diary entries into bubbles by bubbleId
+// Each entry has a bubbleId. Group entries by their bubbleId.
+const diaryBubbles = computed(() => {
+  if (diaryEntries.value.length === 0) {
+    return [];
+  }
+
+  // Group entries by bubbleId
+  const bubbleMap = new Map<string, Array<{ id: string; message: string; dateTime: string; posted?: boolean; bubbleId?: string }>>();
+  
+  for (const entry of diaryEntries.value) {
+    const bubbleId = entry.bubbleId || 'no-bubble-id';
+    if (!bubbleMap.has(bubbleId)) {
+      bubbleMap.set(bubbleId, []);
+    }
+    bubbleMap.get(bubbleId)!.push(entry);
+  }
+
+  // Convert to bubble array, sorted by first entry's dateTime
+  const bubbles: Array<{ 
+    id: string;
+    entries: Array<{ id: string; message: string; dateTime: string; posted?: boolean; bubbleId?: string }>; 
+    lastDateTime: string;
+    closed: boolean;
+  }> = [];
+
+  for (const [bubbleId, entries] of bubbleMap.entries()) {
+    // Sort entries by dateTime
+    const sortedEntries = [...entries].sort((a, b) => 
+      new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
+    );
+    
+    const lastDateTime = sortedEntries[sortedEntries.length - 1]?.dateTime || '';
+    const isClosed = closedBubbleIds.value.has(bubbleId);
+    
+    bubbles.push({
+      id: bubbleId,
+      entries: sortedEntries,
+      lastDateTime,
+      closed: isClosed
+    });
+  }
+
+  // Sort bubbles by first entry's dateTime
+  bubbles.sort((a, b) => {
+    const dateA = new Date(a.entries[0]?.dateTime || 0);
+    const dateB = new Date(b.entries[0]?.dateTime || 0);
+    return dateA.getTime() - dateB.getTime();
+  });
+
+  return bubbles;
+});
+
+const formatDiaryDateTime = (dateTimeString: string): string => {
+  const date = new Date(dateTimeString);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  // Format: "Today at 3:45 PM" or "Yesterday at 2:30 PM" or "Jan 15, 2025 at 10:30 AM"
+  const timeStr = date.toLocaleTimeString('en-US', { 
+    hour: 'numeric', 
+    minute: '2-digit',
+    hour12: true 
+  });
+  
+  if (diffMins < 1) {
+    return `Just now`;
+  } else if (diffMins < 60) {
+    return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`;
+  } else if (diffDays === 0) {
+    return `Today at ${timeStr}`;
+  } else if (diffDays === 1) {
+    return `Yesterday at ${timeStr}`;
+  } else {
+    const dateStr = date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
+    });
+    return `${dateStr} at ${timeStr}`;
+  }
+};
+
+const formatDiaryTime = (dateTimeString: string): string => {
+  const date = new Date(dateTimeString);
+  return date.toLocaleTimeString('en-US', { 
+    hour: 'numeric', 
+    minute: '2-digit',
+    hour12: true 
+  });
+};
+
+const postBubbleToChat = (bubble: { id: string; entries: Array<{ id: string; message: string; dateTime: string; posted?: boolean; bubbleId?: string }>; lastDateTime: string; closed: boolean }) => {
+  // Format the bubble content
+  const bubbleContent = bubble.entries
+    .map(entry => {
+      const time = formatDiaryTime(entry.dateTime);
+      return `${time} ${entry.message}`;
+    })
+    .join('\n');
+  
+  const diaryMessage = `Here is my latest patient diary:\n\n${bubbleContent}`;
+  
+  // Emit to parent to add to chat
+  emit('diary-posted', diaryMessage);
+  
+  // Mark this bubble as closed by adding its bubble ID to closedBubbleIds
+  // This marks the bubble as closed so the next message starts a new bubble
+  closedBubbleIds.value.add(bubble.id);
+  
+  // Also update local entries (for backend persistence)
+  bubble.entries.forEach(entry => {
+    const localEntry = diaryEntries.value.find(e => e.id === entry.id);
+    if (localEntry) {
+      localEntry.posted = true;
+    }
+  });
+  
+  // Update backend to mark entries as posted
+  updateDiaryEntriesPosted(bubble.entries.map(e => e.id));
+  
+  if ($q && typeof $q.notify === 'function') {
+    $q.notify({
+      type: 'positive',
+      message: 'Diary posted to chat',
+      timeout: 2000
+    });
+  }
+};
+
+const updateDiaryEntriesPosted = async (entryIds: string[]) => {
+  try {
+    await fetch('/api/patient-diary/mark-posted', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        userId: props.userId,
+        entryIds
+      })
+    });
+  } catch (error) {
+    console.error('[Diary] Error marking entries as posted:', error);
+  }
+};
+
+// Shared References Functions
+const loadReferences = async () => {
+  loadingReferences.value = true;
+  referencesError.value = '';
+
+  try {
+    const response = await fetch(`/api/user-files?userId=${props.userId}&subfolder=References`, {
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch references: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+    referenceFiles.value = (result.files || []).map((file: any) => ({
+      fileName: file.fileName,
+      bucketKey: file.bucketKey,
+      fileSize: file.fileSize,
+      uploadedAt: file.uploadedAt,
+      fileType: file.fileType,
+      fileUrl: file.fileUrl
+    }));
+  } catch (err) {
+    referencesError.value = err instanceof Error ? err.message : 'Failed to load references';
+  } finally {
+    loadingReferences.value = false;
+  }
+};
+
+const triggerReferenceFileInput = () => {
+  referenceFileInput.value?.click();
+};
+
+const handleReferenceFileSelect = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  
+  if (!file) return;
+
+  isUploadingReference.value = true;
+
+  try {
+    // Check file size
+    const maxSize = 50 * 1024 * 1024; // 50MB
+    if (file.size > maxSize) {
+      throw new Error(`File too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum size is 50MB.`);
+    }
+
+    // Upload to References subfolder
+    const uploadFormData = new FormData();
+    uploadFormData.append('file', file);
+    uploadFormData.append('subfolder', 'References');
+
+    const uploadResponse = await fetch('/api/files/upload', {
+      method: 'POST',
+      credentials: 'include',
+      body: uploadFormData
+    });
+
+    if (!uploadResponse.ok) {
+      const errorData = await uploadResponse.json();
+      throw new Error(errorData.message || errorData.error || 'Failed to upload file');
+    }
+
+    const uploadResult = await uploadResponse.json();
+
+    // Update user document with file metadata
+    try {
+      await fetch('/api/user-file-metadata', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId,
+          fileMetadata: {
+            fileName: uploadResult.fileInfo.fileName,
+            bucketKey: uploadResult.fileInfo.bucketKey,
+            bucketPath: uploadResult.fileInfo.userFolder,
+            fileSize: uploadResult.fileInfo.size,
+            fileType: file.name.endsWith('.pdf') ? 'pdf' : (file.name.endsWith('.md') ? 'markdown' : 'text'),
+            uploadedAt: uploadResult.fileInfo.uploadedAt,
+            isReference: true // Mark as reference file
+          }
+        })
+      });
+    } catch (error) {
+      console.warn('Failed to save file metadata to user document:', error);
+    }
+
+    // Reload references list
+    await loadReferences();
+
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'positive',
+        message: 'Reference file uploaded successfully',
+        timeout: 2000
+      });
+    }
+  } catch (error) {
+    console.error('Error uploading reference file:', error);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: error instanceof Error ? error.message : 'Failed to upload reference file',
+        timeout: 3000
+      });
+    }
+  } finally {
+    isUploadingReference.value = false;
+    // Reset input
+    if (input) {
+      input.value = '';
+    }
+  }
+};
+
+const viewReferenceFile = (file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string }) => {
+  // Use the same PDF viewer modal as other files
+  if (file.fileType === 'pdf' && file.bucketKey) {
+    viewFileInPdfViewer({
+      fileName: file.fileName,
+      bucketKey: file.bucketKey,
+      fileSize: file.fileSize,
+      uploadedAt: file.uploadedAt,
+      inKnowledgeBase: false
+    });
+  } else {
+    // For text files, use PDF viewer modal (it can handle text too)
+    viewFileInPdfViewer({
+      fileName: file.fileName,
+      bucketKey: file.bucketKey,
+      fileSize: file.fileSize,
+      uploadedAt: file.uploadedAt,
+      inKnowledgeBase: false
+    });
+  }
+};
+
+const deleteReferenceFile = async (file: { fileName: string; bucketKey: string }) => {
+  if ($q && typeof $q.dialog === 'function') {
+    $q.dialog({
+      title: 'Delete Reference File',
+      message: `Are you sure you want to delete "${file.fileName}"?`,
+      persistent: true,
+      ok: {
+        label: 'Delete',
+        color: 'negative',
+        flat: false
+      },
+      cancel: {
+        label: 'Cancel',
+        color: 'grey',
+        flat: true
+      }
+    }).onOk(async () => {
+      try {
+        const response = await fetch('/api/files/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.userId,
+            bucketKey: file.bucketKey
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || 'Failed to delete file');
+        }
+
+        // Remove from list
+        referenceFiles.value = referenceFiles.value.filter(f => f.bucketKey !== file.bucketKey);
+
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'positive',
+            message: 'Reference file deleted successfully',
+            timeout: 2000
+          });
+        }
+      } catch (error) {
+        console.error('Error deleting reference file:', error);
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'negative',
+            message: error instanceof Error ? error.message : 'Failed to delete reference file',
+            timeout: 3000
+          });
+        }
+      }
+    });
+  }
+};
+
+const showAddReferenceToChatDialog = (file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string }) => {
+  selectedReferenceForChat.value = file;
+  
+  if ($q && typeof $q.dialog === 'function') {
+    $q.dialog({
+      title: 'Add Reference to Chat',
+      message: `Would you like to add "${file.fileName}" to the current chat? Reference files are not considered for indexing in the patient's knowledge base.`,
+      persistent: true,
+      ok: {
+        label: 'ADD TO CHAT',
+        color: 'primary',
+        flat: false
+      },
+      cancel: {
+        label: 'CANCEL',
+        color: 'grey',
+        flat: true
+      }
+    }).onOk(() => {
+      addReferenceToChat(file);
+    }).onCancel(() => {
+      selectedReferenceForChat.value = null;
+    }).onDismiss(() => {
+      selectedReferenceForChat.value = null;
+    });
+  }
+};
+
+const addReferenceToChat = (file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string }) => {
+  // Emit event to add file to chat
+  emit('reference-file-added', {
+    fileName: file.fileName,
+    bucketKey: file.bucketKey,
+    fileSize: file.fileSize,
+    uploadedAt: file.uploadedAt,
+    fileType: file.fileType || 'text',
+    fileUrl: file.fileUrl,
+    isReference: true
+  });
+  
+  selectedReferenceForChat.value = null;
+  
+  if ($q && typeof $q.notify === 'function') {
+    $q.notify({
+      type: 'positive',
+      message: 'Reference file added to chat',
+      timeout: 2000
+    });
+  }
+};
+
+const deleteBubble = async (bubble: { id: string; entries: Array<{ id: string; message: string; dateTime: string; posted?: boolean; bubbleId?: string }>; lastDateTime: string; closed: boolean }) => {
+  if ($q && typeof $q.dialog === 'function') {
+    $q.dialog({
+      title: 'Delete Diary Bubble',
+      message: `Are you sure you want to delete this diary bubble with ${bubble.entries.length} entr${bubble.entries.length === 1 ? 'y' : 'ies'}?`,
+      persistent: true,
+      ok: {
+        label: 'Delete',
+        color: 'negative',
+        flat: false
+      },
+      cancel: {
+        label: 'Cancel',
+        color: 'grey',
+        flat: true
+      }
+    }).onOk(async () => {
+      try {
+        const entryIds = bubble.entries.map(e => e.id);
+        
+        const response = await fetch('/api/patient-diary/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.userId,
+            entryIds
+          })
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+          throw new Error(errorData.error || 'Failed to delete diary entries');
+        }
+
+        // Remove entries from local state
+        diaryEntries.value = diaryEntries.value.filter(entry => !entryIds.includes(entry.id));
+        
+        // Also remove from closed bubble set
+        if (closedBubbleIds.value.has(bubble.id)) {
+          closedBubbleIds.value.delete(bubble.id);
+        }
+
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'positive',
+            message: 'Diary bubble deleted',
+            timeout: 2000
+          });
+        }
+      } catch (error) {
+        console.error('[Diary] Error deleting bubble:', error);
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'negative',
+            message: error instanceof Error ? error.message : 'Failed to delete diary bubble',
+            timeout: 3000
+          });
+        }
+      }
+    });
+  }
+};
+
 const loadPatientSummary = async () => {
   loadingSummary.value = true;
   summaryError.value = '';
@@ -2828,6 +4124,12 @@ watch(() => props.modelValue, async (newValue) => {
       loadAgent();
     } else if (currentTab.value === 'chats') {
       loadSharedChats();
+    } else if (currentTab.value === 'privacy') {
+      loadPrivacyFilter();
+    } else if (currentTab.value === 'diary') {
+      loadDiary();
+    } else if (currentTab.value === 'references') {
+      loadReferences();
     }
   }
 });
@@ -2852,6 +4154,14 @@ watch(currentTab, (newTab) => {
       loadSharedChats();
     } else if (newTab === 'summary') {
       loadPatientSummary();
+    } else if (newTab === 'lists') {
+      // Lists component handles its own data loading
+    } else if (newTab === 'privacy') {
+      loadPrivacyFilter();
+    } else if (newTab === 'diary') {
+      loadDiary();
+    } else if (newTab === 'references') {
+      loadReferences();
     }
   }
 });
