@@ -6948,8 +6948,8 @@ app.get('/api/admin-email', (req, res) => {
 // Admin: Get all users with statistics
 app.get('/api/admin/users', async (req, res) => {
   try {
-    // Allow unauthenticated access when running locally
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1' || process.env.NODE_ENV !== 'production';
+    // Allow unauthenticated access when running locally (only check hostname, not NODE_ENV)
+    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
     
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
@@ -7127,8 +7127,8 @@ app.get('/api/admin/users', async (req, res) => {
 // Admin: Delete user and all associated resources
 app.delete('/api/admin/users/:userId', async (req, res) => {
   try {
-    // Allow unauthenticated access when running locally
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1' || process.env.NODE_ENV !== 'production';
+    // Allow unauthenticated access when running locally (only check hostname, not NODE_ENV)
+    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1';
     
     // If not localhost, require authentication and check for ADMIN_USERNAME
     if (!isLocalhost) {
