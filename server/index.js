@@ -647,13 +647,18 @@ app.use(cors({
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      // In production, be more strict
-      if (isProductionForCors) {
-        console.warn(`⚠️ [CORS] Blocked origin: ${origin}`);
-        callback(new Error('Not allowed by CORS'));
-      } else {
-        // In development, allow all origins
+      // Allow DigitalOcean App Platform URLs (ending with .ondigitalocean.app)
+      if (origin.endsWith('.ondigitalocean.app')) {
         callback(null, true);
+      } else {
+        // In production, be more strict
+        if (isProductionForCors) {
+          console.warn(`⚠️ [CORS] Blocked origin: ${origin}`);
+          callback(new Error('Not allowed by CORS'));
+        } else {
+          // In development, allow all origins
+          callback(null, true);
+        }
       }
     }
   },
