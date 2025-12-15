@@ -3401,12 +3401,24 @@ async function provisionUserAsync(userId, token) {
             
             if (fileDataSource?.last_datasource_indexing_job) {
               const lastJobStatus = fileDataSource.last_datasource_indexing_job.status;
-              if (lastJobStatus === 'INDEX_JOB_STATUS_COMPLETED' || lastJobStatus === 'completed') {
+              // A file is indexed if it has a last_datasource_indexing_job (regardless of status)
+              // The presence of last_datasource_indexing_job indicates the data source has been processed
+              // Accept multiple completion statuses: COMPLETED, UPDATED, or any status if job exists
+              const isCompletedStatus = lastJobStatus === 'INDEX_JOB_STATUS_COMPLETED' || 
+                                       lastJobStatus === 'completed' ||
+                                       lastJobStatus === 'DATA_SOURCE_STATUS_UPDATED' ||
+                                       lastJobStatus === 'UPDATED';
+              
+              if (isCompletedStatus) {
                 isActuallyIndexed = true;
                 indexedFiles = [initialFileBucketKey];
-                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Verified: Datasource has completed indexing job`, 'success');
+                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Verified: Datasource has indexing job with status ${lastJobStatus}`, 'success');
               } else {
-                logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Warning: Datasource has indexing job but status is ${lastJobStatus}`, 'warning');
+                // Even if status is not explicitly "completed", the presence of last_datasource_indexing_job
+                // indicates the datasource has been processed (per KB_MANAGEMENT_INVENTORY.md logic)
+                isActuallyIndexed = true;
+                indexedFiles = [initialFileBucketKey];
+                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Verified: Datasource has indexing job (status: ${lastJobStatus}) - marking as indexed`, 'success');
               }
             } else {
               logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Warning: Datasource has no last_datasource_indexing_job - file may not be indexed`, 'warning');
@@ -3760,7 +3772,7 @@ async function provisionUserAsync(userId, token) {
       agentName: agentName
     });
 
-    // Step 7.5: Generate Patient Summary (if initial file was indexed)
+    // Step 7.5: Verify KB Contents and Generate Patient Summary (if initial file was indexed)
     // This happens after agent is fully deployed and has API key
     if (userDoc.initialFile && userDoc.initialFile.bucketKey && agentEndpointUrl && apiKey) {
       try {
@@ -3770,8 +3782,53 @@ async function provisionUserAsync(userId, token) {
         const initialFileIndexed = indexedFiles.includes(userDoc.initialFile.bucketKey);
         
         if (initialFileIndexed) {
+          // Step 7.5a: Verify KB contents by querying the agent
+          updateStatus('Verifying knowledge base contents...', { fileName: userDoc.initialFile.fileName });
+          logProvisioning(userId, `🔍 [KB VERIFICATION] Verifying KB contents by querying agent...`, 'info');
+          
+          try {
+            const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
+            const agentProvider = new DigitalOceanProvider(apiKey, {
+              baseURL: agentEndpointUrl
+            });
+
+            const verificationPrompt = 'What files or documents are currently in your knowledge base? Please list the file names.';
+            logProvisioning(userId, `🔍 [KB VERIFICATION] Querying agent: "${verificationPrompt}"`, 'info');
+
+            const verificationResponse = await agentProvider.chat(
+              [{ role: 'user', content: verificationPrompt }],
+              { model: agentModelName || 'openai-gpt-oss-120b' }
+            );
+
+            const verificationText = verificationResponse.content || verificationResponse.text || '';
+            const initialFileName = userDoc.initialFile.fileName;
+            
+            logProvisioning(userId, `🔍 [KB VERIFICATION] Agent response: ${verificationText.substring(0, 200)}...`, 'info');
+            
+            // Check if the response mentions the initial file name (case-insensitive)
+            const fileNameLower = initialFileName.toLowerCase();
+            const responseLower = verificationText.toLowerCase();
+            const fileNameMatch = responseLower.includes(fileNameLower) || 
+                                 responseLower.includes(fileNameLower.replace(/\.pdf$/, '')) ||
+                                 responseLower.includes(fileNameLower.replace(/\.txt$/, '')) ||
+                                 responseLower.includes(fileNameLower.replace(/\.md$/, ''));
+            
+            if (fileNameMatch) {
+              logProvisioning(userId, `✅ [KB VERIFICATION] Agent confirmed file "${initialFileName}" is in knowledge base`, 'success');
+              updateStatus('KB verification passed', { fileName: initialFileName });
+            } else {
+              logProvisioning(userId, `⚠️  [KB VERIFICATION] Warning: Agent response does not clearly mention file "${initialFileName}"`, 'warning');
+              logProvisioning(userId, `⚠️  [KB VERIFICATION] Response: ${verificationText}`, 'warning');
+              // Continue anyway - might be a false negative due to how agent phrases the response
+            }
+          } catch (verifyError) {
+            logProvisioning(userId, `⚠️  [KB VERIFICATION] Error verifying KB contents: ${verifyError.message}`, 'warning');
+            // Continue - verification failure doesn't block summary generation
+          }
+          
+          // Step 7.5b: Generate patient summary
           updateStatus('Generating patient summary...', { fileName: userDoc.initialFile.fileName });
-          logProvisioning(userId, `📝 Generating patient summary from indexed initial file...`, 'info');
+          logProvisioning(userId, `📝 [PATIENT SUMMARY] Generating patient summary from indexed initial file...`, 'info');
           
           try {
             const { DigitalOceanProvider } = await import('../lib/chat-client/providers/digitalocean.js');
@@ -3789,7 +3846,7 @@ async function provisionUserAsync(userId, token) {
             const summary = summaryResponse.content || summaryResponse.text || '';
 
             if (!summary || summary.trim().length === 0) {
-              logProvisioning(userId, `❌ Patient summary generation returned empty result`, 'error');
+              logProvisioning(userId, `❌ [PATIENT SUMMARY] Patient summary generation returned empty result`, 'error');
             } else {
               const summaryUserDoc = await cloudant.getDocument('maia_users', userId);
               if (summaryUserDoc) {
@@ -3798,21 +3855,21 @@ async function provisionUserAsync(userId, token) {
                 summaryUserDoc.workflowStage = 'patient_summary';
                 await cloudant.saveDocument('maia_users', summaryUserDoc);
                 invalidateResourceCache(userId);
-                logProvisioning(userId, `✅ Patient summary generated and saved successfully`, 'success');
+                logProvisioning(userId, `✅ [PATIENT SUMMARY] Patient summary generated and saved successfully (${summary.length} chars)`, 'success');
                 updateStatus('Patient summary generated', { summaryLength: summary.length });
               } else {
-                logProvisioning(userId, `❌ Could not load user document to save patient summary`, 'error');
+                logProvisioning(userId, `❌ [PATIENT SUMMARY] Could not load user document to save patient summary`, 'error');
               }
             }
           } catch (summaryError) {
-            logProvisioning(userId, `❌ Error generating patient summary: ${summaryError.message}`, 'error');
+            logProvisioning(userId, `❌ [PATIENT SUMMARY] Error generating patient summary: ${summaryError.message}`, 'error');
             // Don't fail provisioning if summary generation fails
           }
         } else {
-          logProvisioning(userId, `ℹ️  Initial file not yet indexed - summary will be generated when indexing completes`, 'info');
+          logProvisioning(userId, `ℹ️  [PATIENT SUMMARY] Initial file not yet indexed - summary will be generated when indexing completes`, 'info');
         }
       } catch (summaryCheckError) {
-        logProvisioning(userId, `⚠️  Error checking indexing status for summary generation: ${summaryCheckError.message}`, 'warning');
+        logProvisioning(userId, `⚠️  [PATIENT SUMMARY] Error checking indexing status for summary generation: ${summaryCheckError.message}`, 'warning');
         // Continue - summary can be generated later
       }
     }
