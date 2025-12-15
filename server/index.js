@@ -2911,7 +2911,7 @@ async function provisionUserAsync(userId, token) {
       throw new Error(`Failed to verify/create bucket folders: ${err.message}`);
     }
 
-    // Step 2: Create KB with empty datasource
+    // Step 2: Create KB - Check for initial file first to determine datasource path
     updateStatus('Creating knowledge base...');
     logProvisioning(userId, `📚 Creating knowledge base: ${kbName}`, 'info');
     
@@ -2922,8 +2922,22 @@ async function provisionUserAsync(userId, token) {
       throw new Error('DO_DATABASE_ID environment variable is required and must be a valid UUID');
     }
     
+    // Check if initial file exists to determine KB creation path
+    const hasInitialFile = userDoc.initialFile && userDoc.initialFile.bucketKey;
+    const initialFileBucketKey = hasInitialFile ? userDoc.initialFile.bucketKey : null;
+    const initialFileName = hasInitialFile ? userDoc.initialFile.fileName : null;
+    
+    if (hasInitialFile) {
+      logProvisioning(userId, `📄 [KB CREATION PATH: WITH INITIAL FILE] Initial file detected: ${initialFileName} (${initialFileBucketKey})`, 'info');
+      logProvisioning(userId, `📄 [KB CREATION PATH: WITH INITIAL FILE] Will create KB with datasource pointing directly to file`, 'info');
+    } else {
+      logProvisioning(userId, `📁 [KB CREATION PATH: NO INITIAL FILE] No initial file - will create KB with temporary datasource for empty folder`, 'info');
+      logProvisioning(userId, `📁 [KB CREATION PATH: NO INITIAL FILE] Temporary datasource will be deleted after KB creation`, 'info');
+    }
+    
     let kbId = null;
     let kbDetails = null;
+    let initialFileDatasourceUuid = null; // Track if datasource was created for initial file
     
     try {
       // Check if KB already exists
@@ -2945,16 +2959,25 @@ async function provisionUserAsync(userId, token) {
           logProvisioning(userId, `✅ KB has ${datasources.length} data source(s)`, 'success');
         }
       } else {
-        // Create new KB with datasource pointing to empty KB folder (will be deleted after creation)
-        // This satisfies the API requirement for a datasource, but we'll delete it immediately
-        const kbFolderPath = `${userId}/${kbName}/`;
+        // Determine itemPath based on whether initial file exists
+        let itemPath;
+        if (hasInitialFile) {
+          // PATH 1: Create KB with datasource pointing to initial file
+          itemPath = initialFileBucketKey;
+          logProvisioning(userId, `📄 [KB CREATION PATH: WITH INITIAL FILE] Creating KB with datasource pointing to file: ${itemPath}`, 'info');
+        } else {
+          // PATH 2: Create KB with temporary datasource pointing to empty folder (will be deleted)
+          itemPath = `${userId}/${kbName}/`;
+          logProvisioning(userId, `📁 [KB CREATION PATH: NO INITIAL FILE] Creating KB with temporary datasource pointing to empty folder: ${itemPath}`, 'info');
+        }
+        
         const kbCreateOptions = {
           name: kbName,
           description: `Knowledge base for ${userId}`,
           projectId: projectId.trim(),
           databaseId: databaseId.trim(),
           bucketName: bucketName,
-          itemPath: kbFolderPath, // Point to KB folder (should be empty)
+          itemPath: itemPath,
           region: process.env.DO_REGION || 'tor1'
         };
         
@@ -2962,7 +2985,7 @@ async function provisionUserAsync(userId, token) {
           kbCreateOptions.embeddingModelId = embeddingModelId;
         }
         
-        console.log(`[KB VERIFY] Creating KB with datasource pointing to: ${kbFolderPath}`);
+        console.log(`[KB VERIFY] Creating KB with datasource pointing to: ${itemPath}`);
         const kbResult = await doClient.kb.create(kbCreateOptions);
         kbId = kbResult.uuid || kbResult.id;
         kbDetails = await doClient.kb.get(kbId);
@@ -2978,114 +3001,133 @@ async function provisionUserAsync(userId, token) {
           item_path: ds.item_path || ds.spaces_data_source?.item_path
         })), null, 2));
         
-        // FIRST: Wait for any active indexing jobs to complete BEFORE deleting datasource
-        // (Datasource cannot be deleted while it's being indexed)
-        // Note: We wait for completion instead of cancelling because:
-        // 1. Cancellation returns 405 (Method Not Allowed) for PENDING/IN_PROGRESS jobs
-        // 2. The KB folder is empty, so indexing should complete quickly (10-30 seconds)
-        console.log(`[KB VERIFY] Checking for active indexing jobs for KB ${kbId}...`);
-        let indexingJobCompleted = false;
-        try {
-          const indexingJobs = await doClient.indexing.listForKB(kbId);
-          console.log(`[KB VERIFY] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
-            uuid: job.uuid || job.id,
-            status: job.status,
-            created_at: job.created_at
-          })), null, 2));
-          
-          // Find active indexing jobs (in progress or pending)
-          const activeJobs = indexingJobs.filter(job => {
-            const status = job.status || '';
-            return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
-                   status === 'INDEX_JOB_STATUS_PENDING' ||
-                   status === 'INDEX_JOB_STATUS_QUEUED';
+        if (hasInitialFile) {
+          // PATH 1: Find and keep the datasource created for the initial file
+          const fileDataSource = datasources.find(ds => {
+            const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
+            return dsPath === initialFileBucketKey;
           });
           
-          if (activeJobs.length > 0) {
-            console.log(`[KB VERIFY] ⚠️  Found ${activeJobs.length} active indexing job(s), waiting for completion (KB folder is empty, should finish quickly)...`);
-            logProvisioning(userId, `⚠️  Found active indexing job(s), waiting for completion before deleting datasource...`, 'warning');
-            
-            // Wait for jobs to complete (poll every 5 seconds, max 2 minutes)
-            const maxWaitTime = 120000; // 2 minutes
-            const pollInterval = 5000; // 5 seconds
-            const startTime = Date.now();
-            let allJobsCompleted = false;
-            
-            while (!allJobsCompleted && (Date.now() - startTime) < maxWaitTime) {
-              await new Promise(resolve => setTimeout(resolve, pollInterval));
-              
-              const currentJobs = await doClient.indexing.listForKB(kbId);
-              const stillActive = currentJobs.filter(job => {
-                const status = job.status || '';
-                return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
-                       status === 'INDEX_JOB_STATUS_PENDING' ||
-                       status === 'INDEX_JOB_STATUS_QUEUED';
-              });
-              
-              if (stillActive.length === 0) {
-                allJobsCompleted = true;
-                indexingJobCompleted = true;
-                console.log(`[KB VERIFY] ✅ All indexing jobs completed after ${Math.round((Date.now() - startTime) / 1000)}s`);
-                logProvisioning(userId, `✅ All indexing jobs completed`, 'success');
-              } else {
-                console.log(`[KB VERIFY] Still waiting for ${stillActive.length} indexing job(s) to complete... (elapsed: ${Math.round((Date.now() - startTime) / 1000)}s)`);
-              }
-            }
-            
-            if (!allJobsCompleted) {
-              console.log(`[KB VERIFY] ⚠️  Indexing jobs did not complete within 2 minutes, proceeding anyway...`);
-              logProvisioning(userId, `⚠️  Indexing jobs did not complete within timeout, proceeding with datasource deletion...`, 'warning');
-            }
+          if (fileDataSource) {
+            initialFileDatasourceUuid = fileDataSource.uuid || fileDataSource.id;
+            logProvisioning(userId, `✅ [KB CREATION PATH: WITH INITIAL FILE] Found datasource for initial file: ${initialFileDatasourceUuid}`, 'success');
+            logProvisioning(userId, `✅ [KB CREATION PATH: WITH INITIAL FILE] Datasource will be kept - no deletion needed`, 'success');
           } else {
-            console.log(`[KB VERIFY] ✅ No active indexing jobs found`);
-            logProvisioning(userId, `✅ Verified no active indexing jobs`, 'success');
-            indexingJobCompleted = true;
-          }
-        } catch (jobCheckError) {
-          console.error(`[KB VERIFY] ❌ Error checking indexing jobs:`, jobCheckError.message);
-          logProvisioning(userId, `⚠️  Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
-        }
-        
-        // NOW: Delete the datasource (after waiting for indexing jobs to complete)
-        const kbFolderDataSource = datasources.find(ds => {
-          const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
-          return dsPath === kbFolderPath || dsPath.startsWith(kbFolderPath);
-        });
-        
-        if (kbFolderDataSource) {
-          const dsUuid = kbFolderDataSource.uuid || kbFolderDataSource.id;
-          console.log(`[KB VERIFY] Deleting datasource ${dsUuid} pointing to ${kbFolderPath}...`);
-          
-          // Retry deletion up to 3 times with delays (in case job just completed)
-          let deleted = false;
-          for (let attempt = 1; attempt <= 3; attempt++) {
-            try {
-              await doClient.kb.deleteDataSource(kbId, dsUuid);
-              console.log(`[KB VERIFY] ✅ Successfully deleted datasource ${dsUuid} (attempt ${attempt})`);
-              logProvisioning(userId, `✅ Deleted temporary datasource from KB`, 'success');
-              deleted = true;
-              break;
-            } catch (deleteError) {
-              const errorMsg = deleteError.message || '';
-              console.error(`[KB VERIFY] ❌ Error deleting datasource (attempt ${attempt}/3):`, errorMsg);
-              
-              // If it's a 400 error and we haven't exhausted retries, wait and retry
-              if (attempt < 3 && (errorMsg.includes('400') || errorMsg.includes('bad_request'))) {
-                console.log(`[KB VERIFY] Waiting 5 seconds before retry...`);
-                await new Promise(resolve => setTimeout(resolve, 5000));
-              } else {
-                logProvisioning(userId, `⚠️  Warning: Could not delete temporary datasource after ${attempt} attempt(s): ${errorMsg}`, 'warning');
-              }
-            }
-          }
-          
-          if (!deleted) {
-            console.error(`[KB VERIFY] ❌ Failed to delete datasource after 3 attempts`);
-            logProvisioning(userId, `❌ Failed to delete temporary datasource after 3 attempts`, 'error');
+            logProvisioning(userId, `⚠️  [KB CREATION PATH: WITH INITIAL FILE] Warning: Could not find datasource for initial file`, 'warning');
           }
         } else {
-          console.log(`[KB VERIFY] ⚠️  Could not find datasource pointing to ${kbFolderPath} to delete`);
-          logProvisioning(userId, `⚠️  Warning: Could not find temporary datasource to delete`, 'warning');
+          // PATH 2: Delete temporary datasource (only if no initial file)
+          const kbFolderPath = `${userId}/${kbName}/`;
+          
+          // FIRST: Wait for any active indexing jobs to complete BEFORE deleting datasource
+          // (Datasource cannot be deleted while it's being indexed)
+          // Note: We wait for completion instead of cancelling because:
+          // 1. Cancellation returns 405 (Method Not Allowed) for PENDING/IN_PROGRESS jobs
+          // 2. The KB folder is empty, so indexing should complete quickly (10-30 seconds)
+          console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] Checking for active indexing jobs for KB ${kbId}...`);
+          let indexingJobCompleted = false;
+          try {
+            const indexingJobs = await doClient.indexing.listForKB(kbId);
+            console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] Found ${indexingJobs.length} indexing job(s):`, JSON.stringify(indexingJobs.map(job => ({
+              uuid: job.uuid || job.id,
+              status: job.status,
+              created_at: job.created_at
+            })), null, 2));
+            
+            // Find active indexing jobs (in progress or pending)
+            const activeJobs = indexingJobs.filter(job => {
+              const status = job.status || '';
+              return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                     status === 'INDEX_JOB_STATUS_PENDING' ||
+                     status === 'INDEX_JOB_STATUS_QUEUED';
+            });
+            
+            if (activeJobs.length > 0) {
+              console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ⚠️  Found ${activeJobs.length} active indexing job(s), waiting for completion (KB folder is empty, should finish quickly)...`);
+              logProvisioning(userId, `⚠️  [KB CREATION PATH: NO INITIAL FILE] Found active indexing job(s), waiting for completion before deleting datasource...`, 'warning');
+              
+              // Wait for jobs to complete (poll every 5 seconds, max 2 minutes)
+              const maxWaitTime = 120000; // 2 minutes
+              const pollInterval = 5000; // 5 seconds
+              const startTime = Date.now();
+              let allJobsCompleted = false;
+              
+              while (!allJobsCompleted && (Date.now() - startTime) < maxWaitTime) {
+                await new Promise(resolve => setTimeout(resolve, pollInterval));
+                
+                const currentJobs = await doClient.indexing.listForKB(kbId);
+                const stillActive = currentJobs.filter(job => {
+                  const status = job.status || '';
+                  return status === 'INDEX_JOB_STATUS_IN_PROGRESS' || 
+                         status === 'INDEX_JOB_STATUS_PENDING' ||
+                         status === 'INDEX_JOB_STATUS_QUEUED';
+                });
+                
+                if (stillActive.length === 0) {
+                  allJobsCompleted = true;
+                  indexingJobCompleted = true;
+                  console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ✅ All indexing jobs completed after ${Math.round((Date.now() - startTime) / 1000)}s`);
+                  logProvisioning(userId, `✅ [KB CREATION PATH: NO INITIAL FILE] All indexing jobs completed`, 'success');
+                } else {
+                  console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] Still waiting for ${stillActive.length} indexing job(s) to complete... (elapsed: ${Math.round((Date.now() - startTime) / 1000)}s)`);
+                }
+              }
+              
+              if (!allJobsCompleted) {
+                console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ⚠️  Indexing jobs did not complete within 2 minutes, proceeding anyway...`);
+                logProvisioning(userId, `⚠️  [KB CREATION PATH: NO INITIAL FILE] Indexing jobs did not complete within timeout, proceeding with datasource deletion...`, 'warning');
+              }
+            } else {
+              console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ✅ No active indexing jobs found`);
+              logProvisioning(userId, `✅ [KB CREATION PATH: NO INITIAL FILE] Verified no active indexing jobs`, 'success');
+              indexingJobCompleted = true;
+            }
+          } catch (jobCheckError) {
+            console.error(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ❌ Error checking indexing jobs:`, jobCheckError.message);
+            logProvisioning(userId, `⚠️  [KB CREATION PATH: NO INITIAL FILE] Warning: Could not verify indexing jobs: ${jobCheckError.message}`, 'warning');
+          }
+          
+          // NOW: Delete the temporary datasource (after waiting for indexing jobs to complete)
+          const kbFolderDataSource = datasources.find(ds => {
+            const dsPath = ds.item_path || ds.spaces_data_source?.item_path || '';
+            return dsPath === kbFolderPath || dsPath.startsWith(kbFolderPath);
+          });
+          
+          if (kbFolderDataSource) {
+            const dsUuid = kbFolderDataSource.uuid || kbFolderDataSource.id;
+            console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] Deleting temporary datasource ${dsUuid} pointing to ${kbFolderPath}...`);
+            
+            // Retry deletion up to 3 times with delays (in case job just completed)
+            let deleted = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                await doClient.kb.deleteDataSource(kbId, dsUuid);
+                console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ✅ Successfully deleted temporary datasource ${dsUuid} (attempt ${attempt})`);
+                logProvisioning(userId, `✅ [KB CREATION PATH: NO INITIAL FILE] Deleted temporary datasource from KB`, 'success');
+                deleted = true;
+                break;
+              } catch (deleteError) {
+                const errorMsg = deleteError.message || '';
+                console.error(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ❌ Error deleting datasource (attempt ${attempt}/3):`, errorMsg);
+                
+                // If it's a 400 error and we haven't exhausted retries, wait and retry
+                if (attempt < 3 && (errorMsg.includes('400') || errorMsg.includes('bad_request'))) {
+                  console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] Waiting 5 seconds before retry...`);
+                  await new Promise(resolve => setTimeout(resolve, 5000));
+                } else {
+                  logProvisioning(userId, `⚠️  [KB CREATION PATH: NO INITIAL FILE] Warning: Could not delete temporary datasource after ${attempt} attempt(s): ${errorMsg}`, 'warning');
+                }
+              }
+            }
+            
+            if (!deleted) {
+              console.error(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ❌ Failed to delete temporary datasource after 3 attempts`);
+              logProvisioning(userId, `❌ [KB CREATION PATH: NO INITIAL FILE] Failed to delete temporary datasource after 3 attempts`, 'error');
+            }
+          } else {
+            console.log(`[KB VERIFY] [KB CREATION PATH: NO INITIAL FILE] ⚠️  Could not find datasource pointing to ${kbFolderPath} to delete`);
+            logProvisioning(userId, `⚠️  [KB CREATION PATH: NO INITIAL FILE] Warning: Could not find temporary datasource to delete`, 'warning');
+          }
         }
       }
       
@@ -3111,7 +3153,7 @@ async function provisionUserAsync(userId, token) {
         const initialFileBucketKey = userDoc.initialFile.bucketKey;
         const initialFileName = userDoc.initialFile.fileName;
         
-        logProvisioning(userId, `📄 Initial file detected: ${initialFileName} (${initialFileBucketKey})`, 'info');
+        logProvisioning(userId, `📄 [INITIAL FILE PROCESSING] Initial file detected: ${initialFileName} (${initialFileBucketKey})`, 'info');
         updateStatus('Processing initial file...', { fileName: initialFileName });
         
         // Verify file exists in S3
@@ -3131,76 +3173,82 @@ async function provisionUserAsync(userId, token) {
             Bucket: bucketName,
             Key: initialFileBucketKey
           }));
-          logProvisioning(userId, `✅ Initial file verified in S3: ${initialFileBucketKey}`, 'success');
+          logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Initial file verified in S3: ${initialFileBucketKey}`, 'success');
         } catch (verifyErr) {
-          logProvisioning(userId, `⚠️  Initial file not found in S3: ${initialFileBucketKey}. Skipping indexing.`, 'warning');
+          logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Initial file not found in S3: ${initialFileBucketKey}. Skipping indexing.`, 'warning');
           // Continue provisioning without indexing
         }
         
-        // Create datasource for initial file
-        updateStatus('Creating data source for initial file...', { fileName: initialFileName });
-        logProvisioning(userId, `📦 Creating datasource for initial file: ${initialFileBucketKey}`, 'info');
+        // Use datasource created during KB creation, or create one if it doesn't exist
+        let datasourceUuid = initialFileDatasourceUuid; // May be null if KB already existed or datasource wasn't found
         
-        let datasourceUuid = null;
-        try {
-          const newDataSource = await doClient.kb.addDataSource(kbId, {
-            bucketName: bucketName,
-            itemPath: initialFileBucketKey,
-            region: process.env.DO_REGION || 'tor1'
-          });
+        if (!datasourceUuid) {
+          // Datasource wasn't created during KB creation (KB already existed or not found) - create it now
+          updateStatus('Creating data source for initial file...', { fileName: initialFileName });
+          logProvisioning(userId, `📦 [INITIAL FILE PROCESSING] Creating datasource for initial file: ${initialFileBucketKey}`, 'info');
           
-          datasourceUuid = newDataSource.uuid || newDataSource.id || newDataSource.knowledge_base_data_source?.uuid;
-          
-          if (!datasourceUuid) {
-            throw new Error('Datasource created but no UUID returned');
-          }
-          
-          logProvisioning(userId, `✅ Datasource created: ${datasourceUuid}`, 'success');
-          
-          // Update user document to store datasource UUID on the file
-          // Find or create file entry in userDoc.files[]
-          if (!userDoc.files) {
-            userDoc.files = [];
-          }
-          
-          let fileIndex = userDoc.files.findIndex(f => f.bucketKey === initialFileBucketKey);
-          if (fileIndex < 0) {
-            // File not in userDoc.files yet - add it
-            userDoc.files.push({
-              bucketKey: initialFileBucketKey,
-              fileName: initialFileName,
-              size: userDoc.initialFile.fileSize || 0,
-              uploadedAt: userDoc.initialFile.uploadedAt || new Date().toISOString(),
-              knowledgeBases: [kbName],
-              kbDataSourceUuid: datasourceUuid
+          try {
+            const newDataSource = await doClient.kb.addDataSource(kbId, {
+              bucketName: bucketName,
+              itemPath: initialFileBucketKey,
+              region: process.env.DO_REGION || 'tor1'
             });
-            fileIndex = userDoc.files.length - 1;
-            logProvisioning(userId, `📝 Added initial file to userDoc.files[]`, 'info');
-          } else {
-            // File exists - update it
-            userDoc.files[fileIndex].kbDataSourceUuid = datasourceUuid;
-            if (!userDoc.files[fileIndex].knowledgeBases) {
-              userDoc.files[fileIndex].knowledgeBases = [];
+            
+            datasourceUuid = newDataSource.uuid || newDataSource.id || newDataSource.knowledge_base_data_source?.uuid;
+            
+            if (!datasourceUuid) {
+              throw new Error('Datasource created but no UUID returned');
             }
-            if (!userDoc.files[fileIndex].knowledgeBases.includes(kbName)) {
-              userDoc.files[fileIndex].knowledgeBases.push(kbName);
-            }
-            logProvisioning(userId, `📝 Updated file entry in userDoc.files[]`, 'info');
+            
+            logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Datasource created: ${datasourceUuid}`, 'success');
+          } catch (dsError) {
+            logProvisioning(userId, `❌ [INITIAL FILE PROCESSING] Failed to create datasource: ${dsError.message}`, 'error');
+            throw new Error(`Failed to create datasource for initial file: ${dsError.message}`);
           }
+        } else {
+          logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Using datasource created during KB creation: ${datasourceUuid}`, 'success');
+          logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] No need to create new datasource - already exists from KB creation`, 'info');
+        }
           
-          // Save file updates
-          await updateUserDoc({
-            files: userDoc.files
-          });
-          
-        } catch (dsError) {
-          logProvisioning(userId, `❌ Failed to create datasource: ${dsError.message}`, 'error');
-          throw new Error(`Failed to create datasource for initial file: ${dsError.message}`);
+        // Update user document to store datasource UUID on the file
+        // Find or create file entry in userDoc.files[]
+        if (!userDoc.files) {
+          userDoc.files = [];
         }
         
-        // Start indexing job
+        let fileIndex = userDoc.files.findIndex(f => f.bucketKey === initialFileBucketKey);
+        if (fileIndex < 0) {
+          // File not in userDoc.files yet - add it
+          userDoc.files.push({
+            bucketKey: initialFileBucketKey,
+            fileName: initialFileName,
+            size: userDoc.initialFile.fileSize || 0,
+            uploadedAt: userDoc.initialFile.uploadedAt || new Date().toISOString(),
+            knowledgeBases: [kbName],
+            kbDataSourceUuid: datasourceUuid
+          });
+          fileIndex = userDoc.files.length - 1;
+          logProvisioning(userId, `📝 [INITIAL FILE PROCESSING] Added initial file to userDoc.files[]`, 'info');
+        } else {
+          // File exists - update it
+          userDoc.files[fileIndex].kbDataSourceUuid = datasourceUuid;
+          if (!userDoc.files[fileIndex].knowledgeBases) {
+            userDoc.files[fileIndex].knowledgeBases = [];
+          }
+          if (!userDoc.files[fileIndex].knowledgeBases.includes(kbName)) {
+            userDoc.files[fileIndex].knowledgeBases.push(kbName);
+          }
+          logProvisioning(userId, `📝 [INITIAL FILE PROCESSING] Updated file entry in userDoc.files[]`, 'info');
+        }
+        
+        // Save file updates
+        await updateUserDoc({
+          files: userDoc.files
+        });
+        
+        // Start indexing job (or find existing one if KB creation auto-started it)
         updateStatus('Starting indexing job...', { fileName: initialFileName });
-        logProvisioning(userId, `🚀 Starting indexing job for datasource: ${datasourceUuid}`, 'info');
+        logProvisioning(userId, `🚀 [INITIAL FILE PROCESSING] Starting indexing job for datasource: ${datasourceUuid}`, 'info');
         
         let indexingJobId = null;
         try {
@@ -3211,7 +3259,7 @@ async function provisionUserAsync(userId, token) {
             throw new Error('Indexing job started but no job ID returned');
           }
           
-          logProvisioning(userId, `✅ Indexing job started: ${indexingJobId}`, 'success');
+          logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Indexing job started: ${indexingJobId}`, 'success');
           
           // Store job ID in user document
           await updateUserDoc({
@@ -3223,49 +3271,63 @@ async function provisionUserAsync(userId, token) {
           });
           
         } catch (indexError) {
-          // Check if indexing is already running
+          // Check if indexing is already running (may have been auto-started by KB creation)
           if (indexError.message && indexError.message.includes('already') && indexError.message.includes('running')) {
-            logProvisioning(userId, `ℹ️  Indexing already running, finding active job...`, 'info');
+            logProvisioning(userId, `ℹ️  [INITIAL FILE PROCESSING] Indexing already running, finding active job for datasource ${datasourceUuid}...`, 'info');
             
             try {
               const indexingJobs = await doClient.indexing.listForKB(kbId);
               const jobsArray = Array.isArray(indexingJobs) ? indexingJobs : 
                                 (indexingJobs?.jobs || indexingJobs?.indexing_jobs || indexingJobs?.data || []);
               
+              // Find active job that includes our datasource
               const activeJob = jobsArray.find(job => {
                 const status = job.status || job.job_status || job.state;
-                return status === 'INDEX_JOB_STATUS_PENDING' || 
-                       status === 'INDEX_JOB_STATUS_RUNNING' ||
-                       status === 'INDEX_JOB_STATUS_IN_PROGRESS' ||
-                       status === 'pending' ||
-                       status === 'running' ||
-                       status === 'in_progress';
+                const isActive = status === 'INDEX_JOB_STATUS_PENDING' || 
+                                status === 'INDEX_JOB_STATUS_RUNNING' ||
+                                status === 'INDEX_JOB_STATUS_IN_PROGRESS' ||
+                                status === 'pending' ||
+                                status === 'running' ||
+                                status === 'in_progress';
+                
+                if (!isActive) return false;
+                
+                // Verify this job is for our datasource
+                const dataSourceJobs = job.data_source_jobs || [];
+                const hasOurDataSource = dataSourceJobs.some(dsJob => {
+                  const dsUuid = dsJob.data_source_uuid || dsJob.data_source?.uuid;
+                  return dsUuid === datasourceUuid;
+                });
+                
+                return hasOurDataSource;
               });
               
               if (activeJob) {
                 indexingJobId = activeJob.uuid || activeJob.id || activeJob.indexing_job_id;
-                logProvisioning(userId, `✅ Found active indexing job: ${indexingJobId}`, 'success');
+                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Found active indexing job for our datasource: ${indexingJobId}`, 'success');
                 await updateUserDoc({
                   kbLastIndexingJobId: indexingJobId,
                   kbIndexingStartedAt: new Date().toISOString(),
                   workflowStage: 'indexing'
                 });
               } else {
-                throw new Error('Indexing already running but could not find active job');
+                logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Found active job but it's not for our datasource - starting new job`, 'warning');
+                // Try to start again - might have been a race condition
+                throw indexError;
               }
             } catch (findError) {
-              logProvisioning(userId, `❌ Failed to find active indexing job: ${findError.message}`, 'error');
+              logProvisioning(userId, `❌ [INITIAL FILE PROCESSING] Failed to find active indexing job: ${findError.message}`, 'error');
               throw new Error(`Failed to start or find indexing job: ${findError.message}`);
             }
           } else {
-            logProvisioning(userId, `❌ Failed to start indexing job: ${indexError.message}`, 'error');
+            logProvisioning(userId, `❌ [INITIAL FILE PROCESSING] Failed to start indexing job: ${indexError.message}`, 'error');
             throw new Error(`Failed to start indexing job: ${indexError.message}`);
           }
         }
         
         // Wait for indexing to complete (blocking)
         updateStatus('Waiting for indexing to complete...', { fileName: initialFileName, jobId: indexingJobId });
-        logProvisioning(userId, `⏳ Waiting for indexing to complete (job: ${indexingJobId})...`, 'info');
+        logProvisioning(userId, `⏳ [INITIAL FILE PROCESSING] Waiting for indexing to complete (job: ${indexingJobId}, datasource: ${datasourceUuid})...`, 'info');
         
         const indexingStartTime = Date.now();
         const maxIndexingWaitMs = 30 * 60 * 1000; // 30 minutes max
@@ -3281,46 +3343,55 @@ async function provisionUserAsync(userId, token) {
             const jobsArray = Array.isArray(indexingJobs) ? indexingJobs : 
                               (indexingJobs?.jobs || indexingJobs?.indexing_jobs || indexingJobs?.data || []);
             
+            // Find job by ID and verify it's for our datasource
             const currentJob = jobsArray.find(j => {
               const currentJobId = j.uuid || j.id || j.indexing_job_id;
-              return currentJobId === indexingJobId;
+              if (currentJobId !== indexingJobId) return false;
+              
+              // Verify this job includes our datasource
+              const dataSourceJobs = j.data_source_jobs || [];
+              return dataSourceJobs.some(dsJob => {
+                const dsUuid = dsJob.data_source_uuid || dsJob.data_source?.uuid;
+                return dsUuid === datasourceUuid;
+              });
             });
             
             if (currentJob) {
               const jobStatus = currentJob.status || currentJob.job_status || currentJob.state;
               const elapsedSeconds = Math.round((Date.now() - indexingStartTime) / 1000);
               
-              logProvisioning(userId, `📊 Indexing status: ${jobStatus} (elapsed: ${elapsedSeconds}s)`, 'info');
+              logProvisioning(userId, `📊 [INITIAL FILE PROCESSING] Indexing status: ${jobStatus} (elapsed: ${elapsedSeconds}s)`, 'info');
               
               if (jobStatus === 'INDEX_JOB_STATUS_COMPLETED' || jobStatus === 'completed') {
                 indexingCompleted = true;
                 indexingJobResult = currentJob;
                 const indexingDurationSeconds = elapsedSeconds;
-                logProvisioning(userId, `✅ Indexing completed successfully in ${indexingDurationSeconds}s`, 'success');
+                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Indexing completed successfully in ${indexingDurationSeconds}s`, 'success');
                 break;
               } else if (jobStatus === 'INDEX_JOB_STATUS_FAILED' || jobStatus === 'failed') {
-                logProvisioning(userId, `❌ Indexing job failed`, 'error');
+                logProvisioning(userId, `❌ [INITIAL FILE PROCESSING] Indexing job failed`, 'error');
                 throw new Error('Indexing job failed');
               }
             } else {
-              logProvisioning(userId, `⚠️  Indexing job ${indexingJobId} not found in job list`, 'warning');
+              logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Indexing job ${indexingJobId} not found in job list or not for our datasource`, 'warning');
             }
           } catch (pollError) {
-            logProvisioning(userId, `⚠️  Error polling indexing status: ${pollError.message}`, 'warning');
+            logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Error polling indexing status: ${pollError.message}`, 'warning');
           }
         }
         
         if (!indexingCompleted) {
-          logProvisioning(userId, `⚠️  Indexing did not complete within timeout. Continuing provisioning.`, 'warning');
+          logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Indexing did not complete within timeout. Continuing provisioning.`, 'warning');
           // Continue provisioning - background polling will catch completion later
         } else {
-          // Indexing completed - update user document
+          // Indexing completed - verify and update user document
           const indexingDurationSeconds = Math.round((Date.now() - indexingStartTime) / 1000);
           const indexedFileCount = indexingJobResult?.data_source_jobs?.[0]?.indexed_file_count || 1;
           const indexedTokens = String(indexingJobResult?.tokens || indexingJobResult?.total_tokens || 0);
           
-          // Get indexed files from datasource status
-          let indexedFiles = [initialFileBucketKey];
+          // Verify indexing by checking datasource status (source of truth)
+          let indexedFiles = [];
+          let isActuallyIndexed = false;
           try {
             const dataSources = await doClient.kb.listDataSources(kbId);
             const fileDataSource = dataSources.find(ds => {
@@ -3329,35 +3400,48 @@ async function provisionUserAsync(userId, token) {
             });
             
             if (fileDataSource?.last_datasource_indexing_job) {
-              // File is indexed
-              indexedFiles = [initialFileBucketKey];
+              const lastJobStatus = fileDataSource.last_datasource_indexing_job.status;
+              if (lastJobStatus === 'INDEX_JOB_STATUS_COMPLETED' || lastJobStatus === 'completed') {
+                isActuallyIndexed = true;
+                indexedFiles = [initialFileBucketKey];
+                logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Verified: Datasource has completed indexing job`, 'success');
+              } else {
+                logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Warning: Datasource has indexing job but status is ${lastJobStatus}`, 'warning');
+              }
+            } else {
+              logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Warning: Datasource has no last_datasource_indexing_job - file may not be indexed`, 'warning');
             }
           } catch (dsListError) {
-            // Use default
+            logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Error verifying datasource status: ${dsListError.message}`, 'warning');
           }
           
-          await updateUserDoc({
-            kbIndexedFiles: indexedFiles,
-            kbPendingFiles: undefined,
-            kbIndexingNeeded: false,
-            kbLastIndexedAt: new Date().toISOString(),
-            kbLastIndexingJobId: indexingJobId,
-            kbIndexingDurationSeconds: indexingDurationSeconds,
-            kbLastIndexingTokens: indexedTokens,
-            workflowStage: 'files_archived'
-          });
-          
-          logProvisioning(userId, `✅ Indexing metadata saved: ${indexedFileCount} file(s), ${indexedTokens} tokens, ${indexingDurationSeconds}s`, 'success');
-          updateStatus('Indexing complete', { 
-            files: indexedFileCount, 
-            tokens: indexedTokens, 
-            duration: `${Math.floor(indexingDurationSeconds / 60)}m ${indexingDurationSeconds % 60}s`
-          });
-          
-          // Generate patient summary (blocking)
-          // Note: We can't generate summary yet because agent doesn't exist
-          // Summary will be generated after agent is created and deployed
-          logProvisioning(userId, `📝 Patient summary will be generated after agent deployment`, 'info');
+          if (isActuallyIndexed) {
+            await updateUserDoc({
+              kbIndexedFiles: indexedFiles,
+              kbPendingFiles: undefined,
+              kbIndexingNeeded: false,
+              kbLastIndexedAt: new Date().toISOString(),
+              kbLastIndexingJobId: indexingJobId,
+              kbIndexingDurationSeconds: indexingDurationSeconds,
+              kbLastIndexingTokens: indexedTokens,
+              workflowStage: 'files_archived'
+            });
+            
+            logProvisioning(userId, `✅ [INITIAL FILE PROCESSING] Indexing metadata saved: ${indexedFileCount} file(s), ${indexedTokens} tokens, ${indexingDurationSeconds}s`, 'success');
+            updateStatus('Indexing complete', { 
+              files: indexedFileCount, 
+              tokens: indexedTokens, 
+              duration: `${Math.floor(indexingDurationSeconds / 60)}m ${indexingDurationSeconds % 60}s`
+            });
+            
+            // Generate patient summary (blocking)
+            // Note: We can't generate summary yet because agent doesn't exist
+            // Summary will be generated after agent is created and deployed
+            logProvisioning(userId, `📝 [INITIAL FILE PROCESSING] Patient summary will be generated after agent deployment`, 'info');
+          } else {
+            logProvisioning(userId, `⚠️  [INITIAL FILE PROCESSING] Indexing job completed but datasource verification failed - not marking as indexed`, 'warning');
+            // Don't update kbIndexedFiles - let background polling handle it
+          }
         }
         
       } catch (initialFileError) {
