@@ -2852,12 +2852,14 @@ async function provisionUserAsync(userId, token) {
       
       if (!foldersExist) {
         // Create placeholder files to make folders visible in dashboard
+        // Use Buffer.from('') instead of empty string to avoid SDK warning about stream length
         // Create root userId folder placeholder (for new imports)
         await s3Client.send(new PutObjectCommand({
           Bucket: bucketName,
           Key: rootPlaceholder,
-          Body: '',
+          Body: Buffer.from(''),
           ContentType: 'text/plain',
+          ContentLength: 0,
           Metadata: {
             createdBy: 'provisioning',
             createdAt: new Date().toISOString()
@@ -2868,8 +2870,9 @@ async function provisionUserAsync(userId, token) {
         await s3Client.send(new PutObjectCommand({
           Bucket: bucketName,
           Key: archivedPlaceholder,
-          Body: '',
+          Body: Buffer.from(''),
           ContentType: 'text/plain',
+          ContentLength: 0,
           Metadata: {
             createdBy: 'provisioning',
             createdAt: new Date().toISOString()
@@ -2880,8 +2883,9 @@ async function provisionUserAsync(userId, token) {
         await s3Client.send(new PutObjectCommand({
           Bucket: bucketName,
           Key: kbPlaceholder,
-          Body: '',
+          Body: Buffer.from(''),
           ContentType: 'text/plain',
+          ContentLength: 0,
           Metadata: {
             createdBy: 'provisioning',
             createdAt: new Date().toISOString()

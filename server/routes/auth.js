@@ -63,11 +63,13 @@ async function createUserBucketFolders(userId, kbName) {
     const kbPlaceholder = `${userId}/${kbName}/.keep`;
     
     // Create root userId folder placeholder (for new imports)
+    // Use Buffer.from('') instead of empty string to avoid SDK warning about stream length
     await s3Client.send(new PutObjectCommand({
       Bucket: bucketName,
       Key: rootPlaceholder,
-      Body: '',
+      Body: Buffer.from(''),
       ContentType: 'text/plain',
+      ContentLength: 0,
       Metadata: {
         createdBy: 'registration',
         createdAt: new Date().toISOString()
@@ -79,8 +81,9 @@ async function createUserBucketFolders(userId, kbName) {
     await s3Client.send(new PutObjectCommand({
       Bucket: bucketName,
       Key: archivedPlaceholder,
-      Body: '',
+      Body: Buffer.from(''),
       ContentType: 'text/plain',
+      ContentLength: 0,
       Metadata: {
         createdBy: 'registration',
         createdAt: new Date().toISOString()
@@ -92,8 +95,9 @@ async function createUserBucketFolders(userId, kbName) {
     await s3Client.send(new PutObjectCommand({
       Bucket: bucketName,
       Key: kbPlaceholder,
-      Body: '',
+      Body: Buffer.from(''),
       ContentType: 'text/plain',
+      ContentLength: 0,
       Metadata: {
         createdBy: 'registration',
         createdAt: new Date().toISOString()
