@@ -68,12 +68,21 @@
               </div>
             </div>
             <div class="col-auto">
-              <q-btn
-                color="primary"
-                icon="download"
-                label="Download Markdown"
-                @click="downloadMarkdown"
-              />
+              <div class="row q-gutter-sm">
+                <q-btn
+                  color="secondary"
+                  icon="cleaning_services"
+                  label="Clean Up Markdown"
+                  @click="cleanupMarkdown"
+                  :loading="isCleaningMarkdown"
+                />
+                <q-btn
+                  color="primary"
+                  icon="download"
+                  label="Download Markdown"
+                  @click="downloadMarkdown"
+                />
+              </div>
             </div>
           </div>
         </q-card-section>
@@ -283,6 +292,7 @@ const isLoadingCategoryItems = ref(false);
 const hasInitialFile = ref(false);
 const markdownContent = ref<string>('');
 const markdownBucketKey = ref<string | null>(null);
+const isCleaningMarkdown = ref(false);
 
 const checkInitialFile = async () => {
   try {
@@ -630,6 +640,61 @@ const processCategory = async (categoryName: string) => {
     }
   } finally {
     processingCategory.value = null;
+  }
+};
+
+const cleanupMarkdown = async () => {
+  isCleaningMarkdown.value = true;
+  try {
+    const response = await fetch('/api/files/lists/cleanup-markdown', {
+      method: 'POST',
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+      throw new Error(errorData.error || 'Failed to cleanup markdown');
+    }
+
+    const result = await response.json();
+    console.log(`✅ Markdown cleaned: ${result.replacementsMade} replacement(s) made`);
+    
+    // Reload the markdown to show cleaned version
+    const markdownResponse = await fetch('/api/files/lists/markdown', {
+      credentials: 'include'
+    });
+    
+    if (markdownResponse.ok) {
+      const markdownResult = await markdownResponse.json();
+      if (markdownResult.hasMarkdown && markdownResult.markdown) {
+        markdownContent.value = markdownResult.markdown;
+        markdownBucketKey.value = markdownResult.markdownBucketKey || null;
+      }
+    }
+    
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        message: `Markdown cleaned: ${result.replacementsMade} replacement(s) made`,
+        type: 'positive',
+        position: 'top',
+        timeout: 3000
+      });
+    }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : 'Failed to cleanup markdown';
+    error.value = errorMessage;
+    console.error('Markdown cleanup error:', err);
+    
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        message: errorMessage,
+        type: 'negative',
+        position: 'top',
+        timeout: 3000
+      });
+    }
+  } finally {
+    isCleaningMarkdown.value = false;
   }
 };
 

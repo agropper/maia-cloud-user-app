@@ -1893,6 +1893,172 @@ export default function setupFileRoutes(app, cloudant, doClient) {
   });
 
   /**
+   * Clean up markdown file - remove "Continued on Page" and "Continued from Page" lines
+   * POST /api/files/lists/cleanup-markdown
+   */
+  app.post('/api/files/lists/cleanup-markdown', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const listsFolder = `${userId}/Lists/`;
+
+      // List all files in Lists folder
+      const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const listCommand = new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: listsFolder
+      });
+
+      const listResult = await s3Client.send(listCommand);
+      
+      // Find the most recent .md file
+      const markdownFiles = (listResult.Contents || [])
+        .filter(obj => obj.Key && obj.Key.endsWith('.md'))
+        .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
+
+      if (markdownFiles.length === 0) {
+        return res.status(404).json({ error: 'No markdown file found in Lists folder' });
+      }
+
+      // Get the most recent markdown file
+      const markdownKey = markdownFiles[0].Key;
+      const { GetObjectCommand, PutObjectCommand } = await import('@aws-sdk/client-s3');
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: markdownKey
+      });
+
+      const response = await s3Client.send(getCommand);
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      let markdown = Buffer.concat(chunks).toString('utf-8');
+
+      // Pattern matching for "Continued on Page nn" and "Continued from Page nn"
+      // These patterns are case-insensitive and may have variations
+      const continuedOnPattern = /^.*[Cc]ontinued\s+on\s+[Pp]age\s+(\d+).*$/;
+      const continuedFromPattern = /^.*[Cc]ontinued\s+from\s+[Pp]age\s+(\d+).*$/;
+
+      let replacementCount = 0;
+      const lines = markdown.split('\n');
+      const cleanedLines = [];
+      let i = 0;
+
+      while (i < lines.length) {
+        const line = lines[i];
+        const trimmedLine = line.trim();
+        
+        // Check if current line is "Continued from Page X"
+        const fromMatch = trimmedLine.match(continuedFromPattern);
+        
+        if (fromMatch) {
+          const pageNum = fromMatch[1];
+          
+          // Check if previous line was "Continued on Page Y"
+          // Look backwards through cleanedLines to find the last non-empty line
+          let prevLineIndex = cleanedLines.length - 1;
+          while (prevLineIndex >= 0 && cleanedLines[prevLineIndex].trim() === '') {
+            prevLineIndex--;
+          }
+          
+          if (prevLineIndex >= 0) {
+            const prevLine = cleanedLines[prevLineIndex].trim();
+            const onMatch = prevLine.match(continuedOnPattern);
+            
+            if (onMatch) {
+              // Both found - remove the "Continued on Page" line and replace current with "## Page X"
+              cleanedLines.pop(); // Remove the "Continued on Page" line
+              // Also remove any empty lines between them
+              while (cleanedLines.length > 0 && cleanedLines[cleanedLines.length - 1].trim() === '') {
+                cleanedLines.pop();
+              }
+              cleanedLines.push(`## Page ${pageNum}`);
+              replacementCount++;
+              console.log(`🔄 [LISTS] Replaced "Continued on Page" + "Continued from Page ${pageNum}" with "## Page ${pageNum}"`);
+              i++;
+              continue;
+            }
+          }
+          
+          // Only "Continued from Page" found - replace with "## Page X"
+          cleanedLines.push(`## Page ${pageNum}`);
+          replacementCount++;
+          console.log(`🔄 [LISTS] Replaced "Continued from Page ${pageNum}" with "## Page ${pageNum}"`);
+          i++;
+          continue;
+        }
+        
+        // Check if current line is "Continued on Page X"
+        const onMatch = trimmedLine.match(continuedOnPattern);
+        if (onMatch) {
+          // Check if next line is "Continued from Page"
+          if (i + 1 < lines.length) {
+            let nextLineIndex = i + 1;
+            // Skip empty lines
+            while (nextLineIndex < lines.length && lines[nextLineIndex].trim() === '') {
+              nextLineIndex++;
+            }
+            
+            if (nextLineIndex < lines.length) {
+              const nextLine = lines[nextLineIndex].trim();
+              const nextFromMatch = nextLine.match(continuedFromPattern);
+              
+              if (nextFromMatch) {
+                // Both found - skip current line, will be handled in next iteration
+                i++;
+                continue;
+              }
+            }
+          }
+          
+          // Standalone "Continued on Page" - just remove it
+          replacementCount++;
+          console.log(`🔄 [LISTS] Removed standalone "Continued on Page" line`);
+          i++;
+          continue;
+        }
+        
+        // Regular line - keep it
+        cleanedLines.push(line);
+        i++;
+      }
+
+      const cleanedMarkdown = cleanedLines.join('\n');
+
+      // Save cleaned markdown back
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: markdownKey,
+        Body: cleanedMarkdown,
+        ContentType: 'text/markdown',
+        Metadata: {
+          cleanedAt: new Date().toISOString(),
+          replacementsMade: replacementCount.toString(),
+          userId: userId
+        }
+      }));
+
+      console.log(`🧹 [LISTS] Cleaned markdown file: ${markdownKey}`);
+      console.log(`📊 [LISTS] Made ${replacementCount} replacement(s)`);
+
+      res.json({
+        success: true,
+        replacementsMade: replacementCount,
+        markdownBucketKey: markdownKey
+      });
+    } catch (error) {
+      console.error('❌ Error cleaning up markdown file:', error);
+      res.status(500).json({ error: `Failed to cleanup markdown: ${error.message}` });
+    }
+  });
+
+  /**
    * Get saved processing results from Lists folder
    * GET /api/files/lists/results
    */
