@@ -872,6 +872,7 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   let observationCount = 0;
   
   console.log('🔄 [LISTS] Starting second pass: observation counting');
+  const allCategoryHeadersInSecondPass: string[] = [];
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -885,6 +886,8 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     
     // Check for category header: "### Category Name"
     if (line.startsWith('### ')) {
+      const categoryHeader = line.substring(4).trim();
+      allCategoryHeadersInSecondPass.push(categoryHeader);
       // Save previous category's observation count if we were tracking one
       if (currentCategory && categoryMap.has(currentCategory)) {
         const cat = categoryMap.get(currentCategory)!;
