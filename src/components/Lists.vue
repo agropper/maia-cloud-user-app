@@ -260,7 +260,7 @@
 
 <script setup lang="ts">
 import PdfViewerModal from './PdfViewerModal.vue';
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch, onActivated } from 'vue';
 import { useQuasar } from 'quasar';
 
 const $q = useQuasar();
@@ -274,6 +274,11 @@ const props = defineProps<Props>();
 defineEmits<{
   'back-to-chat': [];
 }>();
+
+// Expose method to reload categories (can be called from parent)
+defineExpose({
+  reloadCategories
+});
 
 interface UserFile {
   fileName: string;
@@ -1292,10 +1297,36 @@ const copyNoteToClipboard = async (note: ClinicalNote) => {
   }
 };
 
+// Reload categories and observations whenever markdown content is available
+const reloadCategories = async () => {
+  if (markdownContent.value) {
+    console.log('🔄 [LISTS] Reloading categories from existing markdown content');
+    extractCategoriesFromMarkdown(markdownContent.value);
+  } else {
+    // If no markdown in memory, fetch it
+    console.log('🔄 [LISTS] Fetching markdown to reload categories');
+    await loadSavedResults();
+  }
+};
+
 onMounted(() => {
   checkInitialFile();
   loadClinicalNotes();
   loadSavedResults(); // Check for saved results first
+});
+
+// Reload categories when component is activated (if using KeepAlive)
+onActivated(() => {
+  console.log('🔄 [LISTS] Component activated - reloading categories');
+  reloadCategories();
+});
+
+// Watch for markdown content changes and reload categories
+watch(markdownContent, (newContent) => {
+  if (newContent) {
+    console.log('🔄 [LISTS] Markdown content changed - reloading categories');
+    extractCategoriesFromMarkdown(newContent);
+  }
 });
 </script>
 

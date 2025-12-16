@@ -409,6 +409,7 @@
           <!-- My Lists Tab -->
           <q-tab-panel name="lists">
             <Lists
+              ref="listsComponentRef"
               :userId="userId"
               @back-to-chat="closeDialog"
             />
@@ -4144,6 +4145,8 @@ watch(isOpen, (newValue) => {
   emit('update:modelValue', newValue);
 });
 
+const listsComponentRef = ref<InstanceType<typeof Lists> | null>(null);
+
 watch(currentTab, (newTab) => {
   if (isOpen.value) {
     if (newTab === 'files') {
@@ -4155,7 +4158,10 @@ watch(currentTab, (newTab) => {
     } else if (newTab === 'summary') {
       loadPatientSummary();
     } else if (newTab === 'lists') {
-      // Lists component handles its own data loading
+      // Reload categories when Lists tab is opened
+      if (listsComponentRef.value && typeof listsComponentRef.value.reloadCategories === 'function') {
+        listsComponentRef.value.reloadCategories();
+      }
     } else if (newTab === 'privacy') {
       loadPrivacyFilter();
     } else if (newTab === 'diary') {
