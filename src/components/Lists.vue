@@ -800,8 +800,8 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   
   // Pattern to match "Date + Place of Service" lines
   // Examples: "Nov 21, 2017   Mass General Brigham", "Jan 5, 2018   Boston Medical Center"
-  // Pattern: Month abbreviation, day, year, followed by whitespace and location
-  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+.+$/;
+  // Pattern: Month abbreviation (3 letters), day (1-2 digits), comma, year (4 digits), whitespace, location
+  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/;
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -826,7 +826,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
       const categoryName = line.substring(4).trim();
       currentCategory = categoryName;
       observationCount = 0;
-      inObservation = false;
       
       // Add category if we haven't seen it before
       if (categoryName && !categoryMap.has(categoryName)) {
@@ -840,17 +839,9 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     }
     
     // If we're in a category, check for "Date + Place of Service" pattern
-    if (currentCategory) {
-      // Check if this line matches the date + location pattern
-      if (dateLocationPattern.test(line)) {
-        // This is a new observation
-        observationCount++;
-        inObservation = true;
-      } else if (inObservation && line !== '') {
-        // Continue counting lines in the current observation until we hit another date+location
-        // (The observation continues until the next date+location line)
-        // We don't need to do anything here, just keep inObservation = true
-      }
+    // Each line matching this pattern is the start of a new observation
+    if (currentCategory && dateLocationPattern.test(line)) {
+      observationCount++;
     }
   }
   
