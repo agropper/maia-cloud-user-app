@@ -762,6 +762,12 @@ const cleanupMarkdown = async () => {
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         // Re-extract categories after cleanup (use original, not marked version)
         extractCategoriesFromMarkdown(markdownResult.markdown);
+        
+        // THIRD PASS: Count [D+P] lines in all categories
+        countDatePlaceInAllCategories(markdownContent.value);
+        
+        // FOURTH PASS: Count observations according to category-specific rules
+        countObservationsByCategory(markdownContent.value);
       }
     }
     
@@ -1340,6 +1346,7 @@ const countDatePlaceInAllCategories = (markdown: string): void => {
 
 // FOURTH PASS: Count observations according to category-specific rules
 const countObservationsByCategory = (markdown: string): void => {
+  console.log('[LISTS] FOURTH PASS: Starting observation count by category');
   const lines = markdown.split('\n');
   let currentCategory: string | null = null;
   const observationCounts: Record<string, number> = {};
@@ -1393,6 +1400,17 @@ const countObservationsByCategory = (markdown: string): void => {
     return obsLines;
   };
   
+  // Helper to map category name to standard name
+  const mapToStandardCategory = (categoryName: string): string => {
+    const lower = categoryName.toLowerCase();
+    for (const standardName of categoryNames) {
+      if (lower.includes(standardName.toLowerCase()) || standardName.toLowerCase().includes(lower)) {
+        return standardName;
+      }
+    }
+    return categoryName; // Return as-is if no match
+  };
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     
@@ -1408,6 +1426,9 @@ const countObservationsByCategory = (markdown: string): void => {
     const categoryNameLower = currentCategory.toLowerCase();
     const lineWithoutPrefix = line.replace(/^\[D\+P\]\s+/, '');
     
+    // Map current category to standard name for counting
+    const standardCategoryName = mapToStandardCategory(currentCategory);
+    
     // Allergies: Each line after "## ALLERGY..." counts as one observation
     if (categoryNameLower.includes('allerg')) {
       if (line.startsWith('## ALLERGY') || line.startsWith('## Allergy') || line.startsWith('## allergy')) {
@@ -1419,7 +1440,7 @@ const countObservationsByCategory = (markdown: string): void => {
             break;
           }
           if (nextLine !== '') {
-            observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+            observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
           }
           j++;
         }
@@ -1431,14 +1452,14 @@ const countObservationsByCategory = (markdown: string): void => {
     // Clinical Notes: Each line beginning with "Created: " is line 4 of a 5-line observation
     else if (categoryNameLower.includes('clinical notes')) {
       if (line.startsWith('Created: ')) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
       }
     }
     
     // Clinical Vitals: Date + Place of Service pattern
     else if (categoryNameLower.includes('clinical vitals') || categoryNameLower.includes('vitals')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1467,7 +1488,7 @@ const countObservationsByCategory = (markdown: string): void => {
     // Conditions: Date + Place of Service pattern
     else if (categoryNameLower.includes('condition')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1496,7 +1517,7 @@ const countObservationsByCategory = (markdown: string): void => {
     // Immunizations: Date + Place of Service pattern
     else if (categoryNameLower.includes('immunization')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1525,7 +1546,7 @@ const countObservationsByCategory = (markdown: string): void => {
     // Procedures: Date + Place of Service pattern
     else if (categoryNameLower.includes('procedure')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1554,7 +1575,7 @@ const countObservationsByCategory = (markdown: string): void => {
     // Lab Results: Date + Place of Service, include "## " table header, exclude "## Page" or "### Lab Results" at end
     else if (categoryNameLower.includes('lab results') || categoryNameLower.includes('lab result')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1589,7 +1610,7 @@ const countObservationsByCategory = (markdown: string): void => {
     // Medication Records: Same as Lab Results but exclude "### Medication Records"
     else if (categoryNameLower.includes('medication')) {
       if (dateLocationPattern.test(lineWithoutPrefix)) {
-        observationCounts[currentCategory] = (observationCounts[currentCategory] || 0) + 1;
+        observationCounts[standardCategoryName] = (observationCounts[standardCategoryName] || 0) + 1;
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1623,10 +1644,12 @@ const countObservationsByCategory = (markdown: string): void => {
   }
   
   // Report observation counts for all categories
+  console.log('[LISTS] FOURTH PASS: Completed processing, reporting counts');
   categoryNames.forEach(categoryName => {
     const count = observationCounts[categoryName] || 0;
     console.log(`[LISTS] ${categoryName}: ${count} observations`);
   });
+  console.log('[LISTS] FOURTH PASS: Full observationCounts object:', observationCounts);
 };
 
 // Reload categories and observations whenever markdown content is available
