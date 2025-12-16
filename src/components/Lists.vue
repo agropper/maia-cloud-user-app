@@ -1299,33 +1299,36 @@ const countDatePlaceInAllCategories = (markdown: string): void => {
   let currentCategory: string | null = null;
   const categoryCounts: Record<string, number> = {};
   
+  // Initialize all category counts to 0
+  const categoryNames = ['Allergies', 'Clinical Notes', 'Clinical Vitals', 'Conditions', 
+                         'Immunizations', 'Lab Results', 'Medication Records', 'Procedures'];
+  categoryNames.forEach(name => {
+    categoryCounts[name] = 0;
+  });
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     
     // Check for category header
     if (line.startsWith('### ')) {
-      // Save previous category count if we were tracking one
-      if (currentCategory && categoryCounts[currentCategory] !== undefined) {
-        // Count already saved, continue
-      }
-      
-      // Start tracking new category
+      // Start tracking new category (don't reset count if same category appears again)
       const categoryName = line.substring(4).trim();
       currentCategory = categoryName;
-      categoryCounts[categoryName] = 0;
+      // Only initialize if not already initialized
+      if (categoryCounts[categoryName] === undefined) {
+        categoryCounts[categoryName] = 0;
+      }
       continue;
     }
     
     // If we're in a category section, count [D+P] lines
     if (currentCategory && line.startsWith('[D+P] ')) {
+      // Accumulate count for this category (don't reset)
       categoryCounts[currentCategory] = (categoryCounts[currentCategory] || 0) + 1;
     }
   }
   
   // Report counts for all categories
-  const categoryNames = ['Allergies', 'Clinical Notes', 'Clinical Vitals', 'Conditions', 
-                         'Immunizations', 'Lab Results', 'Medication Records', 'Procedures'];
-  
   categoryNames.forEach(categoryName => {
     const count = categoryCounts[categoryName] || 0;
     console.log(`[LISTS] ${categoryName}: Found ${count} [D+P] lines`);
