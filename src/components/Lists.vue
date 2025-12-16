@@ -413,6 +413,9 @@ const loadSavedResults = async () => {
         // Extract categories from markdown (use original, not marked version)
         extractCategoriesFromMarkdown(markdownResult.markdown);
         
+        // THIRD PASS: Count [D+P] lines in Clinical Notes
+        countDatePlaceInClinicalNotes(markdownContent.value);
+        
         // Also try to load results.json if it exists
         const resultsResponse = await fetch('/api/files/lists/results', {
           credentials: 'include'
@@ -869,7 +872,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
           page: currentPage || 1,
           observationCount: 0
         });
-        console.log(`📋 [LISTS] Added category to map: "${categoryName}"`);
       }
     }
   }
@@ -879,7 +881,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   let currentCategory: string | null = null;
   let observationCount = 0;
   
-  console.log('🔄 [LISTS] Starting second pass: observation counting');
   const allCategoryHeadersInSecondPass: string[] = [];
   
   for (let i = 0; i < lines.length; i++) {
@@ -901,7 +902,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
         const cat = categoryMap.get(currentCategory)!;
         cat.observationCount = observationCount;
         categoryMap.set(currentCategory, cat);
-        console.log(`  💾 [LISTS] Saved ${observationCount} observations for "${currentCategory}"`);
       }
       
       // Start tracking new category
@@ -924,19 +924,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     if (!currentCategory) continue;
     
     const categoryName = currentCategory.toLowerCase();
-    
-    // Debug: Log when we enter observation counting for specific categories
-    if (categoryName === 'conditions' || categoryName === 'immunizations' || 
-        categoryName === 'procedures' || categoryName === 'lab results' || 
-        categoryName === 'medication records') {
-      // Log first few lines to see if we're even processing these categories
-      if (i < 10 || (i % 500 === 0)) {
-        console.log(`🔍 [LISTS] Line ${i} in category "${currentCategory}" (lowercase: "${categoryName}"): "${line.substring(0, 60)}"`);
-        if (dateLocationPattern.test(line)) {
-          console.log(`  ✅ MATCHED date pattern!`);
-        }
-      }
-    }
     
     // Allergies: Each line after "## ALLERGY..." counts as one observation
     if (categoryName.includes('allerg')) {
@@ -970,7 +957,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
-        console.log(`  ✅ [CLINICAL VITALS] Found observation at line ${i}: ${line.substring(0, 50)}`);
         // Find next date+location or EOF
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
@@ -1035,7 +1021,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('immunization')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
-        console.log(`  ✅ [IMMUNIZATIONS] Found observation at line ${i}: ${line.substring(0, 50)}`);
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1065,7 +1050,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('procedure')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
-        console.log(`  ✅ [PROCEDURES] Found observation at line ${i}: ${line.substring(0, 50)}`);
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1095,7 +1079,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('lab results') || categoryName.includes('lab result')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
-        console.log(`  ✅ [LAB RESULTS] Found observation at line ${i}: ${line.substring(0, 50)}`);
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1324,40 +1307,66 @@ const copyNoteToClipboard = async (note: ClinicalNote) => {
 const markDatePlaceLines = (markdown: string): string => {
   const lines = markdown.split('\n');
   const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
-  let markedCount = 0;
   
-  const markedLines = lines.map((line, index) => {
+  const markedLines = lines.map((line) => {
     const trimmed = line.trim();
     if (dateLocationPattern.test(trimmed)) {
-      markedCount++;
-      console.log(`  ✅ [D+P] Line ${index + 1}: ${trimmed.substring(0, 60)}`);
       return `[D+P] ${line}`;
     }
     return line;
   });
   
-  console.log(`📊 [LISTS] Marked ${markedCount} Date + Place of Service lines with [D+P] prefix`);
   return markedLines.join('\n');
+};
+
+// THIRD PASS: Count [D+P] lines in Clinical Notes section
+const countDatePlaceInClinicalNotes = (markdown: string): number => {
+  const lines = markdown.split('\n');
+  let inClinicalNotes = false;
+  let count = 0;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // Check for Clinical Notes category header
+    if (line.startsWith('### ')) {
+      const categoryName = line.substring(4).trim().toLowerCase();
+      inClinicalNotes = categoryName.includes('clinical notes');
+      continue;
+    }
+    
+    // If we're in Clinical Notes section, count [D+P] lines
+    if (inClinicalNotes && line.startsWith('[D+P] ')) {
+      count++;
+    }
+  }
+  
+  console.log(`[LISTS] Clinical Notes: Found ${count} [D+P] lines`);
+  return count;
 };
 
 // Reload categories and observations whenever markdown content is available
 const reloadCategories = async () => {
   if (markdownContent.value) {
-    console.log('🔄 [LISTS] Reloading categories from existing markdown content');
     extractCategoriesFromMarkdown(markdownContent.value);
     
     // Debug: Mark Date + Place lines and update display
     const markedMarkdown = markDatePlaceLines(markdownContent.value);
     markdownContent.value = markedMarkdown;
+    
+    // THIRD PASS: Count [D+P] lines in Clinical Notes
+    countDatePlaceInClinicalNotes(markdownContent.value);
   } else {
     // If no markdown in memory, fetch it
-    console.log('🔄 [LISTS] Fetching markdown to reload categories');
     await loadSavedResults();
     
     // After loading, mark the lines
     if (markdownContent.value) {
       const markedMarkdown = markDatePlaceLines(markdownContent.value);
       markdownContent.value = markedMarkdown;
+      
+      // THIRD PASS: Count [D+P] lines in Clinical Notes
+      countDatePlaceInClinicalNotes(markdownContent.value);
     }
   }
 };
