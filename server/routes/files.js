@@ -1626,6 +1626,273 @@ export default function setupFileRoutes(app, cloudant, doClient) {
   });
 
   /**
+   * Process initial file for Lists extraction
+   * POST /api/files/lists/process-initial-file
+   */
+  app.post('/api/files/lists/process-initial-file', async (req, res) => {
+    console.log(`🚀 [LISTS] POST /api/files/lists/process-initial-file called`);
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        console.log(`❌ [LISTS] Authentication failed - no userId in session`);
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      console.log(`✅ [LISTS] Authenticated user: ${userId}`);
+
+      // Get user document to access initial file
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if (!userDoc.initialFile || !userDoc.initialFile.bucketKey) {
+        return res.status(400).json({ error: 'No initial file found for this user' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const initialFileBucketKey = userDoc.initialFile.bucketKey;
+      const initialFileName = userDoc.initialFile.fileName;
+
+      console.log(`📄 [LISTS] Processing initial file for Lists: ${initialFileName} (${initialFileBucketKey})`);
+      console.log(`📄 [LISTS] Using bucket: ${bucketName}`);
+
+      // Get PDF from S3
+      const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: initialFileBucketKey
+      });
+      
+      let response;
+      try {
+        response = await s3Client.send(getCommand);
+      } catch (err) {
+        console.error(`❌ [LISTS] Failed to get initial file from S3: ${err.message}`);
+        return res.status(404).json({ error: `Initial file not found: ${err.message}` });
+      }
+
+      // Read PDF buffer
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const pdfBuffer = Buffer.concat(chunks);
+
+      // Extract PDF with page boundaries (Step 3.1)
+      const result = await extractPdfWithPages(pdfBuffer);
+      const fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+
+      // Save markdown to Lists folder
+      const listsFolder = `${userId}/Lists/`;
+      const cleanFileName = initialFileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+      const markdownFileName = cleanFileName.replace(/\.pdf$/i, '.md');
+      const markdownBucketKey = `${listsFolder}${markdownFileName}`;
+
+      console.log(`📝 [LISTS] Preparing to save markdown file: ${markdownBucketKey}`);
+      console.log(`📝 [LISTS] Markdown length: ${fullMarkdown.length} characters`);
+
+      // Always delete existing markdown file if it exists (to ensure fresh creation)
+      try {
+        const { HeadObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+        try {
+          await s3Client.send(new HeadObjectCommand({
+            Bucket: bucketName,
+            Key: markdownBucketKey
+          }));
+          // File exists - delete it
+          console.log(`🗑️ [LISTS] Deleting existing markdown file: ${markdownBucketKey}`);
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: bucketName,
+            Key: markdownBucketKey
+          }));
+          console.log(`✅ [LISTS] Deleted existing markdown file`);
+        } catch (headErr) {
+          // File doesn't exist - that's fine, we'll create it
+          console.log(`ℹ️ [LISTS] No existing markdown file found - will create new one`);
+        }
+      } catch (deleteErr) {
+        console.warn('⚠️ [LISTS] Failed to check/delete existing markdown file:', deleteErr);
+        // Continue with processing even if deletion fails
+      }
+
+      // Save markdown file
+      const { PutObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
+      console.log(`💾 [LISTS] Attempting to save markdown to: ${markdownBucketKey} in bucket: ${bucketName}`);
+      
+      try {
+        const putCommand = new PutObjectCommand({
+          Bucket: bucketName,
+          Key: markdownBucketKey,
+          Body: fullMarkdown,
+          ContentType: 'text/markdown',
+          Metadata: {
+            fileName: initialFileName,
+            processedAt: new Date().toISOString(),
+            userId: userId
+          }
+        });
+        
+        const putResult = await s3Client.send(putCommand);
+        console.log(`💾 [LISTS] PutObjectCommand completed. Result:`, putResult ? 'success' : 'no result');
+        console.log(`💾 [LISTS] Saved markdown to ${markdownBucketKey}`);
+        
+        // Verify the file was actually saved
+        console.log(`🔍 [LISTS] Verifying file exists at ${markdownBucketKey}...`);
+        try {
+          const headResult = await s3Client.send(new HeadObjectCommand({
+            Bucket: bucketName,
+            Key: markdownBucketKey
+          }));
+          console.log(`✅ [LISTS] Verified markdown file exists at ${markdownBucketKey}`);
+          console.log(`✅ [LISTS] File size: ${headResult.ContentLength} bytes, LastModified: ${headResult.LastModified}`);
+        } catch (verifyErr) {
+          console.error(`❌ [LISTS] Failed to verify markdown file was saved: ${verifyErr.message}`);
+          console.error(`❌ [LISTS] Verification error details:`, verifyErr);
+          throw new Error(`Markdown file was not saved successfully: ${verifyErr.message}`);
+        }
+      } catch (saveErr) {
+        console.error(`❌ [LISTS] Failed to save markdown file: ${saveErr.message}`);
+        console.error(`❌ [LISTS] Save error details:`, saveErr);
+        throw new Error(`Failed to save markdown file: ${saveErr.message}`);
+      }
+
+      res.json({
+        success: true,
+        fileName: initialFileName,
+        totalPages: result.totalPages,
+        pages: result.pages,
+        fullMarkdown: fullMarkdown,
+        markdownBucketKey: markdownBucketKey
+      });
+    } catch (error) {
+      console.error('❌ Error processing initial file for Lists:', error);
+      res.status(500).json({ error: `Failed to process initial file: ${error.message}` });
+    }
+  });
+
+  /**
+   * Clean up user document references to old lists
+   * POST /api/files/lists/cleanup-user-doc
+   */
+  app.post('/api/files/lists/cleanup-user-doc', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      // Get user document
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      if (!userDoc) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Remove any Lists-related fields if they exist
+      // (Currently there are no Lists-specific fields in userDoc, but this is for future-proofing)
+      let updated = false;
+      
+      // If we add Lists-specific fields later, clean them up here
+      // For now, just log that cleanup was requested
+      console.log(`🧹 [LISTS] Cleanup requested for user ${userId} - Lists folder was deleted`);
+
+      if (updated) {
+        await cloudant.saveDocument('maia_users', userDoc);
+      }
+
+      res.json({
+        success: true,
+        message: 'User document cleaned up'
+      });
+    } catch (error) {
+      console.error('❌ Error cleaning up user document:', error);
+      res.status(500).json({ error: `Failed to cleanup user document: ${error.message}` });
+    }
+  });
+
+  /**
+   * Get markdown file from Lists folder
+   * GET /api/files/lists/markdown
+   */
+  app.get('/api/files/lists/markdown', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const listsFolder = `${userId}/Lists/`;
+
+      // List all files in Lists folder
+      const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+      const listCommand = new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: listsFolder
+      });
+
+      const listResult = await s3Client.send(listCommand);
+      
+      // Log all files found for debugging
+      const allFiles = (listResult.Contents || []).map(obj => ({
+        key: obj.Key,
+        size: obj.Size,
+        lastModified: obj.LastModified
+      }));
+      console.log(`📂 [LISTS] Files in ${listsFolder}:`, JSON.stringify(allFiles, null, 2));
+      
+      // Find the most recent .md file
+      const markdownFiles = (listResult.Contents || [])
+        .filter(obj => obj.Key && obj.Key.endsWith('.md'))
+        .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
+
+      console.log(`📄 [LISTS] Found ${markdownFiles.length} markdown file(s) in Lists folder`);
+
+      if (markdownFiles.length === 0) {
+        console.log(`⚠️ [LISTS] No markdown files found in ${listsFolder}`);
+        return res.json({
+          success: true,
+          hasMarkdown: false,
+          debug: {
+            listsFolder: listsFolder,
+            allFiles: allFiles
+          }
+        });
+      }
+
+      // Get the most recent markdown file
+      const latestMarkdownKey = markdownFiles[0].Key;
+      console.log(`📄 [LISTS] Loading markdown file: ${latestMarkdownKey}`);
+      const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: latestMarkdownKey
+      });
+
+      const response = await s3Client.send(getCommand);
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const markdown = Buffer.concat(chunks).toString('utf-8');
+
+      console.log(`✅ [LISTS] Loaded markdown file: ${latestMarkdownKey} (${markdown.length} chars)`);
+
+      res.json({
+        success: true,
+        hasMarkdown: true,
+        markdown: markdown,
+        markdownBucketKey: latestMarkdownKey
+      });
+    } catch (error) {
+      console.error('❌ Error retrieving markdown file:', error);
+      res.status(500).json({ error: `Failed to retrieve markdown: ${error.message}` });
+    }
+  });
+
+  /**
    * Get saved processing results from Lists folder
    * GET /api/files/lists/results
    */

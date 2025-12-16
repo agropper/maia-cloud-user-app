@@ -8087,6 +8087,14 @@ app.get('/api/user-status', async (req, res) => {
         error: 'USER_NOT_FOUND'
       });
     }
+    
+    // Include initial file info if available
+    const initialFile = userDoc.initialFile ? {
+      fileName: userDoc.initialFile.fileName,
+      bucketKey: userDoc.initialFile.bucketKey,
+      fileSize: userDoc.initialFile.fileSize,
+      uploadedAt: userDoc.initialFile.uploadedAt
+    } : null;
 
     const workflowStage = userDoc.workflowStage || 'unknown';
     const fileCount = userDoc.files ? userDoc.files.length : 0;
@@ -8106,7 +8114,8 @@ app.get('/api/user-status', async (req, res) => {
       fileCount,
       hasKB,
       hasFilesInKB,
-      kbStatus // 'none' | 'not_attached' | 'attached'
+      kbStatus, // 'none' | 'not_attached' | 'attached'
+      initialFile
     });
   } catch (error) {
     console.error('❌ Error fetching user status:', error);

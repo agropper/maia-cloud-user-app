@@ -15,73 +15,23 @@
       </div>
     </div>
 
-    <!-- File Selection (hidden if saved results exist) -->
+    <!-- Update Lists from Initial File -->
     <q-card v-if="!hasSavedResults" class="q-mb-md">
       <q-card-section>
-        <div class="text-h6 q-mb-md">Select PDF File</div>
-        
-        <!-- File Upload -->
-        <div class="q-mb-md">
-          <q-file
-            v-model="selectedFile"
-            label="Upload PDF File"
-            accept=".pdf"
-            outlined
-            clearable
-          >
-            <template v-slot:prepend>
-              <q-icon name="attach_file" />
-            </template>
-          </q-file>
-          <q-btn
-            v-if="selectedFile"
-            color="primary"
-            label="Process PDF"
-            icon="play_arrow"
-            class="q-mt-sm"
-            @click="handleFileSelected(selectedFile)"
-            :loading="isProcessing"
-          />
+        <div class="text-h6 q-mb-md">Extract Lists from Initial File</div>
+        <div class="text-body2 text-grey q-mb-md">
+          Process your initial health record file to extract structured lists (Clinical Notes, Medications, etc.)
         </div>
-
-        <!-- Or Select from User Files -->
-        <div v-if="userFiles.length > 0" class="q-mt-md">
-          <div class="text-subtitle2 q-mb-sm">Or select from your files:</div>
-          <div class="row q-col-gutter-sm">
-            <div class="col">
-              <q-select
-                v-model="selectedBucketKey"
-                :options="userFiles"
-                option-label="fileName"
-                option-value="bucketKey"
-                label="Select File"
-                outlined
-                clearable
-                emit-value
-                map-options
-              >
-                <template v-slot:option="scope">
-                  <q-item v-bind="scope.itemProps">
-                    <q-item-section>
-                      <q-item-label>{{ scope.opt.fileName }}</q-item-label>
-                      <q-item-label caption>{{ scope.opt.bucketKey }}</q-item-label>
-                    </q-item-section>
-                  </q-item>
-                </template>
-              </q-select>
-            </div>
-            <div class="col-auto">
-              <q-btn
-                v-if="selectedBucketKey"
-                color="primary"
-                label="Process PDF"
-                icon="play_arrow"
-                @click="handleBucketFileSelected(selectedBucketKey)"
-                :loading="isProcessing"
-                :disable="!selectedBucketKey"
-              />
-            </div>
-          </div>
+        <q-btn
+          color="primary"
+          label="Create Lists from Initial File"
+          icon="create"
+          @click="processInitialFile"
+          :loading="isProcessing"
+          :disable="!hasInitialFile"
+        />
+        <div v-if="!hasInitialFile" class="text-caption text-grey q-mt-sm">
+          No initial file found. Please upload a file during registration.
         </div>
       </q-card-section>
     </q-card>
@@ -102,36 +52,42 @@
     </q-banner>
 
     <!-- Results -->
-    <div v-if="pdfData && !isProcessing">
+    <div v-if="(pdfData || markdownContent) && !isProcessing">
       <!-- PDF Info -->
-      <q-card class="q-mb-md">
+      <q-card v-if="pdfData" class="q-mb-md">
         <q-card-section>
           <div class="row items-center">
             <div class="col">
-              <div class="text-h6">PDF Information</div>
+              <div class="text-h6">Markdown File</div>
               <div class="q-mt-sm">
-                <div><strong>Total Pages:</strong> {{ pdfData.totalPages }}</div>
+                <div v-if="pdfData.totalPages"><strong>Total Pages:</strong> {{ pdfData.totalPages }}</div>
                 <div v-if="selectedFileName"><strong>File:</strong> {{ selectedFileName }}</div>
+                <div v-if="markdownBucketKey" class="text-caption text-grey q-mt-xs">
+                  <q-icon name="folder" size="xs" /> Location: <code>{{ markdownBucketKey }}</code>
+                </div>
               </div>
             </div>
             <div class="col-auto">
-              <div class="row q-gutter-sm">
-                <q-btn
-                  v-if="hasSavedResults"
-                  color="secondary"
-                  icon="refresh"
-                  label="Re-process PDF"
-                  @click="reprocessPdf"
-                  :loading="isProcessing"
-                />
-                <q-btn
-                  color="primary"
-                  icon="download"
-                  label="Download Markdown"
-                  @click="downloadMarkdown"
-                />
-              </div>
+              <q-btn
+                color="primary"
+                icon="download"
+                label="Download Markdown"
+                @click="downloadMarkdown"
+              />
             </div>
+          </div>
+        </q-card-section>
+      </q-card>
+
+      <!-- Markdown Display -->
+      <q-card v-if="markdownContent" class="q-mb-md">
+        <q-card-section>
+          <div class="text-h6 q-mb-md">Markdown Content</div>
+          <div v-if="markdownBucketKey" class="text-caption text-grey q-mb-sm">
+            <q-icon name="folder" size="xs" /> Saved to: <code>{{ markdownBucketKey }}</code>
+          </div>
+          <div class="markdown-preview q-pa-md" style="background: #f5f5f5; border-radius: 4px; max-height: 600px; overflow-y: auto;">
+            <pre style="white-space: pre-wrap; font-family: monospace; font-size: 12px; margin: 0;">{{ markdownContent }}</pre>
           </div>
         </q-card-section>
       </q-card>
@@ -308,10 +264,7 @@ interface PdfData {
   categoryError?: string;
 }
 
-const selectedFile = ref<File | null>(null);
-const selectedBucketKey = ref<string | null>(null);
 const selectedFileName = ref<string>('');
-const userFiles = ref<UserFile[]>([]);
 const isProcessing = ref(false);
 const error = ref<string>('');
 const pdfData = ref<PdfData | null>(null);
@@ -327,88 +280,104 @@ const categoryProcessingStatus = ref<Record<string, { total: number; indexed: nu
 const currentCategoryDisplay = ref<string | null>(null);
 const categoryItems = ref<any[]>([]);
 const isLoadingCategoryItems = ref(false);
+const hasInitialFile = ref(false);
+const markdownContent = ref<string>('');
+const markdownBucketKey = ref<string | null>(null);
 
-const loadUserFiles = async () => {
+const checkInitialFile = async () => {
   try {
-    const response = await fetch(`/api/user-files?userId=${encodeURIComponent(props.userId)}`, {
+    const response = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
       credentials: 'include'
     });
     
     if (response.ok) {
       const result = await response.json();
-      const pdfFiles = (result.files || [])
-        .filter((f: any) => {
-          const fileName = f.fileName?.toLowerCase() || '';
-          const fileType = f.fileType?.toLowerCase();
-          return fileType === 'pdf' || fileName.endsWith('.pdf');
-        })
-        .map((f: any) => ({
-          fileName: f.fileName,
-          bucketKey: f.bucketKey,
-          fileType: f.fileType
-        }));
-      
-      userFiles.value = pdfFiles;
+      hasInitialFile.value = !!(result.initialFile && result.initialFile.bucketKey);
     }
   } catch (err) {
-    console.error('Error loading user files:', err);
+    console.error('Error checking initial file:', err);
   }
 };
 
 const loadSavedResults = async () => {
   try {
-    const response = await fetch('/api/files/lists/results', {
+    // Check if Lists folder exists and has files
+    const markdownResponse = await fetch('/api/files/lists/markdown', {
       credentials: 'include'
     });
     
-    if (response.ok) {
-      const result = await response.json();
-      if (result.hasResults && result.results) {
+    if (markdownResponse.ok) {
+      const markdownResult = await markdownResponse.json();
+      
+      // If Lists folder doesn't exist or is empty, reset state
+      if (!markdownResult.hasMarkdown) {
+        console.log('[LISTS] No markdown file found - resetting state');
+        hasSavedResults.value = false;
+        pdfData.value = null;
+        markdownContent.value = '';
+        markdownBucketKey.value = null;
+        savedPdfBucketKey.value = null;
+        savedResultsBucketKey.value = null;
+        selectedFileName.value = '';
+        categories.value = [];
+        categoryProcessingStatus.value = {};
+        currentCategoryDisplay.value = null;
+        categoryItems.value = [];
+        
+        // Clean up user document references to old lists
+        try {
+          await fetch('/api/files/lists/cleanup-user-doc', {
+            method: 'POST',
+            credentials: 'include'
+          });
+        } catch (cleanupErr) {
+          console.warn('Failed to cleanup user document:', cleanupErr);
+        }
+        return;
+      }
+      
+      // Markdown file exists - load it
+      if (markdownResult.markdown) {
+        markdownContent.value = markdownResult.markdown;
+        markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         hasSavedResults.value = true;
-        savedPdfBucketKey.value = result.pdfBucketKey;
         
-        // Load the saved processing results
-        pdfData.value = {
-          totalPages: result.results.totalPages,
-          pages: result.results.pages,
-          categories: result.results.categories || [],
-          fullMarkdown: result.results.fullMarkdown,
-          categoryError: result.results.categoryError
-        };
-        categories.value = result.results.categories || [];
-        selectedFileName.value = result.results.fileName || '';
-        savedResultsBucketKey.value = result.resultsBucketKey;
+        // Also try to load results.json if it exists
+        const resultsResponse = await fetch('/api/files/lists/results', {
+          credentials: 'include'
+        });
         
-        if (result.results.pages && result.results.pages.length > 0) {
-          activePageTab.value = result.results.pages[0].page;
+        if (resultsResponse.ok) {
+          const resultsResult = await resultsResponse.json();
+          if (resultsResult.hasResults && resultsResult.results) {
+            pdfData.value = {
+              totalPages: resultsResult.results.totalPages,
+              pages: resultsResult.results.pages,
+              categories: resultsResult.results.categories || [],
+              fullMarkdown: resultsResult.results.fullMarkdown,
+              categoryError: resultsResult.results.categoryError
+            };
+            categories.value = resultsResult.results.categories || [];
+            selectedFileName.value = resultsResult.results.fileName || '';
+            savedResultsBucketKey.value = resultsResult.resultsBucketKey;
+            
+            if (resultsResult.results.pages && resultsResult.results.pages.length > 0) {
+              activePageTab.value = resultsResult.results.pages[0].page;
+            }
+          }
         }
       }
     }
   } catch (err) {
     console.error('Error loading saved results:', err);
+    // On error, reset state to allow fresh start
+    hasSavedResults.value = false;
+    pdfData.value = null;
+    markdownContent.value = '';
   }
 };
 
-const reprocessPdf = async () => {
-  // Reset all state to show file selection dialog again
-  hasSavedResults.value = false;
-  pdfData.value = null;
-  categories.value = [];
-  selectedFile.value = null;
-  selectedBucketKey.value = null;
-  savedPdfBucketKey.value = null;
-  savedResultsBucketKey.value = null;
-  selectedFileName.value = '';
-  error.value = '';
-  categoryProcessingStatus.value = {};
-  currentCategoryDisplay.value = null;
-  categoryItems.value = [];
-  
-  // Clear cached lists on backend
-  await clearCachedLists();
-  
-  // File selection dialog will now be visible again
-};
+// reprocessPdf removed - no longer needed with initial file approach
 
 const formatItemDescription = (item: any, categoryName: string): string => {
   if (categoryName.toLowerCase().includes('clinical notes')) {
@@ -508,55 +477,60 @@ const copyItemToClipboard = async (item: any, categoryName: string) => {
   }
 };
 
-const handleFileSelected = async (file: File | null) => {
-  if (!file) {
-    console.warn('No file selected');
-    return;
-  }
-  
-  console.log('Processing uploaded file:', file.name);
-  selectedFileName.value = file.name;
-  selectedBucketKey.value = null;
-  await processPdfFile(file);
-};
+const processInitialFile = async () => {
+  isProcessing.value = true;
+  error.value = '';
+  pdfData.value = null;
+  categories.value = [];
+  markdownContent.value = '';
 
-const handleBucketFileSelected = async (bucketKey: string | null) => {
-  if (!bucketKey) {
-    console.warn('No bucket key selected');
-    return;
-  }
-  
-  // Check if file is in Lists folder - if so, we can process it directly
-  // Otherwise, try to find it in userFiles
-  const isListsFile = bucketKey.includes('/Lists/');
-  
-  if (isListsFile) {
-    // File is in Lists folder - process directly
-    console.log('Processing Lists folder file:', bucketKey);
-    const fileName = bucketKey.split('/').pop() || 'unknown.pdf';
-    selectedFileName.value = fileName;
-    selectedFile.value = null;
+  try {
+    console.log('Processing initial file for Lists extraction');
     
-    // Clear cached lists when re-processing
-    await clearCachedLists();
-    
-    await processPdfFromBucket(bucketKey);
-  } else {
-    // File is in regular user files - find it in userFiles list
-    const file = userFiles.value.find(f => f.bucketKey === bucketKey);
-    if (file) {
-      console.log('Processing bucket file:', file.fileName, bucketKey);
-      selectedFileName.value = file.fileName;
-      selectedFile.value = null;
-      
-      // Clear cached lists when re-processing
-      await clearCachedLists();
-      
-      await processPdfFromBucket(bucketKey);
-    } else {
-      console.error('File not found for bucket key:', bucketKey);
-      error.value = 'Selected file not found';
+    const response = await fetch('/api/files/lists/process-initial-file', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include'
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+      throw new Error(errorData.error || 'Failed to process initial file');
     }
+
+    const data = await response.json();
+    console.log('Initial file processing successful:', {
+      totalPages: data.totalPages,
+      pagesCount: data.pages?.length,
+      markdownSaved: !!data.markdownBucketKey
+    });
+    
+    pdfData.value = {
+      totalPages: data.totalPages,
+      pages: data.pages || [],
+      categories: [],
+      fullMarkdown: data.fullMarkdown || ''
+    };
+    markdownContent.value = data.fullMarkdown || '';
+    markdownBucketKey.value = data.markdownBucketKey || null;
+    selectedFileName.value = data.fileName || 'Initial File';
+    hasSavedResults.value = true;
+    
+    if (data.markdownBucketKey) {
+      savedPdfBucketKey.value = data.markdownBucketKey;
+    }
+    
+    if (data.pages && data.pages.length > 0) {
+      activePageTab.value = data.pages[0].page;
+    }
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : 'Failed to process initial file';
+    error.value = errorMessage;
+    console.error('Initial file processing error:', err);
+  } finally {
+    isProcessing.value = false;
   }
 };
 
@@ -584,111 +558,7 @@ const clearCachedLists = async () => {
   }
 };
 
-const processPdfFile = async (file: File) => {
-  isProcessing.value = true;
-  error.value = '';
-  pdfData.value = null;
-  categories.value = [];
-
-  try {
-    console.log('Starting PDF processing for file:', file.name, 'Size:', file.size);
-    const formData = new FormData();
-    formData.append('pdfFile', file);
-
-    console.log('Sending request to /api/files/pdf-to-markdown');
-    const response = await fetch('/api/files/pdf-to-markdown?extractCategories=true', {
-      method: 'POST',
-      body: formData,
-      credentials: 'include'
-    });
-
-    console.log('Response status:', response.status, response.statusText);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
-      throw new Error(errorData.error || 'Failed to process PDF');
-    }
-
-    const data = await response.json();
-    console.log('PDF processing successful:', {
-      totalPages: data.totalPages,
-      pagesCount: data.pages?.length,
-      categoriesCount: data.categories?.length
-    });
-    
-    pdfData.value = data;
-    categories.value = data.categories || [];
-    hasSavedResults.value = true; // Mark that we now have saved results
-    if (data.savedPdfBucketKey) {
-      savedPdfBucketKey.value = data.savedPdfBucketKey;
-    }
-    if (data.savedResultsBucketKey) {
-      savedResultsBucketKey.value = data.savedResultsBucketKey;
-    }
-    
-    if (data.pages && data.pages.length > 0) {
-      activePageTab.value = data.pages[0].page;
-    }
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : 'Failed to process PDF';
-    error.value = errorMessage;
-    console.error('PDF processing error:', err);
-  } finally {
-    isProcessing.value = false;
-  }
-};
-
-const processPdfFromBucket = async (bucketKey: string) => {
-  isProcessing.value = true;
-  error.value = '';
-  pdfData.value = null;
-  categories.value = [];
-
-  try {
-    console.log('Starting PDF processing for bucket file:', bucketKey);
-    const url = `/api/files/pdf-to-markdown/${encodeURIComponent(bucketKey)}?extractCategories=true`;
-    console.log('Sending request to:', url);
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      credentials: 'include'
-    });
-
-    console.log('Response status:', response.status, response.statusText);
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
-      throw new Error(errorData.error || 'Failed to process PDF');
-    }
-
-    const data = await response.json();
-    console.log('PDF processing successful:', {
-      totalPages: data.totalPages,
-      pagesCount: data.pages?.length,
-      categoriesCount: data.categories?.length
-    });
-    
-    pdfData.value = data;
-    categories.value = data.categories || [];
-    hasSavedResults.value = true; // Mark that we now have saved results
-    if (data.savedPdfBucketKey) {
-      savedPdfBucketKey.value = data.savedPdfBucketKey;
-    }
-    if (data.savedResultsBucketKey) {
-      savedResultsBucketKey.value = data.savedResultsBucketKey;
-    }
-    
-    if (data.pages && data.pages.length > 0) {
-      activePageTab.value = data.pages[0].page;
-    }
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : 'Failed to process PDF';
-    error.value = errorMessage;
-    console.error('PDF processing error:', err);
-  } finally {
-    isProcessing.value = false;
-  }
-};
+// processPdfFile and processPdfFromBucket removed - replaced with processInitialFile
 
 const processCategory = async (categoryName: string) => {
   if (!savedResultsBucketKey.value) {
@@ -764,14 +634,15 @@ const processCategory = async (categoryName: string) => {
 };
 
 const downloadMarkdown = () => {
-  if (!pdfData.value || !pdfData.value.fullMarkdown) {
+  const contentToDownload = markdownContent.value || (pdfData.value?.fullMarkdown);
+  if (!contentToDownload) {
     error.value = 'No markdown content available to download';
     return;
   }
 
   try {
     // Create a blob with the markdown content
-    const blob = new Blob([pdfData.value.fullMarkdown], { type: 'text/markdown' });
+    const blob = new Blob([contentToDownload], { type: 'text/markdown' });
     
     // Create a download link
     const url = URL.createObjectURL(blob);
@@ -883,7 +754,7 @@ const copyNoteToClipboard = async (note: ClinicalNote) => {
 };
 
 onMounted(() => {
-  loadUserFiles();
+  checkInitialFile();
   loadClinicalNotes();
   loadSavedResults(); // Check for saved results first
 });
