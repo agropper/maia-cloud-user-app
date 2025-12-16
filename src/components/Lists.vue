@@ -1643,13 +1643,32 @@ const countObservationsByCategory = (markdown: string): void => {
     }
   }
   
-  // Report observation counts for all categories
+  // Report observation counts for all categories and update categoriesList
   console.log('[LISTS] FOURTH PASS: Completed processing, reporting counts');
+  console.log('[LISTS] FOURTH PASS: Full observationCounts object:', observationCounts);
+  console.log('[LISTS] FOURTH PASS: Current categoriesList before update:', categoriesList.value);
+  
+  // Update categoriesList with observation counts
+  categoriesList.value = categoriesList.value.map(category => {
+    // Find matching standard category name
+    const standardName = mapToStandardCategory(category.name);
+    const count = observationCounts[standardName] || 0;
+    
+    console.log(`[LISTS] FOURTH PASS: Updating ${category.name} (mapped to ${standardName}) with ${count} observations`);
+    
+    return {
+      ...category,
+      observationCount: count
+    };
+  });
+  
+  console.log('[LISTS] FOURTH PASS: Updated categoriesList:', categoriesList.value);
+  
+  // Also log individual counts
   categoryNames.forEach(categoryName => {
     const count = observationCounts[categoryName] || 0;
     console.log(`[LISTS] ${categoryName}: ${count} observations`);
   });
-  console.log('[LISTS] FOURTH PASS: Full observationCounts object:', observationCounts);
 };
 
 // Reload categories and observations whenever markdown content is available
