@@ -110,6 +110,9 @@
                   >
                     page {{ category.page }}
                   </a>
+                  <span v-if="category.observationCount > 0" class="q-ml-sm">
+                    • {{ category.observationCount }} Observation{{ category.observationCount !== 1 ? 's' : '' }}
+                  </span>
                 </q-item-label>
               </q-item-section>
             </q-item>
@@ -127,33 +130,6 @@
           <div class="markdown-preview q-pa-md" style="background: #f5f5f5; border-radius: 4px; max-height: 600px; overflow-y: auto;">
             <pre style="white-space: pre-wrap; font-family: monospace; font-size: 12px; margin: 0;">{{ markdownContent }}</pre>
           </div>
-        </q-card-section>
-      </q-card>
-      <q-card v-if="categoriesList.length > 0" class="q-mb-md">
-        <q-card-section>
-          <div class="text-h6 q-mb-md">Categories</div>
-          <q-list bordered separator>
-            <q-item 
-              v-for="(category, index) in categoriesList" 
-              :key="index"
-              clickable
-            >
-              <q-item-section>
-                <q-item-label>{{ category.name }}</q-item-label>
-                <q-item-label caption>
-                  starts on 
-                  <a 
-                    href="#" 
-                    @click.prevent="handleCategoryPageClick(category.page)"
-                    class="text-primary"
-                    style="text-decoration: underline; cursor: pointer;"
-                  >
-                    page {{ category.page }}
-                  </a>
-                </q-item-label>
-              </q-item-section>
-            </q-item>
-          </q-list>
         </q-card-section>
       </q-card>
 
@@ -358,7 +334,7 @@ const markdownContent = ref<string>('');
 const markdownBucketKey = ref<string | null>(null);
 const isCleaningMarkdown = ref(false);
 const initialFileInfo = ref<{ bucketKey: string; fileName: string } | null>(null);
-const categoriesList = ref<Array<{ name: string; page: number }>>([]);
+const categoriesList = ref<Array<{ name: string; page: number; observationCount: number }>>([]);
 const showPdfViewer = ref(false);
 const viewingPdfFile = ref<{ bucketKey?: string; name?: string } | null>(null);
 const pdfInitialPage = ref<number | undefined>(undefined);
@@ -808,6 +784,7 @@ const cleanupMarkdown = async () => {
 };
 
 // Extract unique categories from markdown (lines starting with "### ")
+// Also count observations (lines following "Date + Place of Service" pattern)
 const extractCategoriesFromMarkdown = (markdown: string) => {
   if (!markdown) {
     categoriesList.value = [];
@@ -815,9 +792,16 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   }
   
   const lines = markdown.split('\n');
-  const seenCategories = new Set<string>();
-  const categories: Array<{ name: string; page: number }> = [];
+  const categoryMap = new Map<string, { name: string; page: number; observationCount: number }>();
   let currentPage = 0;
+  let currentCategory: string | null = null;
+  let observationCount = 0;
+  let inObservation = false;
+  
+  // Pattern to match "Date + Place of Service" lines
+  // Examples: "Nov 21, 2017   Mass General Brigham", "Jan 5, 2018   Boston Medical Center"
+  // Pattern: Month abbreviation, day, year, followed by whitespace and location
+  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+.+$/;
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -831,21 +815,58 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     
     // Check for category header: "### Category Name"
     if (line.startsWith('### ')) {
-      const categoryName = line.substring(4).trim();
+      // Save previous category's observation count if we were tracking one
+      if (currentCategory && categoryMap.has(currentCategory)) {
+        const cat = categoryMap.get(currentCategory)!;
+        cat.observationCount = observationCount;
+        categoryMap.set(currentCategory, cat);
+      }
       
-      // Only add if we haven't seen this category before
-      if (categoryName && !seenCategories.has(categoryName)) {
-        seenCategories.add(categoryName);
-        categories.push({
+      // Start tracking new category
+      const categoryName = line.substring(4).trim();
+      currentCategory = categoryName;
+      observationCount = 0;
+      inObservation = false;
+      
+      // Add category if we haven't seen it before
+      if (categoryName && !categoryMap.has(categoryName)) {
+        categoryMap.set(categoryName, {
           name: categoryName,
-          page: currentPage || 1 // Default to page 1 if no page found yet
+          page: currentPage || 1, // Default to page 1 if no page found yet
+          observationCount: 0
         });
+      }
+      continue;
+    }
+    
+    // If we're in a category, check for "Date + Place of Service" pattern
+    if (currentCategory) {
+      // Check if this line matches the date + location pattern
+      if (dateLocationPattern.test(line)) {
+        // This is a new observation
+        observationCount++;
+        inObservation = true;
+      } else if (inObservation && line !== '') {
+        // Continue counting lines in the current observation until we hit another date+location
+        // (The observation continues until the next date+location line)
+        // We don't need to do anything here, just keep inObservation = true
       }
     }
   }
   
-  categoriesList.value = categories;
-  console.log(`📋 [LISTS] Extracted ${categories.length} unique categories from markdown`);
+  // Save the last category's observation count
+  if (currentCategory && categoryMap.has(currentCategory)) {
+    const cat = categoryMap.get(currentCategory)!;
+    cat.observationCount = observationCount;
+    categoryMap.set(currentCategory, cat);
+  }
+  
+  // Convert map to array
+  categoriesList.value = Array.from(categoryMap.values());
+  console.log(`📋 [LISTS] Extracted ${categoriesList.value.length} unique categories from markdown`);
+  categoriesList.value.forEach(cat => {
+    console.log(`  - ${cat.name}: ${cat.observationCount} observations`);
+  });
 };
 
 // Handle category page link click
