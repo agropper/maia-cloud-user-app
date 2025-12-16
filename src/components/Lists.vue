@@ -871,6 +871,8 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   let currentCategory: string | null = null;
   let observationCount = 0;
   
+  console.log('🔄 [LISTS] Starting second pass: observation counting');
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     
@@ -888,12 +890,14 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
         const cat = categoryMap.get(currentCategory)!;
         cat.observationCount = observationCount;
         categoryMap.set(currentCategory, cat);
+        console.log(`  💾 [LISTS] Saved ${observationCount} observations for "${currentCategory}"`);
       }
       
       // Start tracking new category
       const categoryName = line.substring(4).trim();
       currentCategory = categoryName;
       observationCount = 0;
+      console.log(`  🏁 [LISTS] Starting observation counting for category: "${categoryName}"`);
       continue;
     }
     
@@ -902,13 +906,16 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     
     const categoryName = currentCategory.toLowerCase();
     
-    // Debug: Log category name matching attempts for categories with 0 observations
+    // Debug: Log when we enter observation counting for specific categories
     if (categoryName === 'conditions' || categoryName === 'immunizations' || 
         categoryName === 'procedures' || categoryName === 'lab results' || 
         categoryName === 'medication records') {
-      // Only log occasionally to avoid spam
-      if (i % 100 === 0) {
-        console.log(`🔍 [LISTS] Processing line ${i} in category "${currentCategory}" (lowercase: "${categoryName}"), checking for date pattern...`);
+      // Log first few lines to see if we're even processing these categories
+      if (i < 10 || (i % 500 === 0)) {
+        console.log(`🔍 [LISTS] Line ${i} in category "${currentCategory}" (lowercase: "${categoryName}"): "${line.substring(0, 60)}"`);
+        if (dateLocationPattern.test(line)) {
+          console.log(`  ✅ MATCHED date pattern!`);
+        }
       }
     }
     
@@ -944,6 +951,7 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
+        console.log(`  ✅ [CLINICAL VITALS] Found observation at line ${i}: ${line.substring(0, 50)}`);
         // Find next date+location or EOF
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
@@ -1001,9 +1009,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
         }
         
         i = endIndex - 1;
-      } else if (i % 50 === 0 && line.length > 0) {
-        // Debug: Log sample lines to see what we're checking
-        console.log(`  🔍 [CONDITIONS] Line ${i} doesn't match pattern: "${line.substring(0, 50)}"`);
       }
     }
     
