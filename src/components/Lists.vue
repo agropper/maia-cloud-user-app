@@ -101,6 +101,35 @@
         </q-card-section>
       </q-card>
 
+      <!-- Categories Section -->
+      <q-card v-if="categoriesList.length > 0" class="q-mb-md">
+        <q-card-section>
+          <div class="text-h6 q-mb-md">Categories</div>
+          <q-list bordered separator>
+            <q-item 
+              v-for="(category, index) in categoriesList" 
+              :key="index"
+              clickable
+            >
+              <q-item-section>
+                <q-item-label>{{ category.name }}</q-item-label>
+                <q-item-label caption>
+                  starts on 
+                  <a 
+                    href="#" 
+                    @click.prevent="handleCategoryPageClick(category.page)"
+                    class="text-primary"
+                    style="text-decoration: underline; cursor: pointer;"
+                  >
+                    page {{ category.page }}
+                  </a>
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-card-section>
+      </q-card>
+
       <!-- Markdown Categories List -->
       <q-card v-if="categories.length > 0 || pdfData?.categoryError" class="q-mb-md">
         <q-card-section>
@@ -217,9 +246,17 @@
       </q-card>
     </div>
   </div>
+
+  <!-- PDF Viewer Modal -->
+  <PdfViewerModal
+    v-model="showPdfViewer"
+    :file="viewingPdfFile"
+    :initial-page="pdfInitialPage"
+  />
 </template>
 
 <script setup lang="ts">
+import PdfViewerModal from './PdfViewerModal.vue';
 import { ref, onMounted } from 'vue';
 import { useQuasar } from 'quasar';
 
@@ -293,6 +330,11 @@ const hasInitialFile = ref(false);
 const markdownContent = ref<string>('');
 const markdownBucketKey = ref<string | null>(null);
 const isCleaningMarkdown = ref(false);
+const initialFileInfo = ref<{ bucketKey: string; fileName: string } | null>(null);
+const categoriesList = ref<Array<{ name: string; page: number }>>([]);
+const showPdfViewer = ref(false);
+const viewingPdfFile = ref<{ bucketKey?: string; name?: string } | null>(null);
+const pdfInitialPage = ref<number | undefined>(undefined);
 
 const checkInitialFile = async () => {
   try {
@@ -303,6 +345,12 @@ const checkInitialFile = async () => {
     if (response.ok) {
       const result = await response.json();
       hasInitialFile.value = !!(result.initialFile && result.initialFile.bucketKey);
+      if (result.initialFile && result.initialFile.bucketKey) {
+        initialFileInfo.value = {
+          bucketKey: result.initialFile.bucketKey,
+          fileName: result.initialFile.fileName || 'Initial File'
+        };
+      }
     }
   } catch (err) {
     console.error('Error checking initial file:', err);
@@ -351,6 +399,9 @@ const loadSavedResults = async () => {
         markdownContent.value = markdownResult.markdown;
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         hasSavedResults.value = true;
+        
+        // Extract categories from markdown
+        extractCategoriesFromMarkdown(markdownResult.markdown);
         
         // Also try to load results.json if it exists
         const resultsResponse = await fetch('/api/files/lists/results', {
@@ -528,6 +579,30 @@ const processInitialFile = async () => {
     selectedFileName.value = data.fileName || 'Initial File';
     hasSavedResults.value = true;
     
+    // Store initial file info if available
+    if (data.fileName) {
+      // Get bucketKey from user-status if not in response
+      if (!initialFileInfo.value) {
+        const statusResponse = await fetch(`/api/user-status?userId=${encodeURIComponent(props.userId)}`, {
+          credentials: 'include'
+        });
+        if (statusResponse.ok) {
+          const statusResult = await statusResponse.json();
+          if (statusResult.initialFile && statusResult.initialFile.bucketKey) {
+            initialFileInfo.value = {
+              bucketKey: statusResult.initialFile.bucketKey,
+              fileName: data.fileName
+            };
+          }
+        }
+      } else {
+        initialFileInfo.value.fileName = data.fileName;
+      }
+    }
+    
+    // Extract categories from markdown
+    extractCategoriesFromMarkdown(data.fullMarkdown || '');
+    
     if (data.markdownBucketKey) {
       savedPdfBucketKey.value = data.markdownBucketKey;
     }
@@ -669,6 +744,8 @@ const cleanupMarkdown = async () => {
       if (markdownResult.hasMarkdown && markdownResult.markdown) {
         markdownContent.value = markdownResult.markdown;
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
+        // Re-extract categories after cleanup
+        extractCategoriesFromMarkdown(markdownResult.markdown);
       }
     }
     
@@ -696,6 +773,62 @@ const cleanupMarkdown = async () => {
   } finally {
     isCleaningMarkdown.value = false;
   }
+};
+
+// Extract unique categories from markdown (lines starting with "### ")
+const extractCategoriesFromMarkdown = (markdown: string) => {
+  if (!markdown) {
+    categoriesList.value = [];
+    return;
+  }
+  
+  const lines = markdown.split('\n');
+  const seenCategories = new Set<string>();
+  const categories: Array<{ name: string; page: number }> = [];
+  let currentPage = 0;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    
+    // Check for page header: "## Page nn"
+    const pageMatch = line.match(/^##\s+Page\s+(\d+)$/);
+    if (pageMatch) {
+      currentPage = parseInt(pageMatch[1], 10);
+      continue;
+    }
+    
+    // Check for category header: "### Category Name"
+    if (line.startsWith('### ')) {
+      const categoryName = line.substring(4).trim();
+      
+      // Only add if we haven't seen this category before
+      if (categoryName && !seenCategories.has(categoryName)) {
+        seenCategories.add(categoryName);
+        categories.push({
+          name: categoryName,
+          page: currentPage || 1 // Default to page 1 if no page found yet
+        });
+      }
+    }
+  }
+  
+  categoriesList.value = categories;
+  console.log(`📋 [LISTS] Extracted ${categories.length} unique categories from markdown`);
+};
+
+// Handle category page link click
+const handleCategoryPageClick = (page: number) => {
+  if (!initialFileInfo.value) {
+    console.warn('No initial file info available for PDF viewing');
+    return;
+  }
+  
+  viewingPdfFile.value = {
+    bucketKey: initialFileInfo.value.bucketKey,
+    name: initialFileInfo.value.fileName
+  };
+  pdfInitialPage.value = page;
+  showPdfViewer.value = true;
 };
 
 const downloadMarkdown = () => {
