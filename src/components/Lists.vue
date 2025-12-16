@@ -919,7 +919,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
           }
           if (nextLine !== '') {
             observationCount++;
-            console.log(`  ✅ [ALLERGIES] Found observation at line ${j}`);
           }
           j++;
         }
@@ -973,7 +972,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     else if (categoryName.includes('condition')) {
       if (dateLocationPattern.test(line)) {
         observationCount++;
-        console.log(`  ✅ [CONDITIONS] Found observation at line ${i}: ${line.substring(0, 50)}`);
         const nextDateLoc = findNextDateLocation(i);
         const endIndex = nextDateLoc > 0 ? nextDateLoc : lines.length;
         
@@ -1138,16 +1136,8 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     categoryMap.set(currentCategory, cat);
   }
   
-  // Debug: Compare categories found in first pass vs second pass
-  console.log(`📋 [LISTS] Categories found in FIRST pass:`, Array.from(categoryMap.keys()).join(', '));
-  console.log(`📋 [LISTS] Category headers found in SECOND pass:`, allCategoryHeadersInSecondPass.join(', '));
-  
   // Convert map to array
   categoriesList.value = Array.from(categoryMap.values());
-  console.log(`📋 [LISTS] Extracted ${categoriesList.value.length} unique categories from markdown`);
-  categoriesList.value.forEach(cat => {
-    console.log(`  - ${cat.name}: ${cat.observationCount} observations`);
-  });
 };
 
 // Handle category page link click
@@ -1195,7 +1185,6 @@ const downloadMarkdown = () => {
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     
-    console.log('Markdown file downloaded:', link.download);
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Failed to download markdown file';
     console.error('Download error:', err);
