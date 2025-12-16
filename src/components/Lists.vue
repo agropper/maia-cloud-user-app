@@ -1108,9 +1108,10 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     categoryMap.set(currentCategory, cat);
   }
   
-  // Convert map to array
+  // Convert map to array - ALL categories should be included regardless of observation count
   categoriesList.value = Array.from(categoryMap.values());
   console.log(`📋 [LISTS] Extracted ${categoriesList.value.length} unique categories from markdown`);
+  console.log(`📋 [LISTS] All categories found:`, categoriesList.value.map(c => c.name).join(', '));
   categoriesList.value.forEach(cat => {
     console.log(`  - ${cat.name}: ${cat.observationCount} observations`);
   });
