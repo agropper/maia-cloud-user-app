@@ -2076,13 +2076,13 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         ContentType: 'text/markdown',
         Metadata: {
           cleanedAt: new Date().toISOString(),
-          replacementsMade: replacementCount.toString(),
+          pagesCleaned: pagesCleaned.toString(),
           userId: userId
         }
       }));
 
       console.log(`🧹 [LISTS] Cleaned markdown file: ${markdownKey}`);
-      console.log(`📊 [LISTS] Cleaned ${pagesCleaned} page(s) by removing continuation markers`);
+      console.log(`📊 [LISTS] Cleaned ${pagesCleaned} page(s) by removing page footers`);
 
       res.json({
         success: true,
