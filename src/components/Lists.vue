@@ -796,7 +796,6 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   let currentPage = 0;
   let currentCategory: string | null = null;
   let observationCount = 0;
-  let inObservation = false;
   
   // Pattern to match "Date + Place of Service" lines
   // Examples: "Nov 21, 2017   Mass General Brigham", "Jan 5, 2018   Boston Medical Center"
