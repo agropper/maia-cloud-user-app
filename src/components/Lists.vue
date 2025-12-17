@@ -1416,17 +1416,22 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
     }
     
     // Clinical Vitals: Count [D+P] lines, collect all lines until next [D+P] line
+    // Only process [D+P] lines within this category's page range
     else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals')) {
+      const startPage = category.page;
+      const startLineIndex = pageBoundaries.get(startPage) ?? 0;
+      const endLineIndex = findNextPageBoundary(startLineIndex);
+      
       let observationsToLog = 10; // First 10 observations
-      for (let i = 0; i < lines.length; i++) {
+      for (let i = startLineIndex; i < endLineIndex; i++) {
         const line = lines[i].trim();
         if (line.startsWith('[D+P] ')) {
           const lineWithoutPrefix = line.substring(6).trim();
           if (dateLocationPattern.test(lineWithoutPrefix)) {
             observationCount++;
-            // Find next [D+P] line or EOF
-            let endIndex = lines.length;
-            for (let j = i + 1; j < lines.length; j++) {
+            // Find next [D+P] line within page range or end of page
+            let endIndex = endLineIndex;
+            for (let j = i + 1; j < endLineIndex; j++) {
               const nextLine = lines[j].trim();
               if (nextLine.startsWith('[D+P] ')) {
                 const nextLineWithoutPrefix = nextLine.substring(6).trim();
