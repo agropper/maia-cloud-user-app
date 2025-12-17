@@ -1364,6 +1364,28 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
   const lines = markedMarkdown.split('\n');
   const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
   
+  // Build page boundary map: page number -> line index
+  const pageBoundaries = new Map<number, number>();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const pageMatch = line.match(/^##\s+Page\s+(\d+)$/);
+    if (pageMatch) {
+      const pageNum = parseInt(pageMatch[1], 10);
+      pageBoundaries.set(pageNum, i);
+    }
+  }
+  
+  // Helper to find next page boundary after a given line index
+  const findNextPageBoundary = (startIndex: number): number => {
+    for (let j = startIndex + 1; j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (line.match(/^##\s+Page\s+\d+$/)) {
+        return j;
+      }
+    }
+    return lines.length; // EOF
+  };
+  
   // Process each category
   categoriesList.value = categoriesList.value.map(category => {
     const categoryName = category.name.toLowerCase();
