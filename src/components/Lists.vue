@@ -416,6 +416,9 @@ const loadSavedResults = async () => {
         // THIRD PASS: Count [D+P] lines in all categories
         countDatePlaceInAllCategories(markdownContent.value);
         
+        // FOURTH PASS: Count observations according to category-specific rules
+        countObservationsByCategory(markdownContent.value);
+        
         // Also try to load results.json if it exists
         const resultsResponse = await fetch('/api/files/lists/results', {
           credentials: 'include'
