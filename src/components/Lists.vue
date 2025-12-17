@@ -1415,9 +1415,60 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       }
     }
     
-    // Clinical Vitals, Conditions, Immunizations, Procedures: Count [D+P] lines
-    else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals') ||
-             categoryName.includes('condition') ||
+    // Clinical Vitals: Count [D+P] lines, collect all lines until next [D+P] line
+    else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals')) {
+      let observationsToLog = 10; // First 10 observations
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('[D+P] ')) {
+          const lineWithoutPrefix = line.substring(6).trim();
+          if (dateLocationPattern.test(lineWithoutPrefix)) {
+            observationCount++;
+            // Find next [D+P] line or EOF
+            let endIndex = lines.length;
+            for (let j = i + 1; j < lines.length; j++) {
+              const nextLine = lines[j].trim();
+              if (nextLine.startsWith('[D+P] ')) {
+                const nextLineWithoutPrefix = nextLine.substring(6).trim();
+                if (dateLocationPattern.test(nextLineWithoutPrefix)) {
+                  endIndex = j;
+                  break;
+                }
+              }
+            }
+            // Collect observation lines from [D+P] line until next [D+P] line
+            const obsLines: string[] = [line];
+            for (let j = i + 1; j < endIndex; j++) {
+              obsLines.push(lines[j].trim());
+            }
+            // Clean end: remove lines starting with "## " or "### "
+            while (obsLines.length > 0) {
+              const lastLine = obsLines[obsLines.length - 1].trim();
+              if (lastLine.startsWith('## ') || lastLine.startsWith('### ')) {
+                obsLines.pop();
+              } else {
+                break;
+              }
+            }
+            if (obsLines.length > 0) {
+              if (firstObservation === null) firstObservation = obsLines;
+              lastObservation = obsLines;
+              
+              // Log first 10 observations
+              if (observationsToLog > 0) {
+                const observationNumber = 11 - observationsToLog; // 1, 2, 3, ..., 10
+                console.log(`[LISTS] FOURTH PASS - Clinical Vitals observation ${observationNumber}:`);
+                console.log('  Lines:', obsLines.join(' | '));
+                observationsToLog--;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // Conditions, Immunizations, Procedures: Count [D+P] lines
+    else if (categoryName.includes('condition') ||
              categoryName.includes('immunization') ||
              categoryName.includes('procedure')) {
       for (let i = 0; i < lines.length; i++) {
