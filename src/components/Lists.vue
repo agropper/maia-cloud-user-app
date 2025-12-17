@@ -1162,22 +1162,26 @@ const formatObservation = (
   const categoryLower = categoryName.toLowerCase();
   
   if (categoryLower.includes('allerg')) {
-    // Allergies: Date + Line 2 and all subsequent lines until next [D+P] or category
-    // Only the first word of each line should be bold
-    // Skip first line if it starts with "## " (page header)
+    // Allergies: Display only lines that look like allergy entries (e.g., "SULFA ...")
+    // Filter out category headers (###), page headers (##), and other non-allergy lines
     if (obsLines.length >= 1) {
-      let startIndex = 0;
-      // Skip first line if it's a page header (starts with "## ")
-      if (obsLines[0]?.trim().startsWith('## ')) {
-        startIndex = 1;
-      }
+      // Filter to only include lines that look like allergy entries
+      // These typically start with uppercase letters and contain allergy information
+      const allergyLines = obsLines.filter(line => {
+        const trimmed = line.trim();
+        // Skip empty lines, category headers, and page headers
+        if (!trimmed || trimmed.startsWith('###') || trimmed.startsWith('## ')) {
+          return false;
+        }
+        // Include lines that start with uppercase letters (like "SULFA")
+        // and don't look like metadata or headers
+        const firstChar = trimmed.charAt(0);
+        return firstChar === firstChar.toUpperCase() && firstChar !== firstChar.toLowerCase();
+      });
       
-      if (obsLines.length > startIndex) {
-        // Start from after the page header (or Line 2 if no page header)
-        const observationLines = obsLines.slice(startIndex);
-        const formattedLines = observationLines.map(line => {
+      if (allergyLines.length > 0) {
+        const formattedLines = allergyLines.map(line => {
           const trimmed = line.trim();
-          if (!trimmed) return '';
           // Get first word and rest of line
           const firstSpaceIndex = trimmed.indexOf(' ');
           if (firstSpaceIndex > 0) {
@@ -1187,7 +1191,7 @@ const formatObservation = (
           }
           // If no space, just bold the whole line
           return `**${trimmed}**`;
-        }).filter(line => line.length > 0);
+        });
         
         if (formattedLines.length > 0) {
           return `${date} ${formattedLines.join(' ')}`;
