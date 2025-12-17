@@ -128,40 +128,6 @@
 
     <!-- Results -->
     <div v-if="(pdfData || markdownContent) && !isProcessing">
-      <!-- PDF Info -->
-      <q-card v-if="pdfData" class="q-mb-md">
-        <q-card-section>
-          <div class="row items-center">
-            <div class="col">
-              <div class="text-h6">Markdown File</div>
-              <div class="q-mt-sm">
-                <div v-if="pdfData.totalPages"><strong>Total Pages:</strong> {{ pdfData.totalPages }}</div>
-                <div v-if="selectedFileName"><strong>File:</strong> {{ selectedFileName }}</div>
-                <div v-if="markdownBucketKey" class="text-caption text-grey q-mt-xs">
-                  <q-icon name="folder" size="xs" /> Location: <code>{{ markdownBucketKey }}</code>
-                </div>
-              </div>
-            </div>
-            <div class="col-auto">
-              <div class="row q-gutter-sm">
-                <q-btn
-                  color="secondary"
-                  icon="cleaning_services"
-                  label="Clean Up Markdown"
-                  @click="cleanupMarkdown"
-                  :loading="isCleaningMarkdown"
-                />
-                <q-btn
-                  color="primary"
-                  icon="download"
-                  label="Download Markdown"
-                  @click="downloadMarkdown"
-                />
-              </div>
-            </div>
-          </div>
-        </q-card-section>
-      </q-card>
 
       <!-- Categories Section -->
       <q-card v-if="categoriesList.length > 0" class="q-mb-md">
@@ -232,15 +198,45 @@
         </q-card-section>
       </q-card>
 
-      <!-- Markdown Display -->
-      <q-card v-if="markdownContent" class="q-mb-md">
+
+      <!-- LISTS SOURCE FILE (moved to bottom) -->
+      <q-card v-if="pdfData || markdownBucketKey" class="q-mb-md">
         <q-card-section>
-          <div class="text-h6 q-mb-md">Markdown Content</div>
-          <div v-if="markdownBucketKey" class="text-caption text-grey q-mb-sm">
-            <q-icon name="folder" size="xs" /> Saved to: <code>{{ markdownBucketKey }}</code>
-          </div>
-          <div class="markdown-preview q-pa-md" style="background: #f5f5f5; border-radius: 4px; max-height: 600px; overflow-y: auto;">
-            <pre style="white-space: pre-wrap; font-family: monospace; font-size: 12px; margin: 0;">{{ markdownContent }}</pre>
+          <div class="row items-center">
+            <div class="col">
+              <div class="text-h6">LISTS SOURCE FILE</div>
+              <div class="q-mt-sm">
+                <div v-if="pdfData?.totalPages"><strong>Total Pages:</strong> {{ pdfData.totalPages }}</div>
+                <div v-if="selectedFileName"><strong>File:</strong> {{ selectedFileName }}</div>
+                <div v-if="markdownBucketKey" class="text-caption text-grey q-mt-xs">
+                  <q-icon name="folder" size="xs" /> Location: <code>{{ markdownBucketKey }}</code>
+                </div>
+              </div>
+            </div>
+            <div class="col-auto">
+              <div class="row q-gutter-sm">
+                <q-btn
+                  color="secondary"
+                  icon="file_upload"
+                  label="REPLACE THE LISTS SOURCE FILE"
+                  @click="replaceListsSourceFile"
+                  :loading="isReplacingFile"
+                />
+                <q-btn
+                  v-if="markdownContent"
+                  color="primary"
+                  icon="visibility"
+                  :label="showMarkdownContent ? 'HIDE FILE MARKDOWN' : 'SHOW FILE MARKDOWN'"
+                  @click="showMarkdownContent = !showMarkdownContent"
+                />
+                <q-btn
+                  color="primary"
+                  icon="download"
+                  label="Download Markdown"
+                  @click="downloadMarkdown"
+                />
+              </div>
+            </div>
           </div>
         </q-card-section>
       </q-card>
@@ -467,6 +463,9 @@ const editingOriginalCurrentMedications = ref('');
 const isSavingCurrentMedications = ref(false);
 const isCurrentMedicationsEdited = ref(false);
 const showRefreshConfirmDialog = ref(false);
+const showMarkdownContent = ref(false);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const isReplacingFile = ref(false);
 
 const checkInitialFile = async () => {
   try {
@@ -911,6 +910,144 @@ const cleanupMarkdown = async () => {
   } finally {
     isCleaningMarkdown.value = false;
   }
+};
+
+// Replace the Lists source file
+const replaceListsSourceFile = () => {
+  // Create a hidden file input
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.pdf';
+  input.style.display = 'none';
+  
+  input.onchange = async (e: Event) => {
+    const target = e.target as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+    
+    isReplacingFile.value = true;
+    error.value = '';
+    
+    try {
+      // Upload file to Lists folder
+      const formData = new FormData();
+      formData.append('pdfFile', file);
+      formData.append('folder', 'Lists');
+      
+      const uploadResponse = await fetch('/api/files/upload', {
+        method: 'POST',
+        credentials: 'include',
+        body: formData
+      });
+      
+      if (!uploadResponse.ok) {
+        const errorData = await uploadResponse.json().catch(() => ({ error: `HTTP ${uploadResponse.status}` }));
+        throw new Error(errorData.error || 'Failed to upload file');
+      }
+      
+      const uploadResult = await uploadResponse.json();
+      
+      // Update user document with new initial file
+      const updateResponse = await fetch('/api/user-file-metadata', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          userId: props.userId,
+          fileMetadata: {
+            fileName: file.name,
+            bucketKey: uploadResult.bucketKey,
+            fileSize: file.size,
+            fileType: 'pdf'
+          }
+        })
+      });
+      
+      if (!updateResponse.ok) {
+        console.warn('Failed to update user document with new file');
+      }
+      
+      // Process the uploaded file (similar to processInitialFile)
+      const processResponse = await fetch('/api/files/lists/process-initial-file', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        credentials: 'include'
+      });
+      
+      if (!processResponse.ok) {
+        const errorData = await processResponse.json().catch(() => ({ error: `HTTP ${processResponse.status}` }));
+        throw new Error(errorData.error || 'Failed to process file');
+      }
+      
+      const processResult = await processResponse.json();
+      
+      // Update state
+      pdfData.value = {
+        totalPages: processResult.totalPages,
+        pages: processResult.pages || [],
+        categories: [],
+        fullMarkdown: processResult.fullMarkdown || ''
+      };
+      
+      const fullMarkdown = processResult.fullMarkdown || '';
+      markdownBucketKey.value = processResult.markdownBucketKey || null;
+      selectedFileName.value = processResult.fileName || file.name;
+      hasSavedResults.value = true;
+      
+      // Store initial file info
+      if (processResult.fileName) {
+        initialFileInfo.value = {
+          bucketKey: uploadResult.bucketKey,
+          fileName: processResult.fileName
+        };
+      }
+      
+      // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
+      const markedMarkdown = extractCategoriesFromMarkdown(fullMarkdown);
+      markdownContent.value = markedMarkdown;
+      
+      // SECOND PASS: Count [D+P] lines for each category
+      countObservationsByPageRange(markedMarkdown);
+      
+      // Automatically clean up markdown
+      await cleanupMarkdown();
+      
+      // Automatically show markdown content
+      showMarkdownContent.value = true;
+      
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          message: 'Lists source file replaced and processed successfully',
+          type: 'positive',
+          position: 'top',
+          timeout: 3000
+        });
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to replace file';
+      error.value = errorMessage;
+      console.error('Replace file error:', err);
+      
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          message: errorMessage,
+          type: 'negative',
+          position: 'top',
+          timeout: 5000
+        });
+      }
+    } finally {
+      isReplacingFile.value = false;
+      document.body.removeChild(input);
+    }
+  };
+  
+  document.body.appendChild(input);
+  input.click();
 };
 
 // Extract unique categories from markdown (lines starting with "### ")
