@@ -416,7 +416,7 @@ const loadSavedResults = async () => {
         // THIRD PASS: Count [D+P] lines in all categories
         countDatePlaceInAllCategories(markdownContent.value);
         
-        // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+        // FOURTH PASS: Count observations (Clinical Notes only for now)
         countObservationsByPageRange(markdownContent.value);
         
         // Also try to load results.json if it exists
@@ -619,7 +619,7 @@ const processInitialFile = async () => {
     // THIRD PASS: Count [D+P] lines in all categories
     countDatePlaceInAllCategories(markedMarkdown);
     
-    // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+    // FOURTH PASS: Count observations (Clinical Notes only for now)
     countObservationsByPageRange(markedMarkdown);
     
     if (data.markdownBucketKey) {
@@ -769,7 +769,7 @@ const cleanupMarkdown = async () => {
         // THIRD PASS: Count [D+P] lines in all categories
         countDatePlaceInAllCategories(markdownContent.value);
         
-        // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+        // FOURTH PASS: Count observations (Clinical Notes only for now)
         countObservationsByPageRange(markdownContent.value);
       }
     }
@@ -1148,7 +1148,14 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     }
   }
   
-  // Convert map to array (observation counts will be set by fourth pass)
+  // Save the last category's observation count
+  if (currentCategory && categoryMap.has(currentCategory)) {
+    const cat = categoryMap.get(currentCategory)!;
+    cat.observationCount = observationCount;
+    categoryMap.set(currentCategory, cat);
+  }
+  
+  // Convert map to array
   categoriesList.value = Array.from(categoryMap.values());
 };
 
@@ -1353,10 +1360,9 @@ const countDatePlaceInAllCategories = (markdown: string): void => {
 };
 
 // FOURTH PASS: Count observations based on [D+P] lines within page ranges
-// Works on marked markdown (with [D+P] prefixes) and uses page boundaries
+// Currently only handles Clinical Notes
 const countObservationsByPageRange = (markedMarkdown: string): void => {
   const lines = markedMarkdown.split('\n');
-  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
   
   // Build page boundary map: page number -> line index
   const pageBoundaries = new Map<number, number>();
@@ -1380,96 +1386,38 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
     return lines.length; // EOF
   };
   
-  // Helper to find next [D+P] line starting from index
-  const findNextDatePlace = (startIndex: number, endIndex: number): number => {
-    for (let j = startIndex + 1; j < endIndex; j++) {
-      const line = lines[j].trim();
-      if (line.startsWith('[D+P] ')) {
-        return j;
-      }
-    }
-    return -1; // Not found
-  };
-  
-  // Process each category
+  // Process each category - ONLY Clinical Notes
   categoriesList.value = categoriesList.value.map(category => {
     const categoryName = category.name.toLowerCase();
+    
+    // Only process Clinical Notes
+    if (!categoryName.includes('clinical notes')) {
+      return category; // Return unchanged for other categories
+    }
+    
     const startPage = category.page;
     const startLineIndex = pageBoundaries.get(startPage) ?? 0;
     const endLineIndex = findNextPageBoundary(startLineIndex);
     
     let observationCount = 0;
-    
-    // Allergies: Count lines after "## ALLERGY..." within page range
-    if (categoryName.includes('allerg')) {
-      for (let i = startLineIndex; i < endLineIndex; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('## ALLERGY') || line.startsWith('## Allergy') || line.startsWith('## allergy')) {
-          let j = i + 1;
-          while (j < endLineIndex) {
-            const nextLine = lines[j].trim();
-            if (nextLine.startsWith('### ') || nextLine.match(/^##\s+Page\s+\d+$/)) {
-              break;
-            }
-            if (nextLine !== '') {
-              observationCount++;
-            }
-            j++;
-          }
-        }
-      }
-    }
+    let firstObservationFound = false;
     
     // Clinical Notes: Count lines starting with "Created: " within page range
-    else if (categoryName.includes('clinical notes')) {
-      for (let i = startLineIndex; i < endLineIndex; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('Created: ')) {
-          observationCount++;
-        }
-      }
-    }
-    
-    // Clinical Vitals, Conditions, Immunizations, Procedures: Count [D+P] lines
-    else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals') ||
-             categoryName.includes('condition') ||
-             categoryName.includes('immunization') ||
-             categoryName.includes('procedure')) {
-      for (let i = startLineIndex; i < endLineIndex; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('[D+P] ')) {
-          const lineWithoutPrefix = line.substring(6).trim();
-          if (dateLocationPattern.test(lineWithoutPrefix)) {
-            observationCount++;
-            // Skip to next [D+P] line or end of page
-            const nextDPlus = findNextDatePlace(i, endLineIndex);
-            if (nextDPlus > 0) {
-              i = nextDPlus - 1; // -1 because loop will increment
-            } else {
-              break; // No more [D+P] lines in this page range
-            }
+    for (let i = startLineIndex; i < endLineIndex; i++) {
+      const line = lines[i].trim();
+      if (line.startsWith('Created: ')) {
+        observationCount++;
+        
+        // Log description of first observation
+        if (!firstObservationFound) {
+          firstObservationFound = true;
+          // Get the observation lines (typically 5 lines: Type, Author, Category, Created, Status)
+          const obsLines: string[] = [];
+          for (let j = Math.max(0, i - 3); j < Math.min(lines.length, i + 2); j++) {
+            obsLines.push(lines[j].trim());
           }
-        }
-      }
-    }
-    
-    // Lab Results, Medication Records: Count [D+P] lines, include "## " table headers
-    else if (categoryName.includes('lab results') || categoryName.includes('lab result') ||
-             categoryName.includes('medication')) {
-      for (let i = startLineIndex; i < endLineIndex; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('[D+P] ')) {
-          const lineWithoutPrefix = line.substring(6).trim();
-          if (dateLocationPattern.test(lineWithoutPrefix)) {
-            observationCount++;
-            // Skip to next [D+P] line or end of page
-            const nextDPlus = findNextDatePlace(i, endLineIndex);
-            if (nextDPlus > 0) {
-              i = nextDPlus - 1; // -1 because loop will increment
-            } else {
-              break; // No more [D+P] lines in this page range
-            }
-          }
+          console.log('[LISTS] FOURTH PASS - First Clinical Notes observation:');
+          console.log('  Lines:', obsLines.join(' | '));
         }
       }
     }
@@ -1500,7 +1448,7 @@ const reloadCategories = async () => {
     // THIRD PASS: Count [D+P] lines in all categories
     countDatePlaceInAllCategories(markdownContent.value);
     
-    // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+    // FOURTH PASS: Count observations (Clinical Notes only for now)
     countObservationsByPageRange(markdownContent.value);
   } else {
     // If no markdown in memory, fetch it
@@ -1514,7 +1462,7 @@ const reloadCategories = async () => {
       // THIRD PASS: Count [D+P] lines in all categories
       countDatePlaceInAllCategories(markdownContent.value);
       
-      // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+      // FOURTH PASS: Count observations (Clinical Notes only for now)
       countObservationsByPageRange(markdownContent.value);
     }
   }
