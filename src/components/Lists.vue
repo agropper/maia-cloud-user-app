@@ -929,10 +929,9 @@ const replaceListsSourceFile = () => {
     error.value = '';
     
     try {
-      // Upload file to Lists folder
+      // Upload file (will go to user root, then we'll process it)
       const formData = new FormData();
-      formData.append('pdfFile', file);
-      formData.append('folder', 'Lists');
+      formData.append('file', file);
       
       const uploadResponse = await fetch('/api/files/upload', {
         method: 'POST',
@@ -947,7 +946,7 @@ const replaceListsSourceFile = () => {
       
       const uploadResult = await uploadResponse.json();
       
-      // Update user document with new initial file
+      // Update user document with new initial file (both initialFile and files array)
       const updateResponse = await fetch('/api/user-file-metadata', {
         method: 'POST',
         headers: {
@@ -961,13 +960,17 @@ const replaceListsSourceFile = () => {
             bucketKey: uploadResult.bucketKey,
             fileSize: file.size,
             fileType: 'pdf'
-          }
+          },
+          updateInitialFile: true // Flag to also update initialFile field
         })
       });
       
       if (!updateResponse.ok) {
         console.warn('Failed to update user document with new file');
       }
+      
+      // Wait a moment for the document to be saved
+      await new Promise(resolve => setTimeout(resolve, 500));
       
       // Process the uploaded file (similar to processInitialFile)
       const processResponse = await fetch('/api/files/lists/process-initial-file', {

@@ -4482,7 +4482,7 @@ app.delete('/api/delete-chat/:chatId', async (req, res) => {
 // User file metadata endpoint - updates user document with file info
 app.post('/api/user-file-metadata', async (req, res) => {
   try {
-    const { userId, fileMetadata } = req.body;
+    const { userId, fileMetadata, updateInitialFile } = req.body;
     
     if (!userId || !fileMetadata) {
       return res.status(400).json({ 
@@ -4526,6 +4526,17 @@ app.post('/api/user-file-metadata', async (req, res) => {
         addedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       });
+    }
+
+    // Update initialFile if requested (for Lists source file replacement)
+    if (updateInitialFile) {
+      userDoc.initialFile = {
+        fileName: fileMetadata.fileName,
+        bucketKey: fileMetadata.bucketKey,
+        fileSize: fileMetadata.fileSize || 0,
+        uploadedAt: new Date().toISOString()
+      };
+      console.log(`✅ Updated initialFile for user ${userId}: ${fileMetadata.fileName}`);
     }
 
     // Set workflowStage to files_stored if files exist
