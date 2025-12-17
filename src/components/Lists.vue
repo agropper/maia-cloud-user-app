@@ -1081,9 +1081,12 @@ const reloadCategories = async () => {
     // If no markdown in memory, fetch it
     await loadSavedResults();
     
-    // After loading, mark the lines
+    // After loading, extract categories and mark the lines
     if (markdownContent.value) {
-      const markedMarkdown = markDatePlaceLines(markdownContent.value);
+      // Extract categories and label first [D+P] lines (returns modified markdown)
+      const modifiedMarkdown = extractCategoriesFromMarkdown(markdownContent.value);
+      // Mark remaining Date + Place lines with [D+P] prefix
+      const markedMarkdown = markDatePlaceLines(modifiedMarkdown);
       markdownContent.value = markedMarkdown;
       
       // FOURTH PASS: Count observations (Clinical Notes only for now)
