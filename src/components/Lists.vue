@@ -125,20 +125,30 @@
               <q-card>
                 <q-card-section>
                   <q-list dense>
-                    <q-item 
-                      v-for="(obs, obsIndex) in category.observations" 
-                      :key="obsIndex"
-                      class="q-px-sm"
-                    >
-                      <q-item-section>
-                        <q-item-label class="text-body2">
-                          <span 
-                            v-html="obs.display.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')"
-                            @click="handleObservationClick($event, obs.page)"
-                          ></span>
-                        </q-item-label>
-                      </q-item-section>
-                    </q-item>
+                    <template v-for="(obs, obsIndex) in category.observations" :key="obsIndex">
+                      <q-item class="q-px-sm">
+                        <q-item-section>
+                          <q-item-label class="text-body2">
+                            <span 
+                              v-html="obs.display.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')"
+                              @click="handleObservationClick($event, obs.page)"
+                            ></span>
+                          </q-item-label>
+                        </q-item-section>
+                      </q-item>
+                      <!-- Display out of range lines for Lab Results -->
+                      <q-item 
+                        v-for="(oorLine, oorIndex) in obs.outOfRangeLines" 
+                        :key="`oor-${obsIndex}-${oorIndex}`"
+                        class="q-px-sm q-pl-lg"
+                      >
+                        <q-item-section>
+                          <q-item-label class="text-body2 text-negative">
+                            {{ oorLine.trim() }}
+                          </q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </template>
                   </q-list>
                 </q-card-section>
               </q-card>
@@ -367,7 +377,7 @@ const categoriesList = ref<Array<{
   observationCount: number; 
   startLine?: number; 
   endLine?: number;
-  observations?: Array<{ date: string; display: string; page?: number; lineCount?: number }>;
+  observations?: Array<{ date: string; display: string; page?: number; lineCount?: number; outOfRangeLines?: string[] }>;
   expanded?: boolean;
 }>>([]);
 const expandedCategories = ref<Set<string>>(new Set());
@@ -1123,7 +1133,7 @@ const extractObservationsForCategory = (
   
   // For Clinical Vitals and Lab Results, track observations by date to merge duplicates
   const shouldMergeByDate = categoryLower.includes('clinical vitals') || categoryLower.includes('lab result');
-  const mergedByDate = new Map<string, { lineCount: number; page?: number }>();
+  const mergedByDate = new Map<string, { lineCount: number; page?: number; outOfRangeLines?: string[] }>();
   
   let currentObservationStart = -1;
   let currentDate = '';
@@ -1140,20 +1150,43 @@ const extractObservationsForCategory = (
         const obsLines = lines.slice(currentObservationStart, i);
         const page = findPageForLine(currentObservationStart, lines);
         
+        // For Lab Results, track lines with "OUT   OF   RANG*"
+        let outOfRangeLines: string[] = [];
+        if (categoryLower.includes('lab result')) {
+          outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+        }
+        
         if (shouldMergeByDate) {
           // For Clinical Vitals and Lab Results, merge observations with same date
           const existing = mergedByDate.get(currentDate);
           if (existing) {
             existing.lineCount += obsLines.length;
+            // Merge out of range lines
+            if (categoryLower.includes('lab result') && outOfRangeLines.length > 0) {
+              if (!existing.outOfRangeLines) {
+                existing.outOfRangeLines = [];
+              }
+              existing.outOfRangeLines.push(...outOfRangeLines);
+            }
             // Keep the first page encountered for this date
           } else {
-            mergedByDate.set(currentDate, { lineCount: obsLines.length, page });
+            mergedByDate.set(currentDate, { 
+              lineCount: obsLines.length, 
+              page,
+              outOfRangeLines: categoryLower.includes('lab result') ? outOfRangeLines : undefined
+            });
           }
         } else {
           // For other categories, create separate observations
           const display = formatObservation(categoryName, currentDate, obsLines, lines, i, page);
           if (display) {
-            observations.push({ date: currentDate, display, page, lineCount: obsLines.length });
+            observations.push({ 
+              date: currentDate, 
+              display, 
+              page, 
+              lineCount: obsLines.length,
+              outOfRangeLines: categoryLower.includes('lab result') && outOfRangeLines.length > 0 ? outOfRangeLines : undefined
+            });
           }
         }
       }
@@ -1172,19 +1205,42 @@ const extractObservationsForCategory = (
     const obsLines = lines.slice(currentObservationStart, endLine + 1);
     const page = findPageForLine(currentObservationStart, lines);
     
+    // For Lab Results, track lines with "OUT   OF   RANG*"
+    let outOfRangeLines: string[] = [];
+    if (categoryLower.includes('lab result')) {
+      outOfRangeLines = obsLines.filter(l => l.includes('OUT') && l.includes('OF') && l.includes('RANG'));
+    }
+    
     if (shouldMergeByDate) {
       // For Clinical Vitals and Lab Results, merge observations with same date
       const existing = mergedByDate.get(currentDate);
       if (existing) {
         existing.lineCount += obsLines.length;
+        // Merge out of range lines
+        if (categoryLower.includes('lab result') && outOfRangeLines.length > 0) {
+          if (!existing.outOfRangeLines) {
+            existing.outOfRangeLines = [];
+          }
+          existing.outOfRangeLines.push(...outOfRangeLines);
+        }
       } else {
-        mergedByDate.set(currentDate, { lineCount: obsLines.length, page });
+        mergedByDate.set(currentDate, { 
+          lineCount: obsLines.length, 
+          page,
+          outOfRangeLines: categoryLower.includes('lab result') && outOfRangeLines.length > 0 ? outOfRangeLines : undefined
+        });
       }
     } else {
       // For other categories, create separate observations
       const display = formatObservation(categoryName, currentDate, obsLines, lines, endLine + 1, page);
       if (display) {
-        observations.push({ date: currentDate, display, page, lineCount: obsLines.length });
+        observations.push({ 
+          date: currentDate, 
+          display, 
+          page, 
+          lineCount: obsLines.length,
+          outOfRangeLines: categoryLower.includes('lab result') && outOfRangeLines.length > 0 ? outOfRangeLines : undefined
+        });
       }
     }
   }
@@ -1194,7 +1250,13 @@ const extractObservationsForCategory = (
     for (const [date, data] of mergedByDate.entries()) {
       const display = formatObservation(categoryName, date, [], lines, 0, data.page, data.lineCount);
       if (display) {
-        observations.push({ date, display, page: data.page, lineCount: data.lineCount });
+        observations.push({ 
+          date, 
+          display, 
+          page: data.page, 
+          lineCount: data.lineCount,
+          outOfRangeLines: data.outOfRangeLines
+        });
       }
     }
   }
