@@ -1421,11 +1421,13 @@ const countObservationsByCategory = (markdown: string): void => {
       const categoryName = line.substring(4).trim();
       currentCategory = categoryName;
       const standardName = mapToStandardCategory(categoryName);
-      // Only log if it's one of the categories we're tracking
       const categoryNames = ['Allergies', 'Clinical Notes', 'Clinical Vitals', 'Conditions', 
                              'Immunizations', 'Lab Results', 'Medication Records', 'Procedures'];
       if (categoryNames.includes(standardName)) {
-        console.log(`[LISTS] FOURTH PASS: Counting observations for "${standardName}"`);
+        console.log(`[LISTS] FOURTH PASS: Counting observations for "${standardName}" (from "${categoryName}")`);
+      } else {
+        // Log unmatched category headers to help debug
+        console.log(`[LISTS] FOURTH PASS: Unmatched category header "${categoryName}" (mapped to "${standardName}")`);
       }
       continue;
     }
