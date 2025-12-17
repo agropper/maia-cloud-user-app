@@ -2142,7 +2142,15 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         i++;
       }
 
-      const cleanedMarkdown = cleanedLines.join('\n');
+      let cleanedMarkdown = cleanedLines.join('\n');
+
+      // Remove last 4 lines from markdown
+      const markdownLines = cleanedMarkdown.split('\n');
+      if (markdownLines.length > 4) {
+        markdownLines.splice(-4);
+        cleanedMarkdown = markdownLines.join('\n');
+        console.log(`✂️ [LISTS] Removed last 4 lines from markdown during cleanup`);
+      }
 
       // Save cleaned markdown back
       await s3Client.send(new PutObjectCommand({
