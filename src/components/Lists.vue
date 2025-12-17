@@ -398,9 +398,6 @@ const loadSavedResults = async () => {
       
       // Markdown file exists - load it
       if (markdownResult.markdown) {
-        // Debug: Mark all Date + Place of Service lines first
-        const markedMarkdown = markDatePlaceLines(markdownResult.markdown);
-        markdownContent.value = markedMarkdown;
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         hasSavedResults.value = true;
         
@@ -758,9 +755,6 @@ const cleanupMarkdown = async () => {
     if (markdownResponse.ok) {
       const markdownResult = await markdownResponse.json();
       if (markdownResult.hasMarkdown && markdownResult.markdown) {
-        // Debug: Mark all Date + Place of Service lines
-        const markedMarkdown = markDatePlaceLines(markdownResult.markdown);
-        markdownContent.value = markedMarkdown;
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         // Re-extract categories after cleanup and label first [D+P] lines (returns modified markdown)
         const modifiedMarkdown = extractCategoriesFromMarkdown(markdownResult.markdown);
