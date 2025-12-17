@@ -1318,18 +1318,26 @@ const countDatePlaceInAllCategories = (markdown: string): void => {
     categoryCounts[name] = 0;
   });
   
+  // Helper to map category name to standard name (same as fourth pass)
+  const mapToStandardCategory = (categoryName: string): string => {
+    const lower = categoryName.toLowerCase();
+    for (const standardName of categoryNames) {
+      if (lower.includes(standardName.toLowerCase()) || standardName.toLowerCase().includes(lower)) {
+        return standardName;
+      }
+    }
+    return categoryName; // Return as-is if no match
+  };
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     
     // Check for category header
     if (line.startsWith('### ')) {
-      // Start tracking new category (don't reset count if same category appears again)
+      // Start tracking new category - map to standard name
       const categoryName = line.substring(4).trim();
-      currentCategory = categoryName;
-      // Only initialize if not already initialized
-      if (categoryCounts[categoryName] === undefined) {
-        categoryCounts[categoryName] = 0;
-      }
+      const standardName = mapToStandardCategory(categoryName);
+      currentCategory = standardName; // Use standard name for tracking
       continue;
     }
     
