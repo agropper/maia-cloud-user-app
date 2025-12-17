@@ -136,6 +136,277 @@ kb_indexed (KB indexed) [Future]
 kb_attached (KB attached to agent) [Future]
 ```
 
+---
+
+## New User Provisioning Flow (With Initial PDF File)
+
+This section documents the complete automated provisioning flow for a new user who has supplied a PDF file during registration, including the Lists processing step that occurs before Patient Summary generation.
+
+### Overview
+
+When a user registers and uploads an initial PDF file, the provisioning process includes:
+1. **Lists Processing** - Extract structured medical data (medications, clinical notes, vitals, etc.) from the PDF
+2. **File Indexing** - Index the PDF into the Knowledge Base for AI retrieval
+3. **Agent Creation & Deployment** - Create and deploy the Private AI agent
+4. **Patient Summary Generation** - Generate the initial patient summary using the indexed data
+
+### Detailed Step-by-Step Flow
+
+#### Phase 1: User Registration (Before Admin Approval)
+
+**Step 1.1: User Registration**
+- Location: `server/routes/auth.js` - `app.post('/api/passkey/register-verify')`
+- User completes passkey registration
+- User document created with `workflowStage: null`
+- Bucket folders created for user (`userId/` and `userId/KB/`)
+
+**Step 1.2: Initial File Upload (Optional)**
+- Location: `server/routes/auth.js` - `app.post('/api/auth/registration-complete')`
+- If user uploads a PDF file during registration:
+  - File uploaded to `userId/KB/` folder
+  - File metadata stored in `userDoc.initialFile`:
+    ```javascript
+    {
+      fileName: "example.pdf",
+      bucketKey: "userId/KB/example.pdf",
+      fileSize: 1234567,
+      uploadedAt: "2025-12-17T..."
+    }
+    ```
+- `workflowStage` set to `'request_sent'`
+- Admin notification email sent with provisioning link
+
+#### Phase 2: Admin Approval & Provisioning Start
+
+**Step 2.1: Admin Clicks Provision Link**
+- Location: `server/index.js` - `app.get('/api/admin/provision')`
+- Admin validates provisioning token
+- `workflowStage` set to `'approved'`
+- Async provisioning function `provisionUserAsync()` starts
+
+#### Phase 3: Knowledge Base Setup
+
+**Step 3.1: Create or Verify Knowledge Base**
+- Location: `server/index.js` - `provisionUserAsync()` function
+- KB name retrieved from user document (set during registration)
+- If KB doesn't exist:
+  - Create new KB via DigitalOcean API
+  - Create empty datasource pointing to `userId/KB/` folder
+- If KB exists:
+  - Verify KB is accessible
+  - Use existing KB
+
+**Step 3.2: Verify Initial File (if provided)**
+- Location: `server/index.js` - `provisionUserAsync()` function, Step 2.5
+- If `userDoc.initialFile` exists:
+  - Verify file exists in S3/Spaces using `HeadObjectCommand`
+  - Log file verification status
+  - Continue to Lists processing
+
+#### Phase 4: Lists Processing (NEW - Before Indexing)
+
+**Step 4.1: Process Initial File for Lists Extraction**
+- Location: `server/routes/files.js` - `app.post('/api/files/lists/process-initial-file')`
+- **Triggered during provisioning** (before indexing)
+- Process:
+  1. Retrieve PDF from S3 using `initialFile.bucketKey`
+  2. Extract text with page boundaries using `extractPdfWithPages()`
+  3. Generate full markdown with page markers (`## Page nn`)
+  4. Clean up markdown:
+     - Remove "Health Page nn of mm" footers
+     - Replace with "## Page nn" markers
+     - Remove "Continued on/from" markers
+     - Remove last 4 lines of markdown
+  5. Save cleaned markdown to `userId/Lists/` folder as `{fileName}.md`
+  6. Extract categories (Allergies, Clinical Notes, Medications, etc.)
+  7. Label first `[D+P]` line in each category with category name
+  8. Count observations per category
+  9. Store markdown file location in user document
+
+**Step 4.2: Lists Processing Results**
+- Markdown file saved to: `userId/Lists/{fileName}.md`
+- Categories extracted and structured
+- Ready for display in "My Lists" tab
+- **This completes before indexing starts**
+
+#### Phase 5: File Indexing
+
+**Step 5.1: Create or Verify Datasource**
+- Location: `server/index.js` - `provisionUserAsync()` function, Step 2.5
+- If datasource doesn't exist (KB was pre-existing):
+  - Create datasource pointing to `initialFile.bucketKey`
+  - Store `datasourceUuid` in user document
+- If datasource exists (created during KB creation):
+  - Use existing datasource UUID
+
+**Step 5.2: Update User Document with File Metadata**
+- Add/update file entry in `userDoc.files[]`:
+  ```javascript
+  {
+    bucketKey: "userId/KB/example.pdf",
+    fileName: "example.pdf",
+    size: 1234567,
+    uploadedAt: "2025-12-17T...",
+    knowledgeBases: [kbName],
+    kbDataSourceUuid: datasourceUuid
+  }
+  ```
+
+**Step 5.3: Start Indexing Job**
+- Location: `server/index.js` - `provisionUserAsync()` function
+- Start global indexing job via `doClient.indexing.startGlobal(kbId, [datasourceUuid])`
+- Store `indexingJobId` in user document
+- Set `workflowStage: 'indexing'`
+
+**Step 5.4: Wait for Indexing to Complete (Blocking)**
+- Poll indexing job status every 15 seconds
+- Maximum wait time: 30 minutes
+- On completion:
+  - Verify indexing via datasource status check
+  - Update `userDoc.kbIndexedFiles` with indexed file
+  - Store indexing metadata (tokens, duration, etc.)
+  - Set `workflowStage: 'files_archived'`
+- **Note**: Patient Summary generation is deferred until after agent deployment
+
+#### Phase 6: Agent Creation & Deployment
+
+**Step 6.1: Create Agent**
+- Location: `server/index.js` - `provisionUserAsync()` function, Step 3
+- Create agent via DigitalOcean API with:
+  - Name from user document
+  - MAIA instruction template
+  - Model configuration
+- Store `agentId`, `agentEndpoint`, `agentApiKey` in user document
+- Set `workflowStage: 'agent_named'`
+
+**Step 6.2: Attach Knowledge Base to Agent**
+- Location: `server/index.js` - `provisionUserAsync()` function, Step 4
+- Attach KB to agent via `doClient.agent.attachKB(agentId, kbId)`
+- Agent can now retrieve data from KB
+
+**Step 6.3: Wait for Agent Deployment**
+- Location: `server/index.js` - `provisionUserAsync()` function, Step 5
+- Poll agent status every 30 seconds
+- Maximum wait time: 10 minutes
+- Wait for status: `STATUS_RUNNING`
+- Set `workflowStage: 'agent_deployed'`
+
+#### Phase 7: Patient Summary Generation
+
+**Step 7.1: Generate Patient Summary**
+- Location: `server/index.js` - Background polling after indexing completes
+- **Triggered after**: Agent is deployed AND indexing is complete
+- Process:
+  1. Verify agent is fully configured (`assignedAgentId`, `agentEndpoint`, `agentApiKey`)
+  2. Call Private AI agent with prompt:
+     ```
+     "Please generate a comprehensive patient summary based on all available 
+     medical records and documents in the knowledge base. Include key medical 
+     history, diagnoses, medications, allergies, and important notes."
+     ```
+  3. Save summary to `userDoc.patientSummaries[]` array
+  4. Set `workflowStage: 'patient_summary'`
+
+**Step 7.2: Summary Storage**
+- Summary stored with metadata:
+  ```javascript
+  {
+    summary: "Generated summary text...",
+    generatedAt: "2025-12-17T...",
+    model: "openai-gpt-oss-120b",
+    tokens: 1234
+  }
+  ```
+
+### Flow Diagram
+
+```
+[User Registration with PDF]
+         ↓
+[File Uploaded to userId/KB/]
+         ↓
+[workflowStage: 'request_sent']
+         ↓
+[Admin Clicks Provision Link]
+         ↓
+[workflowStage: 'approved']
+         ↓
+[KB Created/Verified]
+         ↓
+[Lists Processing] ← NEW STEP
+  • Extract PDF text
+  • Generate markdown
+  • Clean up markdown
+  • Extract categories
+  • Count observations
+  • Save to userId/Lists/
+         ↓
+[File Indexing]
+  • Create datasource
+  • Start indexing job
+  • Wait for completion
+  • Verify indexed
+         ↓
+[workflowStage: 'indexing' → 'files_archived']
+         ↓
+[Agent Creation]
+         ↓
+[workflowStage: 'agent_named']
+         ↓
+[KB Attached to Agent]
+         ↓
+[Agent Deployment]
+         ↓
+[workflowStage: 'agent_deployed']
+         ↓
+[Patient Summary Generation] ← Uses indexed data + Lists
+         ↓
+[workflowStage: 'patient_summary']
+         ↓
+[Provisioning Complete]
+```
+
+### Key Implementation Details
+
+1. **Lists Processing Timing**: 
+   - Happens **before** file indexing
+   - Uses the same PDF file that will be indexed
+   - Results stored separately in `userId/Lists/` folder
+   - Does not block provisioning if it fails (error logged, continues)
+
+2. **File Indexing**:
+   - Happens after Lists processing
+   - Indexes PDF into Knowledge Base
+   - Required for Patient Summary generation
+   - Blocks provisioning until complete (with timeout)
+
+3. **Patient Summary**:
+   - Generated **after** both Lists processing and indexing are complete
+   - Requires agent to be deployed
+   - Uses indexed data from Knowledge Base
+   - May reference structured Lists data
+
+4. **Error Handling**:
+   - Lists processing errors are logged but don't fail provisioning
+   - Indexing errors are logged but provisioning continues (background polling handles retry)
+   - Agent creation/deployment errors fail provisioning
+   - Patient Summary generation errors are logged but don't fail provisioning
+
+### Files and Endpoints Involved
+
+- **Lists Processing**: 
+  - Endpoint: `POST /api/files/lists/process-initial-file`
+  - Implementation: `server/routes/files.js`
+  - Frontend: `src/components/Lists.vue`
+
+- **File Indexing**:
+  - Implementation: `server/index.js` - `provisionUserAsync()` function
+  - Uses: DigitalOcean KB and Indexing APIs
+
+- **Patient Summary**:
+  - Implementation: `server/index.js` - Background polling after indexing
+  - Uses: Private AI agent via DigitalOcean Provider
+
 **Special States:**
 - `to_be_removed` - Can be set from any stage (user marked for deletion)
 - `passkey_reset` - Temporary 1-hour state activated by admin token, allows bypassing duplicate username check, reverts to previous stage after reset
