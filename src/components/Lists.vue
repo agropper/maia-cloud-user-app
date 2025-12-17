@@ -1225,11 +1225,11 @@ const formatObservation = (
       if (!type) type = typeLine;
       if (!author) author = authorLine;
       
-      return `${date} **${type || 'N/A'}** **${author || 'N/A'}**`;
+      return `${date} **${type || 'N/A'}** by **${author || 'N/A'}**`;
     } else if (obsLines.length >= 2) {
       // Fallback if structure is different - at least try to get first line
       const typeLine = obsLines[1]?.trim() || '';
-      return `${date} **${typeLine || 'N/A'}** **N/A**`;
+      return `${date} **${typeLine || 'N/A'}** by **N/A**`;
     }
     return date;
   } else if (categoryLower.includes('procedure') || 
