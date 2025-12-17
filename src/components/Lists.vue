@@ -1307,7 +1307,11 @@ const formatObservation = (
              categoryLower.includes('immunization')) {
     // Procedures, Conditions, Immunizations: Date + entire line following [D+P] (in bold)
     if (obsLines.length > 1) {
-      const nextLine = obsLines[1]?.trim() || '';
+      let nextLine = obsLines[1]?.trim() || '';
+      // For Procedures, remove "## " from the start if present
+      if (categoryLower.includes('procedure') && nextLine.startsWith('## ')) {
+        nextLine = nextLine.substring(3).trim();
+      }
       return `${date} **${nextLine}**`;
     }
     return date;
