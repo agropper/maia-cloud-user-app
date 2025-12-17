@@ -409,8 +409,11 @@ const loadSavedResults = async () => {
           await checkInitialFile();
         }
         
-        // Extract categories from markdown (use original, not marked version)
-        extractCategoriesFromMarkdown(markdownResult.markdown);
+        // Extract categories from markdown and label first [D+P] lines (returns modified markdown)
+        const modifiedMarkdown = extractCategoriesFromMarkdown(markdownResult.markdown);
+        // Mark remaining Date + Place lines with [D+P] prefix
+        const markedMarkdown = markDatePlaceLines(modifiedMarkdown);
+        markdownContent.value = markedMarkdown;
         
         // FOURTH PASS: Count observations (Clinical Notes only for now)
         countObservationsByPageRange(markdownContent.value);
@@ -609,11 +612,14 @@ const processInitialFile = async () => {
       }
     }
     
-    // Extract categories from markdown (use original, not marked version)
-    extractCategoriesFromMarkdown(fullMarkdown);
+    // Extract categories from markdown and label first [D+P] lines (returns modified markdown)
+    const modifiedMarkdown = extractCategoriesFromMarkdown(fullMarkdown);
+    // Mark remaining Date + Place lines with [D+P] prefix
+    const finalMarkedMarkdown = markDatePlaceLines(modifiedMarkdown);
+    markdownContent.value = finalMarkedMarkdown;
     
     // FOURTH PASS: Count observations (Clinical Notes only for now)
-    countObservationsByPageRange(markedMarkdown);
+    countObservationsByPageRange(finalMarkedMarkdown);
     
     if (data.markdownBucketKey) {
       savedPdfBucketKey.value = data.markdownBucketKey;
@@ -756,8 +762,11 @@ const cleanupMarkdown = async () => {
         const markedMarkdown = markDatePlaceLines(markdownResult.markdown);
         markdownContent.value = markedMarkdown;
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
-        // Re-extract categories after cleanup (use original, not marked version)
-        extractCategoriesFromMarkdown(markdownResult.markdown);
+        // Re-extract categories after cleanup and label first [D+P] lines (returns modified markdown)
+        const modifiedMarkdown = extractCategoriesFromMarkdown(markdownResult.markdown);
+        // Mark remaining Date + Place lines with [D+P] prefix
+        const markedMarkdown = markDatePlaceLines(modifiedMarkdown);
+        markdownContent.value = markedMarkdown;
         
         // FOURTH PASS: Count observations (Clinical Notes only for now)
         countObservationsByPageRange(markdownContent.value);
@@ -791,6 +800,7 @@ const cleanupMarkdown = async () => {
 };
 
 // Extract unique categories from markdown (lines starting with "### ")
+// Also labels first [D+P] line in each category
 const extractCategoriesFromMarkdown = (markdown: string) => {
   if (!markdown) {
     categoriesList.value = [];
@@ -799,9 +809,18 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   
   const lines = markdown.split('\n');
   const categoryMap = new Map<string, { name: string; page: number; observationCount: number }>();
+  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
   
-  // FIRST PASS: Find ALL categories (don't skip any lines)
+  // Build page boundary map: page number -> line index
+  const pageBoundaries = new Map<number, number>();
+  
+  // Track which categories have had their first [D+P] line labeled
+  const categoryFirstDPlusLabeled = new Map<string, boolean>();
+  
+  // FIRST PASS: Find ALL categories and label first [D+P] line in each
   let currentPage = 0;
+  let currentCategory: string | null = null;
+  
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     
@@ -809,12 +828,14 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     const pageMatch = line.match(/^##\s+Page\s+(\d+)$/);
     if (pageMatch) {
       currentPage = parseInt(pageMatch[1], 10);
+      pageBoundaries.set(currentPage, i);
       continue;
     }
     
     // Check for category header: "### Category Name"
     if (line.startsWith('### ')) {
       const categoryName = line.substring(4).trim();
+      currentCategory = categoryName;
       
       // Add ALL categories to the map
       if (categoryName && !categoryMap.has(categoryName)) {
@@ -823,12 +844,28 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
           page: currentPage || 1,
           observationCount: 0
         });
+        categoryFirstDPlusLabeled.set(categoryName, false);
+      }
+      continue;
+    }
+    
+    // Check for first [D+P] line in current category
+    if (currentCategory && !categoryFirstDPlusLabeled.get(currentCategory)) {
+      // Check if this line matches Date + Place pattern
+      if (dateLocationPattern.test(line)) {
+        // Label this line with category name
+        lines[i] = `[D+P] ${currentCategory} ${line}`;
+        categoryFirstDPlusLabeled.set(currentCategory, true);
+        console.log(`[LISTS] FIRST PASS: Found initial [D+P] for "${currentCategory}" at line ${i + 1}`);
       }
     }
   }
   
   // Convert map to array
   categoriesList.value = Array.from(categoryMap.values());
+  
+  // Return modified markdown with labeled first [D+P] lines
+  return lines.join('\n');
 };
 
 // Handle category page link click
@@ -965,13 +1002,18 @@ const copyNoteToClipboard = async (note: ClinicalNote) => {
   }
 };
 
-// Debug: Mark all Date + Place of Service lines with [D+P] prefix
+// Mark all Date + Place of Service lines with [D+P] prefix
+// Skips lines that already have [D+P] prefix (from FIRST PASS category labeling)
 const markDatePlaceLines = (markdown: string): string => {
   const lines = markdown.split('\n');
   const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
   
   const markedLines = lines.map((line) => {
     const trimmed = line.trim();
+    // Skip if already marked with [D+P] (from FIRST PASS)
+    if (trimmed.startsWith('[D+P] ')) {
+      return line;
+    }
     if (dateLocationPattern.test(trimmed)) {
       return `[D+P] ${line}`;
     }
@@ -1027,10 +1069,10 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
 // Reload categories and observations whenever markdown content is available
 const reloadCategories = async () => {
   if (markdownContent.value) {
-    extractCategoriesFromMarkdown(markdownContent.value);
-    
-    // Debug: Mark Date + Place lines and update display
-    const markedMarkdown = markDatePlaceLines(markdownContent.value);
+    // Extract categories and label first [D+P] lines (returns modified markdown)
+    const modifiedMarkdown = extractCategoriesFromMarkdown(markdownContent.value);
+    // Mark remaining Date + Place lines with [D+P] prefix
+    const markedMarkdown = markDatePlaceLines(modifiedMarkdown);
     markdownContent.value = markedMarkdown;
     
     // FOURTH PASS: Count observations (Clinical Notes only for now)
@@ -1064,7 +1106,11 @@ onActivated(() => {
 // Watch for markdown content changes and reload categories
 watch(markdownContent, (newContent) => {
   if (newContent) {
-    extractCategoriesFromMarkdown(newContent);
+    // Extract categories and label first [D+P] lines (returns modified markdown)
+    const modifiedMarkdown = extractCategoriesFromMarkdown(newContent);
+    // Mark remaining Date + Place lines with [D+P] prefix
+    const markedMarkdown = markDatePlaceLines(modifiedMarkdown);
+    markdownContent.value = markedMarkdown;
   }
 });
 
