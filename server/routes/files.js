@@ -2589,5 +2589,78 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       res.status(500).json({ error: `Failed to get categories: ${error.message}` });
     }
   });
+
+  /**
+   * POST /api/files/lists/current-medications
+   * Get current medications from Medication Records using Private AI
+   */
+  app.post('/api/files/lists/current-medications', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { medicationRecords } = req.body;
+
+      if (!medicationRecords || !Array.isArray(medicationRecords)) {
+        return res.status(400).json({ error: 'medicationRecords array is required' });
+      }
+
+      // Get user document to access agent info
+      const userDoc = await cloudant.getDocument('maia_users', userId);
+      
+      if (!userDoc || !userDoc.assignedAgentId || !userDoc.agentEndpoint) {
+        return res.status(400).json({ error: 'Private AI agent not configured for user' });
+      }
+
+      // Import DigitalOcean provider
+      const { DigitalOceanProvider } = await import('../../lib/chat-client/providers/digitalocean.js');
+      const { getOrCreateAgentApiKey } = await import('../utils/agent-helper.js');
+      
+      // Get or create API key
+      const apiKey = await getOrCreateAgentApiKey(doClient, cloudant, userId, userDoc.assignedAgentId);
+      
+      // Create provider
+      const agentProvider = new DigitalOceanProvider(apiKey, {
+        baseURL: userDoc.agentEndpoint
+      });
+
+      // Format medication records for the prompt
+      const medicationsText = medicationRecords.map((obs, idx) => {
+        return `${idx + 1}. ${obs.display || obs.date || 'Unknown medication'}`;
+      }).join('\n');
+
+      // Create prompt
+      const prompt = `What are the current medications from this list?\n\n${medicationsText}\n\nPlease list only the medications that are currently active or being taken. Format your response as a clear, readable list.`;
+
+      console.log(`🤖 [LISTS] Calling Private AI to identify current medications for user ${userId}`);
+
+      // Call the agent
+      const response = await agentProvider.chat(
+        [{ role: 'user', content: prompt }],
+        { 
+          model: userDoc.agentModelName || 'openai-gpt-oss-120b',
+          stream: false
+        }
+      );
+
+      const aiResponse = response.content || response.text || '';
+      
+      if (!aiResponse || aiResponse.trim().length === 0) {
+        return res.status(500).json({ error: 'Empty response from Private AI' });
+      }
+
+      console.log(`✅ [LISTS] Received current medications response from Private AI`);
+
+      res.json({
+        success: true,
+        currentMedications: aiResponse.trim()
+      });
+    } catch (error) {
+      console.error('❌ [LISTS] Error getting current medications:', error);
+      res.status(500).json({ error: `Failed to get current medications: ${error.message}` });
+    }
+  });
 }
 

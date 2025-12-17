@@ -15,6 +15,24 @@
       </div>
     </div>
 
+    <!-- Current Medications -->
+    <q-card v-if="currentMedications" class="q-mb-md">
+      <q-card-section>
+        <div class="text-h6 q-mb-md">Current Medications</div>
+        <div class="text-body2" style="white-space: pre-wrap;">{{ currentMedications }}</div>
+        <q-btn
+          v-if="hasMedicationRecords"
+          flat
+          dense
+          icon="refresh"
+          label="Refresh"
+          @click="loadCurrentMedications"
+          :loading="isLoadingCurrentMedications"
+          class="q-mt-sm"
+        />
+      </q-card-section>
+    </q-card>
+
     <!-- Update Lists from Initial File -->
     <q-card v-if="!hasSavedResults" class="q-mb-md">
       <q-card-section>
@@ -384,6 +402,8 @@ const expandedCategories = ref<Set<string>>(new Set());
 const showPdfViewer = ref(false);
 const viewingPdfFile = ref<{ bucketKey?: string; name?: string; fileUrl?: string; originalFile?: File } | undefined>(undefined);
 const pdfInitialPage = ref<number | undefined>(undefined);
+const currentMedications = ref<string | null>(null);
+const isLoadingCurrentMedications = ref(false);
 
 const checkInitialFile = async () => {
   try {
@@ -1466,6 +1486,14 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       expanded: expandedCategories.value.has(categoryName)
     };
   });
+  
+  // After processing categories, load current medications if Medication Records exist
+  const medicationCategory = categoriesList.value.find(cat => 
+    cat.name.toLowerCase().includes('medication')
+  );
+  if (medicationCategory && medicationCategory.observations && medicationCategory.observations.length > 0) {
+    loadCurrentMedications();
+  }
 };
 
 
@@ -1498,6 +1526,58 @@ onMounted(() => {
   checkInitialFile();
   loadClinicalNotes();
   loadSavedResults(); // Check for saved results first
+});
+
+// Load current medications from Medication Records
+const loadCurrentMedications = async () => {
+  // Find Medication Records category
+  const medicationCategory = categoriesList.value.find(cat => 
+    cat.name.toLowerCase().includes('medication')
+  );
+
+  if (!medicationCategory || !medicationCategory.observations || medicationCategory.observations.length === 0) {
+    currentMedications.value = null;
+    return;
+  }
+
+  isLoadingCurrentMedications.value = true;
+  try {
+    const response = await fetch('/api/files/lists/current-medications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        medicationRecords: medicationCategory.observations
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(errorData.error || 'Failed to get current medications');
+    }
+
+    const result = await response.json();
+    if (result.success && result.currentMedications) {
+      currentMedications.value = result.currentMedications;
+    } else {
+      currentMedications.value = null;
+    }
+  } catch (err) {
+    console.error('Error loading current medications:', err);
+    currentMedications.value = null;
+  } finally {
+    isLoadingCurrentMedications.value = false;
+  }
+};
+
+// Computed property to check if we have medication records
+const hasMedicationRecords = computed(() => {
+  const medicationCategory = categoriesList.value.find(cat => 
+    cat.name.toLowerCase().includes('medication')
+  );
+  return medicationCategory && medicationCategory.observations && medicationCategory.observations.length > 0;
 });
 
 // Reload categories when component is activated (if using KeepAlive)
