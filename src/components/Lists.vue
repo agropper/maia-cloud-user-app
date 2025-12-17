@@ -1148,6 +1148,12 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
   
   // Convert map to array
   categoriesList.value = Array.from(categoryMap.values());
+  
+  // Debug: Log observation counts
+  console.log('[LISTS] Observation counts from extractCategoriesFromMarkdown:');
+  categoriesList.value.forEach(cat => {
+    console.log(`  ${cat.name}: ${cat.observationCount} observations`);
+  });
 };
 
 // Handle category page link click
@@ -1362,9 +1368,6 @@ const reloadCategories = async () => {
     
     // THIRD PASS: Count [D+P] lines in all categories
     countDatePlaceInAllCategories(markdownContent.value);
-    
-    // FOURTH PASS: Count observations according to category-specific rules
-    countObservationsByCategory(markdownContent.value);
   } else {
     // If no markdown in memory, fetch it
     await loadSavedResults();
