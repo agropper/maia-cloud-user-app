@@ -1395,15 +1395,12 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       return category; // Return unchanged for other categories
     }
     
-    const startPage = category.page;
-    const startLineIndex = pageBoundaries.get(startPage) ?? 0;
-    const endLineIndex = findNextPageBoundary(startLineIndex);
-    
+    // Process ALL pages, not just the starting page
     let observationCount = 0;
     let observationsToLog = 11; // First observation + next 10
     
-    // Clinical Notes: Count lines starting with "Created: " within page range
-    for (let i = startLineIndex; i < endLineIndex; i++) {
+    // Clinical Notes: Count lines starting with "Created: " across all pages
+    for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (line.startsWith('Created: ')) {
         observationCount++;
