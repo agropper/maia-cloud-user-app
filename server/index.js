@@ -8180,7 +8180,8 @@ app.get('/api/user-status', async (req, res) => {
       hasKB,
       hasFilesInKB,
       kbStatus, // 'none' | 'not_attached' | 'attached'
-      initialFile
+      initialFile,
+      currentMedications: userDoc.currentMedications || null
     });
   } catch (error) {
     console.error('❌ Error fetching user status:', error);

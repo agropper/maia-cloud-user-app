@@ -1591,6 +1591,8 @@ onMounted(() => {
   checkInitialFile();
   loadClinicalNotes();
   loadSavedResults(); // Check for saved results first
+  // Load current medications from user document
+  loadCurrentMedications();
 });
 
 // Load current medications from user document or Medication Records
