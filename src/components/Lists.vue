@@ -416,6 +416,9 @@ const loadSavedResults = async () => {
         // THIRD PASS: Count [D+P] lines in all categories
         countDatePlaceInAllCategories(markdownContent.value);
         
+        // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+        countObservationsByPageRange(markdownContent.value);
+        
         // Also try to load results.json if it exists
         const resultsResponse = await fetch('/api/files/lists/results', {
           credentials: 'include'
@@ -616,6 +619,9 @@ const processInitialFile = async () => {
     // THIRD PASS: Count [D+P] lines in all categories
     countDatePlaceInAllCategories(markedMarkdown);
     
+    // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+    countObservationsByPageRange(markedMarkdown);
+    
     if (data.markdownBucketKey) {
       savedPdfBucketKey.value = data.markdownBucketKey;
     }
@@ -762,6 +768,9 @@ const cleanupMarkdown = async () => {
         
         // THIRD PASS: Count [D+P] lines in all categories
         countDatePlaceInAllCategories(markdownContent.value);
+        
+        // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+        countObservationsByPageRange(markdownContent.value);
       }
     }
     
@@ -1139,21 +1148,8 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
     }
   }
   
-  // Save the last category's observation count
-  if (currentCategory && categoryMap.has(currentCategory)) {
-    const cat = categoryMap.get(currentCategory)!;
-    cat.observationCount = observationCount;
-    categoryMap.set(currentCategory, cat);
-  }
-  
-  // Convert map to array
+  // Convert map to array (observation counts will be set by fourth pass)
   categoriesList.value = Array.from(categoryMap.values());
-  
-  // Debug: Log observation counts
-  console.log('[LISTS] Observation counts from extractCategoriesFromMarkdown:');
-  categoriesList.value.forEach(cat => {
-    console.log(`  ${cat.name}: ${cat.observationCount} observations`);
-  });
 };
 
 // Handle category page link click
@@ -1356,6 +1352,141 @@ const countDatePlaceInAllCategories = (markdown: string): void => {
   });
 };
 
+// FOURTH PASS: Count observations based on [D+P] lines within page ranges
+// Works on marked markdown (with [D+P] prefixes) and uses page boundaries
+const countObservationsByPageRange = (markedMarkdown: string): void => {
+  const lines = markedMarkdown.split('\n');
+  const dateLocationPattern = /^[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4}\s+\S+/i;
+  
+  // Build page boundary map: page number -> line index
+  const pageBoundaries = new Map<number, number>();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const pageMatch = line.match(/^##\s+Page\s+(\d+)$/);
+    if (pageMatch) {
+      const pageNum = parseInt(pageMatch[1], 10);
+      pageBoundaries.set(pageNum, i);
+    }
+  }
+  
+  // Helper to find next page boundary after a given line index
+  const findNextPageBoundary = (startIndex: number): number => {
+    for (let j = startIndex + 1; j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (line.match(/^##\s+Page\s+\d+$/)) {
+        return j;
+      }
+    }
+    return lines.length; // EOF
+  };
+  
+  // Helper to find next [D+P] line starting from index
+  const findNextDatePlace = (startIndex: number, endIndex: number): number => {
+    for (let j = startIndex + 1; j < endIndex; j++) {
+      const line = lines[j].trim();
+      if (line.startsWith('[D+P] ')) {
+        return j;
+      }
+    }
+    return -1; // Not found
+  };
+  
+  // Process each category
+  categoriesList.value = categoriesList.value.map(category => {
+    const categoryName = category.name.toLowerCase();
+    const startPage = category.page;
+    const startLineIndex = pageBoundaries.get(startPage) ?? 0;
+    const endLineIndex = findNextPageBoundary(startLineIndex);
+    
+    let observationCount = 0;
+    
+    // Allergies: Count lines after "## ALLERGY..." within page range
+    if (categoryName.includes('allerg')) {
+      for (let i = startLineIndex; i < endLineIndex; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('## ALLERGY') || line.startsWith('## Allergy') || line.startsWith('## allergy')) {
+          let j = i + 1;
+          while (j < endLineIndex) {
+            const nextLine = lines[j].trim();
+            if (nextLine.startsWith('### ') || nextLine.match(/^##\s+Page\s+\d+$/)) {
+              break;
+            }
+            if (nextLine !== '') {
+              observationCount++;
+            }
+            j++;
+          }
+        }
+      }
+    }
+    
+    // Clinical Notes: Count lines starting with "Created: " within page range
+    else if (categoryName.includes('clinical notes')) {
+      for (let i = startLineIndex; i < endLineIndex; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('Created: ')) {
+          observationCount++;
+        }
+      }
+    }
+    
+    // Clinical Vitals, Conditions, Immunizations, Procedures: Count [D+P] lines
+    else if (categoryName.includes('clinical vitals') || categoryName.includes('vitals') ||
+             categoryName.includes('condition') ||
+             categoryName.includes('immunization') ||
+             categoryName.includes('procedure')) {
+      for (let i = startLineIndex; i < endLineIndex; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('[D+P] ')) {
+          const lineWithoutPrefix = line.substring(6).trim();
+          if (dateLocationPattern.test(lineWithoutPrefix)) {
+            observationCount++;
+            // Skip to next [D+P] line or end of page
+            const nextDPlus = findNextDatePlace(i, endLineIndex);
+            if (nextDPlus > 0) {
+              i = nextDPlus - 1; // -1 because loop will increment
+            } else {
+              break; // No more [D+P] lines in this page range
+            }
+          }
+        }
+      }
+    }
+    
+    // Lab Results, Medication Records: Count [D+P] lines, include "## " table headers
+    else if (categoryName.includes('lab results') || categoryName.includes('lab result') ||
+             categoryName.includes('medication')) {
+      for (let i = startLineIndex; i < endLineIndex; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('[D+P] ')) {
+          const lineWithoutPrefix = line.substring(6).trim();
+          if (dateLocationPattern.test(lineWithoutPrefix)) {
+            observationCount++;
+            // Skip to next [D+P] line or end of page
+            const nextDPlus = findNextDatePlace(i, endLineIndex);
+            if (nextDPlus > 0) {
+              i = nextDPlus - 1; // -1 because loop will increment
+            } else {
+              break; // No more [D+P] lines in this page range
+            }
+          }
+        }
+      }
+    }
+    
+    return {
+      ...category,
+      observationCount
+    };
+  });
+  
+  // Debug: Log observation counts
+  console.log('[LISTS] Observation counts from countObservationsByPageRange:');
+  categoriesList.value.forEach(cat => {
+    console.log(`  ${cat.name}: ${cat.observationCount} observations`);
+  });
+};
+
 
 // Reload categories and observations whenever markdown content is available
 const reloadCategories = async () => {
@@ -1368,6 +1499,9 @@ const reloadCategories = async () => {
     
     // THIRD PASS: Count [D+P] lines in all categories
     countDatePlaceInAllCategories(markdownContent.value);
+    
+    // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+    countObservationsByPageRange(markdownContent.value);
   } else {
     // If no markdown in memory, fetch it
     await loadSavedResults();
@@ -1379,6 +1513,9 @@ const reloadCategories = async () => {
       
       // THIRD PASS: Count [D+P] lines in all categories
       countDatePlaceInAllCategories(markdownContent.value);
+      
+      // FOURTH PASS: Count observations based on [D+P] lines within page ranges
+      countObservationsByPageRange(markdownContent.value);
     }
   }
 };
