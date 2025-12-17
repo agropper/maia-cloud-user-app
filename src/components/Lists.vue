@@ -132,7 +132,10 @@
                     >
                       <q-item-section>
                         <q-item-label class="text-body2">
-                          <span v-html="obs.display.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')"></span>
+                          <span 
+                            v-html="obs.display.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')"
+                            @click="handleObservationClick($event, obs.page)"
+                          ></span>
                         </q-item-label>
                       </q-item-section>
                     </q-item>
@@ -364,7 +367,7 @@ const categoriesList = ref<Array<{
   observationCount: number; 
   startLine?: number; 
   endLine?: number;
-  observations?: Array<{ date: string; display: string }>;
+  observations?: Array<{ date: string; display: string; page?: number }>;
   expanded?: boolean;
 }>>([]);
 const expandedCategories = ref<Set<string>>(new Set());
@@ -966,6 +969,16 @@ const handleCategoryPageClick = (page: number) => {
   showPdfViewer.value = true;
 };
 
+// Handle observation click (for Clinical Vitals line count links)
+const handleObservationClick = (event: Event, page?: number) => {
+  const target = event.target as HTMLElement;
+  // Check if clicked element is a link with data-page attribute
+  if (target.tagName === 'A' && target.getAttribute('data-page') && page) {
+    event.preventDefault();
+    handleCategoryPageClick(page);
+  }
+};
+
 const downloadMarkdown = () => {
   const contentToDownload = markdownContent.value || (pdfData.value?.fullMarkdown);
   if (!contentToDownload) {
@@ -1085,14 +1098,27 @@ const copyNoteToClipboard = async (note: ClinicalNote) => {
   }
 };
 
+// Find page number for a given line index
+const findPageForLine = (lineIndex: number, lines: string[]): number => {
+  let currentPage = 1;
+  for (let i = 0; i <= lineIndex && i < lines.length; i++) {
+    const line = lines[i].trim();
+    const pageMatch = line.match(/^##\s+Page\s+(\d+)$/);
+    if (pageMatch) {
+      currentPage = parseInt(pageMatch[1], 10);
+    }
+  }
+  return currentPage;
+};
+
 // Extract observations for a category based on its type
 const extractObservationsForCategory = (
   categoryName: string,
   startLine: number,
   endLine: number,
   lines: string[]
-): Array<{ date: string; display: string }> => {
-  const observations: Array<{ date: string; display: string }> = [];
+): Array<{ date: string; display: string; page?: number }> => {
+  const observations: Array<{ date: string; display: string; page?: number }> = [];
   const categoryLower = categoryName.toLowerCase();
   
   let currentObservationStart = -1;
@@ -1108,9 +1134,10 @@ const extractObservationsForCategory = (
       // Save previous observation if exists
       if (currentObservationStart >= 0 && currentDate) {
         const obsLines = lines.slice(currentObservationStart, i);
-        const display = formatObservation(categoryName, currentDate, obsLines, lines, i);
+        const page = findPageForLine(currentObservationStart, lines);
+        const display = formatObservation(categoryName, currentDate, obsLines, lines, i, page);
         if (display) {
-          observations.push({ date: currentDate, display });
+          observations.push({ date: currentDate, display, page });
         }
       }
       
@@ -1126,20 +1153,22 @@ const extractObservationsForCategory = (
   // Save last observation
   if (currentObservationStart >= 0 && currentDate) {
     const obsLines = lines.slice(currentObservationStart, endLine + 1);
-    const display = formatObservation(categoryName, currentDate, obsLines, lines, endLine + 1);
+    const page = findPageForLine(currentObservationStart, lines);
+    const display = formatObservation(categoryName, currentDate, obsLines, lines, endLine + 1, page);
     if (display) {
-      observations.push({ date: currentDate, display });
+      observations.push({ date: currentDate, display, page });
     }
   }
   
   // Special handling for Allergies: if no [D+P] lines found, treat entire category as one observation
   if (categoryLower.includes('allerg') && dPlusCount === 0 && endLine > startLine) {
     const allLines = lines.slice(startLine, endLine + 1);
+    const page = findPageForLine(startLine, lines);
     // For Allergies, don't use a date - just use empty string
     const allergyDate = '';
-    const display = formatObservation(categoryName, allergyDate, allLines, lines, endLine + 1);
+    const display = formatObservation(categoryName, allergyDate, allLines, lines, endLine + 1, page);
     if (display && allLines.length > 1) {
-      observations.push({ date: allergyDate, display });
+      observations.push({ date: allergyDate, display, page });
     }
   }
   
@@ -1152,7 +1181,8 @@ const formatObservation = (
   date: string,
   obsLines: string[],
   allLines: string[],
-  nextDPlusIndex: number
+  nextDPlusIndex: number,
+  page?: number
 ): string => {
   const categoryLower = categoryName.toLowerCase();
   
@@ -1243,8 +1273,12 @@ const formatObservation = (
     return date;
   } else if (categoryLower.includes('clinical vitals') || 
              categoryLower.includes('lab result')) {
-    // Clinical Vitals, Lab Results: Date + total number of lines in observation
+    // Clinical Vitals, Lab Results: Date + total number of lines in observation (clickable if page available)
     const lineCount = obsLines.length;
+    if (page && categoryLower.includes('clinical vitals')) {
+      // Make line count clickable for Clinical Vitals
+      return `${date} (<a href="#" class="text-primary" style="text-decoration: underline; cursor: pointer;" data-page="${page}">${lineCount} line${lineCount !== 1 ? 's' : ''}</a>)`;
+    }
     return `${date} (${lineCount} line${lineCount !== 1 ? 's' : ''})`;
   }
   
