@@ -1121,8 +1121,9 @@ const extractObservationsForCategory = (
   const observations: Array<{ date: string; display: string; page?: number; lineCount?: number }> = [];
   const categoryLower = categoryName.toLowerCase();
   
-  // For Clinical Vitals, track observations by date to merge duplicates
-  const vitalsByDate = new Map<string, { lineCount: number; page?: number }>();
+  // For Clinical Vitals and Lab Results, track observations by date to merge duplicates
+  const shouldMergeByDate = categoryLower.includes('clinical vitals') || categoryLower.includes('lab result');
+  const mergedByDate = new Map<string, { lineCount: number; page?: number }>();
   
   let currentObservationStart = -1;
   let currentDate = '';
@@ -1139,14 +1140,14 @@ const extractObservationsForCategory = (
         const obsLines = lines.slice(currentObservationStart, i);
         const page = findPageForLine(currentObservationStart, lines);
         
-        if (categoryLower.includes('clinical vitals')) {
-          // For Clinical Vitals, merge observations with same date
-          const existing = vitalsByDate.get(currentDate);
+        if (shouldMergeByDate) {
+          // For Clinical Vitals and Lab Results, merge observations with same date
+          const existing = mergedByDate.get(currentDate);
           if (existing) {
             existing.lineCount += obsLines.length;
             // Keep the first page encountered for this date
           } else {
-            vitalsByDate.set(currentDate, { lineCount: obsLines.length, page });
+            mergedByDate.set(currentDate, { lineCount: obsLines.length, page });
           }
         } else {
           // For other categories, create separate observations
@@ -1171,13 +1172,13 @@ const extractObservationsForCategory = (
     const obsLines = lines.slice(currentObservationStart, endLine + 1);
     const page = findPageForLine(currentObservationStart, lines);
     
-    if (categoryLower.includes('clinical vitals')) {
-      // For Clinical Vitals, merge observations with same date
-      const existing = vitalsByDate.get(currentDate);
+    if (shouldMergeByDate) {
+      // For Clinical Vitals and Lab Results, merge observations with same date
+      const existing = mergedByDate.get(currentDate);
       if (existing) {
         existing.lineCount += obsLines.length;
       } else {
-        vitalsByDate.set(currentDate, { lineCount: obsLines.length, page });
+        mergedByDate.set(currentDate, { lineCount: obsLines.length, page });
       }
     } else {
       // For other categories, create separate observations
@@ -1188,9 +1189,9 @@ const extractObservationsForCategory = (
     }
   }
   
-  // For Clinical Vitals, convert merged dates to observations
-  if (categoryLower.includes('clinical vitals')) {
-    for (const [date, data] of vitalsByDate.entries()) {
+  // For Clinical Vitals and Lab Results, convert merged dates to observations
+  if (shouldMergeByDate) {
+    for (const [date, data] of mergedByDate.entries()) {
       const display = formatObservation(categoryName, date, [], lines, 0, data.page, data.lineCount);
       if (display) {
         observations.push({ date, display, page: data.page, lineCount: data.lineCount });
