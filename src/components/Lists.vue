@@ -1421,7 +1421,8 @@ const countObservationsByCategory = (markdown: string): void => {
     if (line.startsWith('### ')) {
       const categoryName = line.substring(4).trim();
       currentCategory = categoryName;
-      console.log(`[LISTS] FOURTH PASS: Entering category "${categoryName}" at line ${i}`);
+      const standardName = mapToStandardCategory(categoryName);
+      console.log(`[LISTS] FOURTH PASS: Entering category "${categoryName}" (mapped to "${standardName}") at line ${i}`);
       continue;
     }
     
