@@ -165,7 +165,10 @@
               
               <q-card>
                 <q-card-section>
-                  <q-list dense>
+                  <div v-if="!category.observations || category.observations.length === 0" class="text-grey q-pa-md text-center">
+                    No observations found for this category
+                  </div>
+                  <q-list v-else dense>
                     <template v-for="(obs, obsIndex) in category.observations" :key="obsIndex">
                       <q-item class="q-px-sm">
                         <q-item-section>
@@ -485,18 +488,61 @@ const checkInitialFile = async () => {
       credentials: 'include'
     });
     
-    if (response.ok) {
-      const result = await response.json();
-      hasInitialFile.value = !!(result.initialFile && result.initialFile.bucketKey);
-      if (result.initialFile && result.initialFile.bucketKey) {
+    if (!response.ok) {
+      return;
+    }
+    
+    const result = await response.json();
+    hasInitialFile.value = !!(result.initialFile && result.initialFile.bucketKey);
+    
+    if (result.initialFile && result.initialFile.bucketKey) {
+      initialFileInfo.value = {
+        bucketKey: result.initialFile.bucketKey,
+        fileName: result.initialFile.fileName || 'Initial File'
+      };
+      return;
+    }
+    
+    // Fallback: Try to get initial file from Lists markdown file name
+    // The markdown file is usually named after the PDF (e.g., "Apple_Health_for_AG.md" -> "Apple_Health_for_AG.pdf")
+    // The PDF should be in userId/KB/ folder (where KB is the KB name) for KB indexing
+    if (!initialFileInfo.value && markdownBucketKey.value) {
+      try {
+        // Get KB name from the result we already fetched
+        const kbName = result.kbName || null;
+        
+        // Extract PDF name from markdown bucket key
+        // Format: userId/Lists/FileName.md
+        const markdownKey = markdownBucketKey.value;
+        const fileName = markdownKey.split('/').pop()?.replace(/\.md$/, '') || 'Initial File';
+        const userId = markdownKey.split('/')[0];
+        
+        // Try different locations in order of likelihood:
+        // 1. userId/KB/FileName.pdf (most likely - where it should be for KB indexing)
+        // 2. userId/archived/FileName.pdf (if it was archived)
+        // 3. userId/FileName.pdf (root level - least likely)
+        const possiblePaths = [];
+        if (kbName) {
+          possiblePaths.push(`${userId}/${kbName}/${fileName}.pdf`);
+        }
+        possiblePaths.push(`${userId}/archived/${fileName}.pdf`);
+        possiblePaths.push(`${userId}/${fileName}.pdf`);
+        
+        // Use the KB path if we have KB name, otherwise try archived, then root
+        const pdfKey = possiblePaths[0]; // Start with most likely
+        const displayFileName = fileName.replace(/_/g, ' ');
+        
         initialFileInfo.value = {
-          bucketKey: result.initialFile.bucketKey,
-          fileName: result.initialFile.fileName || 'Initial File'
+          bucketKey: pdfKey,
+          fileName: displayFileName
         };
+        hasInitialFile.value = true;
+      } catch (fallbackErr) {
+        // Fallback failed - silently continue
       }
     }
   } catch (err) {
-    console.error('Error checking initial file:', err);
+    // Error checking initial file - silently continue
   }
 };
 
@@ -541,17 +587,20 @@ const loadSavedResults = async () => {
         markdownBucketKey.value = markdownResult.markdownBucketKey || null;
         hasSavedResults.value = true;
         
-        // Load initial file info if not already loaded
+        // Load markdown and compute categories/observations on-the-fly
+        const markedMarkdown = extractCategoriesFromMarkdown(markdownResult.markdown);
+        markdownContent.value = markedMarkdown;
+        countObservationsByPageRange(markdownContent.value);
+        
+        // Try to load initial file info (will use fallback if user document doesn't have it)
         if (!initialFileInfo.value) {
           await checkInitialFile();
         }
         
-        // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
-        const markedMarkdown = extractCategoriesFromMarkdown(markdownResult.markdown);
-        markdownContent.value = markedMarkdown;
-        
-        // SECOND PASS: Count [D+P] lines for each category
-        countObservationsByPageRange(markdownContent.value);
+        // Ensure initialFileInfo is set for PDF viewing
+        if (!initialFileInfo.value) {
+          await checkInitialFile();
+        }
         
         // Also try to load results.json if it exists
         const resultsResponse = await fetch('/api/files/lists/results', {
@@ -744,12 +793,10 @@ const processInitialFile = async () => {
       }
     }
     
-    // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
+    // Load markdown and compute categories/observations on-the-fly
     const markedMarkdown = extractCategoriesFromMarkdown(fullMarkdown);
     markdownContent.value = markedMarkdown;
-    
-    // SECOND PASS: Count [D+P] lines for each category
-    countObservationsByPageRange(markedMarkdown);
+    countObservationsByPageRange(markdownContent.value);
     
     if (data.markdownBucketKey) {
       savedPdfBucketKey.value = data.markdownBucketKey;
@@ -989,27 +1036,37 @@ const replaceListsSourceFile = () => {
       
       const processResult = await processResponse.json();
       
-      // Update user document with new initial file (both initialFile and files array) in the background
-      // This is done after processing so it doesn't block the flow
-      fetch('/api/user-file-metadata', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          userId: props.userId,
-          fileMetadata: {
-            fileName: file.name,
-            bucketKey: uploadResult.bucketKey,
-            fileSize: file.size,
-            fileType: 'pdf'
+      // Store initial file info FIRST (before async update)
+      if (processResult.fileName) {
+        initialFileInfo.value = {
+          bucketKey: bucketKey,
+          fileName: processResult.fileName
+        };
+      }
+      
+      // Update user document with new initial file (both initialFile and files array)
+      // Await to ensure it completes before the user might reload the page
+      try {
+        await fetch('/api/user-file-metadata', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
           },
-          updateInitialFile: true // Flag to also update initialFile field
-        })
-      }).catch(err => {
-        console.warn('Failed to update user document (non-critical):', err);
-      });
+          credentials: 'include',
+          body: JSON.stringify({
+            userId: props.userId,
+            fileMetadata: {
+              fileName: file.name,
+              bucketKey: uploadResult.bucketKey,
+              fileSize: file.size,
+              fileType: 'pdf'
+            },
+            updateInitialFile: true // Flag to also update initialFile field
+          })
+        });
+      } catch (err) {
+        // Failed to update user document (non-critical) - silently continue
+      }
       
       // Update state
       pdfData.value = {
@@ -1024,23 +1081,14 @@ const replaceListsSourceFile = () => {
       selectedFileName.value = processResult.fileName || file.name;
       hasSavedResults.value = true;
       
-      // Store initial file info
-      if (processResult.fileName) {
-        initialFileInfo.value = {
-          bucketKey: bucketKey,
-          fileName: processResult.fileName
-        };
-      }
-      
-      // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
+      // Load markdown and compute categories/observations on-the-fly
       const markedMarkdown = extractCategoriesFromMarkdown(fullMarkdown);
       markdownContent.value = markedMarkdown;
+      countObservationsByPageRange(markdownContent.value);
       
-      // SECOND PASS: Count [D+P] lines for each category
-      countObservationsByPageRange(markedMarkdown);
-      
-      // Automatically clean up markdown
-      await cleanupMarkdown();
+      // Note: cleanupMarkdown() is not needed here because the markdown is already cleaned
+      // during processing. cleanupMarkdown() would reload from the endpoint and might
+      // overwrite our freshly processed markdown with an older version.
       
       // Automatically show markdown content
       showMarkdownContent.value = true;
@@ -1211,9 +1259,21 @@ const extractCategoriesFromMarkdown = (markdown: string) => {
 };
 
 // Handle category page link click
-const handleCategoryPageClick = (page: number) => {
+const handleCategoryPageClick = async (page: number) => {
+  // Ensure initialFileInfo is loaded
+  if (!initialFileInfo.value) {
+    await checkInitialFile();
+  }
+  
   if (!initialFileInfo.value) {
     console.warn('No initial file info available for PDF viewing');
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: 'PDF file information not available. Please try refreshing the page.',
+        timeout: 3000
+      });
+    }
     return;
   }
   
@@ -1226,12 +1286,12 @@ const handleCategoryPageClick = (page: number) => {
 };
 
 // Handle observation click (for Clinical Vitals line count links)
-const handleObservationClick = (event: Event, page?: number) => {
+const handleObservationClick = async (event: Event, page?: number) => {
   const target = event.target as HTMLElement;
   // Check if clicked element is a link with data-page attribute
   if (target.tagName === 'A' && target.getAttribute('data-page') && page) {
     event.preventDefault();
-    handleCategoryPageClick(page);
+    await handleCategoryPageClick(page);
   }
 };
 
@@ -1725,35 +1785,206 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
 };
 
 
-// Reload categories and observations whenever markdown content is available
-const reloadCategories = async () => {
-  if (markdownContent.value) {
-    // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
-    const markedMarkdown = extractCategoriesFromMarkdown(markdownContent.value);
-    markdownContent.value = markedMarkdown;
+// Load categories and observations from stored category files
+const loadCategoriesFromFiles = async () => {
+  try {
+    // Get list of category files
+    const categoriesResponse = await fetch('/api/files/lists/categories', {
+      credentials: 'include'
+    });
     
-    // SECOND PASS: Count [D+P] lines for each category
-    countObservationsByPageRange(markdownContent.value);
-  } else {
-    // If no markdown in memory, fetch it
-    await loadSavedResults();
-    
-    // After loading, extract categories and mark the lines
-    if (markdownContent.value) {
-      // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
-      const markedMarkdown = extractCategoriesFromMarkdown(markdownContent.value);
-      markdownContent.value = markedMarkdown;
-      
-      // SECOND PASS: Count [D+P] lines for each category
-      countObservationsByPageRange(markdownContent.value);
+    if (!categoriesResponse.ok) {
+      return;
     }
+    
+    const categoriesResult = await categoriesResponse.json();
+    
+    if (!categoriesResult.success || !categoriesResult.categories || categoriesResult.categories.length === 0) {
+      categoriesList.value = [];
+      return;
+    }
+    
+    // Load each category file and parse observations
+    const loadedCategories = [];
+    
+    for (const categoryFile of categoriesResult.categories) {
+      try {
+        const categoryName = categoryFile.category;
+        const fileName = categoryFile.fileName; // Use the actual filename from the list
+        
+        // Use the filename directly (without .md extension) as the parameter
+        const categoryNameParam = fileName.replace(/\.md$/, '');
+        const categoryUrl = `/api/files/lists/category/${encodeURIComponent(categoryNameParam)}`;
+        
+        const categoryResponse = await fetch(categoryUrl, {
+          credentials: 'include'
+        });
+        
+        if (categoryResponse.ok) {
+          const categoryResult = await categoryResponse.json();
+          const content = categoryResult.content;
+          
+          // Parse category file to extract observations
+          const observations = parseObservationsFromCategoryFile(content, categoryName);
+          
+          // Extract page number from first observation or use default
+          const firstPage = observations.length > 0 && observations[0].page 
+            ? observations[0].page 
+            : 1;
+          
+          loadedCategories.push({
+            name: categoryName,
+            page: firstPage,
+            observationCount: observations.length,
+            observations: observations,
+            expanded: expandedCategories.value.has(categoryName)
+          });
+        }
+      } catch (err) {
+        // Error loading category file - silently continue
+      }
+    }
+    
+    categoriesList.value = loadedCategories;
+  } catch (err) {
+    categoriesList.value = [];
   }
 };
 
-onMounted(() => {
-  checkInitialFile();
+// Parse observations from a category markdown file
+const parseObservationsFromCategoryFile = (content: string, categoryName: string): Array<{ date: string; display: string; page?: number; lineCount?: number; outOfRangeLines?: string[] }> => {
+  const observations = [];
+  const lines = content.split('\n');
+  
+  let currentObservation: { date?: string; page?: number; display?: string; outOfRangeLines?: string[] } | null = null;
+  let observationLines: string[] = [];
+  let state: 'header' | 'metadata' | 'display' | 'outofrange' = 'header';
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    
+    // Skip header and total observations line
+    if (trimmed.startsWith('#') || trimmed.startsWith('**Total Observations:**')) {
+      continue;
+    }
+    
+    // Check for observation separator
+    if (trimmed === '---') {
+      // Save previous observation if exists
+      if (currentObservation) {
+        if (observationLines.length > 0) {
+          currentObservation.display = observationLines.join(' ').trim();
+        }
+        if (currentObservation.display) {
+          observations.push({
+            date: currentObservation.date || '',
+            display: currentObservation.display,
+            page: currentObservation.page,
+            outOfRangeLines: currentObservation.outOfRangeLines
+          });
+        }
+      }
+      // Start new observation
+      currentObservation = {};
+      observationLines = [];
+      state = 'metadata';
+      continue;
+    }
+    
+    // Check for date
+    if (trimmed.startsWith('**Date:**')) {
+      const dateMatch = trimmed.match(/\*\*Date:\*\*\s*(.+)/);
+      if (dateMatch) {
+        currentObservation = currentObservation || {};
+        currentObservation.date = dateMatch[1].trim();
+        state = 'metadata';
+      }
+      continue;
+    }
+    
+    // Check for page
+    if (trimmed.startsWith('**Page:**')) {
+      const pageMatch = trimmed.match(/\*\*Page:\*\*\s*(\d+)/);
+      if (pageMatch) {
+        currentObservation = currentObservation || {};
+        currentObservation.page = parseInt(pageMatch[1], 10);
+        state = 'display'; // After page, next non-empty line is display content
+      }
+      continue;
+    }
+    
+    // Check for out of range section
+    if (trimmed.startsWith('**Out of Range:**')) {
+      currentObservation = currentObservation || {};
+      currentObservation.outOfRangeLines = [];
+      state = 'outofrange';
+      // Collect out of range lines (lines starting with "-")
+      let j = i + 1;
+      while (j < lines.length) {
+        const nextLine = lines[j].trim();
+        if (nextLine.startsWith('-')) {
+          currentObservation.outOfRangeLines.push(nextLine.substring(1).trim());
+          j++;
+        } else if (nextLine === '' || nextLine === '---') {
+          break;
+        } else {
+          j++;
+        }
+      }
+      i = j - 1; // Skip processed lines
+      continue;
+    }
+    
+    // Collect display content
+    // Display content comes after Date/Page metadata (possibly after a blank line)
+    // Note: Display content can start with ** (markdown bold), so we check for metadata patterns instead
+    if (currentObservation) {
+      if (state === 'metadata' && trimmed === '') {
+        // Blank line after Date/Page metadata - switch to display mode
+        state = 'display';
+      } else if (state === 'display' && trimmed && !trimmed.startsWith('**Date:**') && !trimmed.startsWith('**Page:**') && !trimmed.startsWith('**Out of Range:**') && !trimmed.startsWith('- ') && trimmed !== '---') {
+        // We're in display mode - collect the content (can start with ** for markdown bold)
+        observationLines.push(trimmed);
+      } else if (state === 'metadata' && trimmed && !trimmed.startsWith('**Date:**') && !trimmed.startsWith('**Page:**') && !trimmed.startsWith('**Out of Range:**') && !trimmed.startsWith('- ') && trimmed !== '---') {
+        // Display content came immediately after Page (no blank line) - switch to display and collect
+        state = 'display';
+        observationLines.push(trimmed);
+      }
+    }
+  }
+  
+  // Add last observation if exists
+  if (currentObservation) {
+    if (observationLines.length > 0) {
+      currentObservation.display = observationLines.join(' ').trim();
+    }
+    if (currentObservation.display) {
+      observations.push({
+        date: currentObservation.date || '',
+        display: currentObservation.display,
+        page: currentObservation.page,
+        outOfRangeLines: currentObservation.outOfRangeLines
+      });
+    }
+  }
+  
+  return observations;
+};
+
+// Reload categories and observations from markdown
+const reloadCategories = async () => {
+  if (markdownContent.value) {
+    const markedMarkdown = extractCategoriesFromMarkdown(markdownContent.value);
+    countObservationsByPageRange(markedMarkdown);
+  }
+};
+
+onMounted(async () => {
+  // Load initial file info first (needed for PDF viewing)
+  await checkInitialFile();
   loadClinicalNotes();
-  loadSavedResults(); // Check for saved results first
+  await loadSavedResults(); // Check for saved results first
   // Load current medications from user document
   loadCurrentMedications();
 });
@@ -1910,15 +2141,11 @@ onActivated(() => {
   reloadCategories();
 });
 
-// Watch for markdown content changes and reload categories
-watch(markdownContent, (newContent) => {
-  if (newContent) {
-    // FIRST PASS: Extract categories and label ALL [D+P] lines (returns modified markdown)
-    const markedMarkdown = extractCategoriesFromMarkdown(newContent);
-    markdownContent.value = markedMarkdown;
-    
-    // SECOND PASS: Count [D+P] lines for each category
-    countObservationsByPageRange(markdownContent.value);
+// Watch for markdown content changes and recompute categories/observations on-the-fly
+watch(markdownContent, (newMarkdown) => {
+  if (newMarkdown) {
+    const markedMarkdown = extractCategoriesFromMarkdown(newMarkdown);
+    countObservationsByPageRange(markedMarkdown);
   }
 });
 

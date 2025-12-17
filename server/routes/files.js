@@ -9,6 +9,7 @@ import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } fr
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { extractPdfWithPages, extractIndividualClinicalNotes } from '../utils/pdf-parser.js';
 import { ClinicalNotesClient } from '../../lib/opensearch/clinical-notes.js';
+import { extractAndSaveCategoryFiles } from '../utils/lists-processor.js';
 
 /**
  * Extract medication records from markdown
@@ -526,6 +527,9 @@ Please provide a list of all top-level markdown categories (### headings) and th
     throw error;
   }
 }
+
+// extractAndSaveCategoryFiles is now imported from '../utils/lists-processor.js'
+// The function was moved to a shared utility to be used in both API endpoints and provisioning automation
 
 // Helper function to get S3 client
 function getS3Client() {
@@ -1117,13 +1121,10 @@ export default function setupFileRoutes(app, cloudant, doClient) {
               Bucket: bucketName,
               Key: file.Key
             }));
-            console.log(`🗑️ [LISTS] Deleted existing file before processing: ${file.Key}`);
           } catch (err) {
-            console.warn(`⚠️ [LISTS] Failed to delete existing file ${file.Key}:`, err);
           }
         }
       } catch (clearError) {
-        console.warn('⚠️ [LISTS] Failed to clear Lists folder before processing:', clearError);
         // Continue with processing even if clearing fails
       }
 
@@ -1146,7 +1147,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             userId: userId
           }
         }));
-        console.log(`💾 [LISTS] Saved PDF to ${savedPdfBucketKey}`);
 
         // Save processing results as JSON
         const resultsFileName = cleanFileName.replace(/\.pdf$/i, '_results.json');
@@ -1173,9 +1173,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             userId: userId
           }
         }));
-        console.log(`💾 [LISTS] Saved processing results to ${savedResultsBucketKey}`);
       } catch (saveError) {
-        console.error('⚠️ [LISTS] Failed to save PDF/results to Lists folder:', saveError);
         // Don't fail the request if saving fails
       }
 
@@ -1231,14 +1229,12 @@ export default function setupFileRoutes(app, cloudant, doClient) {
                 Bucket: bucketName,
                 Key: file.Key
               }));
-              console.log(`🗑️ [LISTS] Deleted cached list file during re-process: ${file.Key}`);
             } catch (err) {
-              console.warn(`⚠️ [LISTS] Failed to delete cached list file ${file.Key}:`, err);
+              // Failed to delete cached file - continue
             }
           }
         }
       } catch (cacheError) {
-        console.warn('⚠️ [LISTS] Failed to clear cache during re-process:', cacheError);
         // Continue with processing even if cache clearing fails
       }
 
@@ -1306,13 +1302,10 @@ export default function setupFileRoutes(app, cloudant, doClient) {
               Bucket: bucketName,
               Key: file.Key
             }));
-            console.log(`🗑️ [LISTS] Deleted existing file before processing: ${file.Key}`);
           } catch (err) {
-            console.warn(`⚠️ [LISTS] Failed to delete existing file ${file.Key}:`, err);
           }
         }
       } catch (clearError) {
-        console.warn('⚠️ [LISTS] Failed to clear Lists folder before processing:', clearError);
         // Continue with processing even if clearing fails
       }
 
@@ -1337,7 +1330,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
               sourceBucketKey: bucketKey
             }
           }));
-          console.log(`💾 [LISTS] Saved PDF to ${savedPdfBucketKey}`);
         } else {
           savedPdfBucketKey = bucketKey;
         }
@@ -1367,9 +1359,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             userId: userId
           }
         }));
-        console.log(`💾 [LISTS] Saved processing results to ${savedResultsBucketKey}`);
       } catch (saveError) {
-        console.error('⚠️ [LISTS] Failed to save PDF/results to Lists folder:', saveError);
         // Don't fail the request if saving fails
       }
 
@@ -1460,12 +1450,10 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         listIsStale = pdfProcessedAt > listProcessedAt;
       } catch (err) {
         // List file doesn't exist, that's fine
-        console.log(`📝 [LISTS] No existing list file found for ${categoryName}`);
       }
 
       // If list exists and is not stale, return it
       if (existingList && !listIsStale) {
-        console.log(`✅ [LISTS] Returning cached list for ${categoryName}`);
         return res.json({
           success: true,
           categoryName,
@@ -1477,7 +1465,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
 
       // Process the category
-      console.log(`📝 [LISTS] Processing ${categoryName} category on demand`);
       
       let individualItems = [];
       let indexedResult = null;
@@ -1556,7 +1543,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           userId: userId
         }
       }));
-      console.log(`💾 [LISTS] Saved processed list to ${listBucketKey}`);
 
       res.json({
         success: true,
@@ -1609,9 +1595,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             Key: file.Key
           }));
           deletedCount++;
-          console.log(`🗑️ [LISTS] Deleted file: ${file.Key}`);
         } catch (err) {
-          console.error(`❌ [LISTS] Failed to delete file ${file.Key}:`, err);
         }
       }
 
@@ -1631,20 +1615,14 @@ export default function setupFileRoutes(app, cloudant, doClient) {
    * Accepts optional bucketKey and fileName in request body to process a specific file
    */
   app.post('/api/files/lists/process-initial-file', async (req, res) => {
-    console.log(`🚀 [LISTS] POST /api/files/lists/process-initial-file called`);
     try {
       // Require authentication
       const userId = req.session?.userId || req.session?.deepLinkUserId;
       if (!userId) {
-        console.log(`❌ [LISTS] Authentication failed - no userId in session`);
         return res.status(401).json({ error: 'Authentication required' });
       }
-      console.log(`✅ [LISTS] Authenticated user: ${userId}`);
 
       const { bucketKey: providedBucketKey, fileName: providedFileName } = req.body || {};
-      console.log(`📋 [LISTS] Request body:`, JSON.stringify(req.body));
-      console.log(`📋 [LISTS] Provided bucketKey:`, providedBucketKey);
-      console.log(`📋 [LISTS] Provided fileName:`, providedFileName);
       
       let initialFileBucketKey;
       let initialFileName;
@@ -1653,9 +1631,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       if (providedBucketKey) {
         initialFileBucketKey = providedBucketKey;
         initialFileName = providedFileName || 'Replaced File';
-        console.log(`📄 [LISTS] Using provided file: ${initialFileName} (${initialFileBucketKey})`);
       } else {
-        console.log(`📄 [LISTS] No bucketKey provided, checking user document...`);
         // Otherwise, get from user document (original flow)
         const userDoc = await cloudant.getDocument('maia_users', userId);
         if (!userDoc) {
@@ -1672,9 +1648,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
 
       const { client: s3Client, bucketName } = getS3Client();
 
-      console.log(`📄 [LISTS] Processing initial file for Lists: ${initialFileName} (${initialFileBucketKey})`);
-      console.log(`📄 [LISTS] Using bucket: ${bucketName}`);
-
       // Get PDF from S3
       const { GetObjectCommand } = await import('@aws-sdk/client-s3');
       const getCommand = new GetObjectCommand({
@@ -1686,7 +1659,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       try {
         response = await s3Client.send(getCommand);
       } catch (err) {
-        console.error(`❌ [LISTS] Failed to get initial file from S3: ${err.message}`);
         return res.status(404).json({ error: `Initial file not found: ${err.message}` });
       }
 
@@ -1797,16 +1769,11 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       
       fullMarkdown = cleanedLines.join('\n');
       
-      if (pagesCleaned > 0) {
-        console.log(`🧹 [LISTS] Cleaned ${pagesCleaned} page(s) by removing page footers`);
-      }
-
       // Remove last 4 lines from markdown
       const markdownLines = fullMarkdown.split('\n');
       if (markdownLines.length > 4) {
         markdownLines.splice(-4);
         fullMarkdown = markdownLines.join('\n');
-        console.log(`✂️ [LISTS] Removed last 4 lines from markdown`);
       }
 
       // Save markdown to Lists folder
@@ -1814,9 +1781,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       const cleanFileName = initialFileName.replace(/[^a-zA-Z0-9.-]/g, '_');
       const markdownFileName = cleanFileName.replace(/\.pdf$/i, '.md');
       const markdownBucketKey = `${listsFolder}${markdownFileName}`;
-
-      console.log(`📝 [LISTS] Preparing to save markdown file: ${markdownBucketKey}`);
-      console.log(`📝 [LISTS] Markdown length: ${fullMarkdown.length} characters`);
 
       // Always delete existing markdown file if it exists (to ensure fresh creation)
       try {
@@ -1827,24 +1791,19 @@ export default function setupFileRoutes(app, cloudant, doClient) {
             Key: markdownBucketKey
           }));
           // File exists - delete it
-          console.log(`🗑️ [LISTS] Deleting existing markdown file: ${markdownBucketKey}`);
           await s3Client.send(new DeleteObjectCommand({
             Bucket: bucketName,
             Key: markdownBucketKey
           }));
-          console.log(`✅ [LISTS] Deleted existing markdown file`);
         } catch (headErr) {
           // File doesn't exist - that's fine, we'll create it
-          console.log(`ℹ️ [LISTS] No existing markdown file found - will create new one`);
         }
       } catch (deleteErr) {
-        console.warn('⚠️ [LISTS] Failed to check/delete existing markdown file:', deleteErr);
         // Continue with processing even if deletion fails
       }
 
       // Save markdown file
       const { PutObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
-      console.log(`💾 [LISTS] Attempting to save markdown to: ${markdownBucketKey} in bucket: ${bucketName}`);
       
       try {
         const putCommand = new PutObjectCommand({
@@ -1859,29 +1818,29 @@ export default function setupFileRoutes(app, cloudant, doClient) {
           }
         });
         
-        const putResult = await s3Client.send(putCommand);
-        console.log(`💾 [LISTS] PutObjectCommand completed. Result:`, putResult ? 'success' : 'no result');
-        console.log(`💾 [LISTS] Saved markdown to ${markdownBucketKey}`);
+        await s3Client.send(putCommand);
         
         // Verify the file was actually saved
-        console.log(`🔍 [LISTS] Verifying file exists at ${markdownBucketKey}...`);
         try {
-          const headResult = await s3Client.send(new HeadObjectCommand({
+          await s3Client.send(new HeadObjectCommand({
             Bucket: bucketName,
             Key: markdownBucketKey
           }));
-          console.log(`✅ [LISTS] Verified markdown file exists at ${markdownBucketKey}`);
-          console.log(`✅ [LISTS] File size: ${headResult.ContentLength} bytes, LastModified: ${headResult.LastModified}`);
         } catch (verifyErr) {
-          console.error(`❌ [LISTS] Failed to verify markdown file was saved: ${verifyErr.message}`);
-          console.error(`❌ [LISTS] Verification error details:`, verifyErr);
           throw new Error(`Markdown file was not saved successfully: ${verifyErr.message}`);
         }
       } catch (saveErr) {
-        console.error(`❌ [LISTS] Failed to save markdown file: ${saveErr.message}`);
-        console.error(`❌ [LISTS] Save error details:`, saveErr);
         throw new Error(`Failed to save markdown file: ${saveErr.message}`);
       }
+
+      // Extract categories and observations, then save category files
+      const categoryFiles = await extractAndSaveCategoryFiles(
+        fullMarkdown,
+        userId,
+        listsFolder,
+        s3Client,
+        bucketName
+      );
 
       res.json({
         success: true,
@@ -1889,11 +1848,141 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         totalPages: result.totalPages,
         pages: result.pages,
         fullMarkdown: fullMarkdown,
-        markdownBucketKey: markdownBucketKey
+        markdownBucketKey: markdownBucketKey,
+        categoryFiles: categoryFiles
       });
     } catch (error) {
       console.error('❌ Error processing initial file for Lists:', error);
       res.status(500).json({ error: `Failed to process initial file: ${error.message}` });
+    }
+  });
+
+  /**
+   * Get category file
+   * GET /api/files/lists/category/:categoryName
+   */
+  app.get('/api/files/lists/category/:categoryName', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const categoryNameParam = decodeURIComponent(req.params.categoryName);
+      const listsFolder = `${userId}/Lists/`;
+      
+      // The categoryName param is already sanitized (e.g., "clinical_notes")
+      // Use it directly as the filename
+      const categoryFileName = `${categoryNameParam}.md`;
+      const categoryBucketKey = `${listsFolder}${categoryFileName}`;
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const { GetObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
+
+      // Check if file exists
+      try {
+        await s3Client.send(new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: categoryBucketKey
+        }));
+      } catch (headErr) {
+        return res.status(404).json({ error: `Category file not found: ${categoryBucketKey}` });
+      }
+
+      // Get file content
+      const getCommand = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: categoryBucketKey
+      });
+      const response = await s3Client.send(getCommand);
+      
+      const chunks = [];
+      for await (const chunk of response.Body) {
+        chunks.push(chunk);
+      }
+      const content = Buffer.concat(chunks).toString('utf-8');
+
+      // Extract category name from filename for display (replace underscores with spaces)
+      const displayCategoryName = categoryNameParam.replace(/_/g, ' ');
+      
+      res.json({
+        success: true,
+        category: displayCategoryName,
+        content: content,
+        bucketKey: categoryBucketKey
+      });
+    } catch (error) {
+      console.error('❌ Error loading category file:', error);
+      res.status(500).json({ error: `Failed to load category file: ${error.message}` });
+    }
+  });
+
+  /**
+   * List all category files
+   * GET /api/files/lists/categories
+   */
+  app.get('/api/files/lists/categories', async (req, res) => {
+    try {
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const listsFolder = `${userId}/Lists/`;
+      const { client: s3Client, bucketName } = getS3Client();
+      const { ListObjectsV2Command } = await import('@aws-sdk/client-s3');
+
+      const listCommand = new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: listsFolder
+      });
+      const listResponse = await s3Client.send(listCommand);
+
+      const categoryFiles = [];
+      if (listResponse.Contents) {
+        // Get the main markdown file name (if it exists) to exclude it
+        const mainMarkdownFiles = (listResponse.Contents || [])
+          .filter(obj => {
+            const key = obj.Key || '';
+            if (!key.endsWith('.md')) return false;
+            const fileName = key.split('/').pop() || '';
+            // Main markdown files have longer names (from PDF filename), not short category names
+            // Category files are typically short names like "procedures.md", "medication_records.md"
+            return fileName.length > 20 || /[A-Z]/.test(fileName); // Main file has longer name or mixed case
+          })
+          .map(obj => obj.Key);
+        
+        for (const obj of listResponse.Contents) {
+          const key = obj.Key || '';
+          // Only include .md files that are NOT the main markdown file
+          if (key.endsWith('.md') && !mainMarkdownFiles.includes(key)) {
+            const fileName = key.split('/').pop() || '';
+            // Category files are typically short, lowercase names with underscores
+            // Exclude if it looks like a main file (long name or mixed case)
+            // Note: medication_records.md is 19 chars, so length < 30 is fine
+            const isLikelyCategoryFile = fileName.length < 30 && 
+              fileName === fileName.toLowerCase();
+            
+            if (isLikelyCategoryFile) {
+              // Extract category name from filename
+              const categoryName = fileName.replace(/\.md$/, '').replace(/_/g, ' ');
+              categoryFiles.push({
+                category: categoryName,
+                bucketKey: key,
+                fileName: fileName
+              });
+            }
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        categories: categoryFiles
+      });
+    } catch (error) {
+      console.error('❌ Error listing category files:', error);
+      res.status(500).json({ error: `Failed to list category files: ${error.message}` });
     }
   });
 
@@ -1921,7 +2010,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       
       // If we add Lists-specific fields later, clean them up here
       // For now, just log that cleanup was requested
-      console.log(`🧹 [LISTS] Cleanup requested for user ${userId} - Lists folder was deleted`);
 
       if (updated) {
         await cloudant.saveDocument('maia_users', userDoc);
@@ -1967,17 +2055,43 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         size: obj.Size,
         lastModified: obj.LastModified
       }));
-      console.log(`📂 [LISTS] Files in ${listsFolder}:`, JSON.stringify(allFiles, null, 2));
       
-      // Find the most recent .md file
-      const markdownFiles = (listResult.Contents || [])
-        .filter(obj => obj.Key && obj.Key.endsWith('.md'))
-        .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
-
-      console.log(`📄 [LISTS] Found ${markdownFiles.length} markdown file(s) in Lists folder`);
+      // Find the main markdown file (exclude category files)
+      // Category files have sanitized names like "procedures.md", "medication_records.md", etc.
+      // The main markdown file has the original PDF filename (e.g., "Apple_Health_for_AG.md")
+      const allMarkdownFiles = (listResult.Contents || [])
+        .filter(obj => obj.Key && obj.Key.endsWith('.md'));
+      
+      // Filter out category files - they typically have lowercase names with underscores
+      // and don't match the pattern of original PDF filenames
+      const mainMarkdownFiles = allMarkdownFiles.filter(obj => {
+        const fileName = obj.Key.split('/').pop() || '';
+        // Category files are typically short names like "procedures.md", "allergies.md"
+        // Main markdown files have longer names from the original PDF
+        // Check if it looks like a category file (short, all lowercase with underscores, no mixed case)
+        const isLikelyCategoryFile = fileName.length < 30 && 
+          fileName === fileName.toLowerCase() && 
+          (fileName.includes('_') || !/[A-Z]/.test(fileName));
+        return !isLikelyCategoryFile;
+      });
+      
+      // If no main markdown file found, try to find the one that's NOT a category file
+      // by checking if it matches the pattern of having the original PDF name
+      const markdownFiles = mainMarkdownFiles.length > 0 
+        ? mainMarkdownFiles.sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0))
+        : allMarkdownFiles
+            .filter(obj => {
+              // Exclude known category file patterns
+              const fileName = obj.Key.split('/').pop() || '';
+              const categoryPatterns = [
+                'procedures', 'medication', 'allerg', 'clinical_notes', 'clinical_vitals',
+                'lab_result', 'conditions', 'immunization'
+              ];
+              return !categoryPatterns.some(pattern => fileName.toLowerCase().includes(pattern));
+            })
+            .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
 
       if (markdownFiles.length === 0) {
-        console.log(`⚠️ [LISTS] No markdown files found in ${listsFolder}`);
         return res.json({
           success: true,
           hasMarkdown: false,
@@ -1988,9 +2102,8 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         });
       }
 
-      // Get the most recent markdown file
+      // Get the most recent main markdown file
       const latestMarkdownKey = markdownFiles[0].Key;
-      console.log(`📄 [LISTS] Loading markdown file: ${latestMarkdownKey}`);
       const { GetObjectCommand } = await import('@aws-sdk/client-s3');
       const getCommand = new GetObjectCommand({
         Bucket: bucketName,
@@ -2004,7 +2117,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
       const markdown = Buffer.concat(chunks).toString('utf-8');
 
-      console.log(`✅ [LISTS] Loaded markdown file: ${latestMarkdownKey} (${markdown.length} chars)`);
 
       res.json({
         success: true,
@@ -2167,7 +2279,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       if (markdownLines.length > 4) {
         markdownLines.splice(-4);
         cleanedMarkdown = markdownLines.join('\n');
-        console.log(`✂️ [LISTS] Removed last 4 lines from markdown during cleanup`);
       }
 
       // Save cleaned markdown back
@@ -2183,8 +2294,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         }
       }));
 
-      console.log(`🧹 [LISTS] Cleaned markdown file: ${markdownKey}`);
-      console.log(`📊 [LISTS] Cleaned ${pagesCleaned} page(s) by removing page footers`);
 
       res.json({
         success: true,
@@ -2652,7 +2761,6 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       // Create prompt
       const prompt = `What are the current medications from this list?\n\n${medicationsText}\n\nPlease list only the medications that are currently active or being taken. Format your response as a clear, readable list.`;
 
-      console.log(`🤖 [LISTS] Calling Private AI to identify current medications for user ${userId}`);
 
       // Call the agent
       const response = await agentProvider.chat(
@@ -2669,14 +2777,12 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         return res.status(500).json({ error: 'Empty response from Private AI' });
       }
 
-      console.log(`✅ [LISTS] Received current medications response from Private AI`);
 
       res.json({
         success: true,
         currentMedications: aiResponse.trim()
       });
     } catch (error) {
-      console.error('❌ [LISTS] Error getting current medications:', error);
       res.status(500).json({ error: `Failed to get current medications: ${error.message}` });
     }
   });

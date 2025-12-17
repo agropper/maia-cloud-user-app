@@ -3148,7 +3148,173 @@ async function provisionUserAsync(userId, token) {
       throw new Error(`Failed to create knowledge base: ${err.message}`);
     }
 
-    // Step 2.5: Index Initial File (if provided) and Generate Patient Summary
+    // Step 2.4: Process Initial File for Lists (NEW - before indexing)
+    // Extract categories and observations, save as separate category files
+    if (userDoc.initialFile && userDoc.initialFile.bucketKey) {
+      try {
+        const initialFileBucketKey = userDoc.initialFile.bucketKey;
+        const initialFileName = userDoc.initialFile.fileName;
+        
+        logProvisioning(userId, `Processing initial file for Lists: ${initialFileName}`, 'info');
+        updateStatus('Processing Lists from initial file...', { fileName: initialFileName });
+        
+        // Verify file exists in S3
+        const { S3Client, HeadObjectCommand, GetObjectCommand } = await import('@aws-sdk/client-s3');
+        const s3Client = new S3Client({
+          endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
+          region: 'us-east-1',
+          forcePathStyle: false,
+          credentials: {
+            accessKeyId: process.env.DIGITALOCEAN_AWS_ACCESS_KEY_ID || '',
+            secretAccessKey: process.env.DIGITALOCEAN_AWS_SECRET_ACCESS_KEY || ''
+          }
+        });
+        
+        try {
+          await s3Client.send(new HeadObjectCommand({
+            Bucket: bucketName,
+            Key: initialFileBucketKey
+          }));
+          
+          // Get PDF buffer
+          const getCommand = new GetObjectCommand({
+            Bucket: bucketName,
+            Key: initialFileBucketKey
+          });
+          const pdfResponse = await s3Client.send(getCommand);
+          const chunks = [];
+          for await (const chunk of pdfResponse.Body) {
+            chunks.push(chunk);
+          }
+          const pdfBuffer = Buffer.concat(chunks);
+          
+          // Extract PDF to markdown
+          const { extractPdfWithPages } = await import('./utils/pdf-parser.js');
+          const result = await extractPdfWithPages(pdfBuffer);
+          let fullMarkdown = result.pages.map(p => `## Page ${p.page}\n\n${p.markdown}`).join('\n\n---\n\n');
+          
+          // Clean up page footers (same logic as in files.js)
+          const pageFooterPattern = /^.*[Hh]ealth\s+[Pp]age\s+(\d+)\s+of\s+\d+.*$/;
+          const continuedOnPattern = /^.*[Cc]ontinued\s+on\s+.*$/;
+          const lines = fullMarkdown.split('\n');
+          const cleanedLines = [];
+          let i = 0;
+          
+          while (i < lines.length) {
+            const line = lines[i];
+            const trimmedLine = line.trim();
+            const footerMatch = trimmedLine.match(pageFooterPattern);
+            
+            if (footerMatch) {
+              const footerPageNum = parseInt(footerMatch[1], 10);
+              const nextPageNum = footerPageNum + 1;
+              
+              // Look backward for "Continued on " pattern
+              let lookBackIndex = cleanedLines.length - 1;
+              let foundContinuedOn = false;
+              let continuedOnIndex = -1;
+              let linesChecked = 0;
+              
+              while (lookBackIndex >= 0 && linesChecked < 3) {
+                const prevTrimmed = cleanedLines[lookBackIndex].trim();
+                if (prevTrimmed.match(continuedOnPattern)) {
+                  foundContinuedOn = true;
+                  continuedOnIndex = lookBackIndex;
+                  break;
+                }
+                if (prevTrimmed !== '') {
+                  linesChecked++;
+                }
+                lookBackIndex--;
+              }
+              
+              if (foundContinuedOn && continuedOnIndex >= 0) {
+                cleanedLines.splice(continuedOnIndex, 1);
+              }
+              
+              // Look ahead for next "###" header
+              let j = i + 1;
+              let foundNextHeader = false;
+              let nextHeaderIndex = -1;
+              
+              while (j < lines.length) {
+                const nextTrimmed = lines[j].trim();
+                if (nextTrimmed.startsWith('###')) {
+                  foundNextHeader = true;
+                  nextHeaderIndex = j;
+                  break;
+                }
+                j++;
+              }
+              
+              if (foundNextHeader && nextHeaderIndex > i) {
+                cleanedLines.push(`## Page ${nextPageNum}`);
+                i = nextHeaderIndex;
+                continue;
+              } else {
+                cleanedLines.push(`## Page ${nextPageNum}`);
+                i++;
+                continue;
+              }
+            }
+            
+            cleanedLines.push(line);
+            i++;
+          }
+          
+          fullMarkdown = cleanedLines.join('\n');
+          
+          // Remove last 4 lines
+          const markdownLines = fullMarkdown.split('\n');
+          if (markdownLines.length > 4) {
+            markdownLines.splice(-4);
+            fullMarkdown = markdownLines.join('\n');
+          }
+          
+          // Save main markdown file
+          const listsFolder = `${userId}/Lists/`;
+          const cleanFileName = initialFileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const markdownFileName = cleanFileName.replace(/\.pdf$/i, '.md');
+          const markdownBucketKey = `${listsFolder}${markdownFileName}`;
+          
+          const { PutObjectCommand } = await import('@aws-sdk/client-s3');
+          await s3Client.send(new PutObjectCommand({
+            Bucket: bucketName,
+            Key: markdownBucketKey,
+            Body: fullMarkdown,
+            ContentType: 'text/markdown',
+            Metadata: {
+              fileName: initialFileName,
+              processedAt: new Date().toISOString(),
+              userId: userId
+            }
+          }));
+          
+          logProvisioning(userId, `Saved markdown file: ${markdownBucketKey}`, 'success');
+          
+          // Extract and save category files
+          const { extractAndSaveCategoryFiles } = await import('./utils/lists-processor.js');
+          const categoryFiles = await extractAndSaveCategoryFiles(
+            fullMarkdown,
+            userId,
+            listsFolder,
+            s3Client,
+            bucketName
+          );
+          
+          logProvisioning(userId, `Saved ${categoryFiles.length} category file(s)`, 'success');
+          updateStatus('Lists processing complete', { categoryFilesCount: categoryFiles.length });
+        } catch (listsErr) {
+          logProvisioning(userId, `Error processing Lists: ${listsErr.message}. Continuing provisioning.`, 'warning');
+          // Continue provisioning even if Lists processing fails
+        }
+      } catch (listsError) {
+        logProvisioning(userId, `Error in Lists processing step: ${listsError.message}. Continuing provisioning.`, 'warning');
+        // Continue provisioning even if Lists processing fails
+      }
+    }
+
+    // Step 2.5: Index Initial File (if provided)
     // This happens BEFORE agent creation so the agent can use the indexed data immediately
     if (userDoc.initialFile && userDoc.initialFile.bucketKey) {
       try {
@@ -4695,7 +4861,6 @@ app.post('/api/user-file-metadata', async (req, res) => {
         fileSize: fileMetadata.fileSize || 0,
         uploadedAt: new Date().toISOString()
       };
-      console.log(`✅ Updated initialFile for user ${userId}: ${fileMetadata.fileName}`);
     }
 
     // Set workflowStage to files_stored if files exist
@@ -8324,12 +8489,36 @@ app.get('/api/user-status', async (req, res) => {
     }
     
     // Include initial file info if available
-    const initialFile = userDoc.initialFile ? {
-      fileName: userDoc.initialFile.fileName,
-      bucketKey: userDoc.initialFile.bucketKey,
-      fileSize: userDoc.initialFile.fileSize,
-      uploadedAt: userDoc.initialFile.uploadedAt
-    } : null;
+    // If initialFile exists but bucketKey is missing, try to reconstruct it from KB name
+    let initialFile = null;
+    if (userDoc.initialFile) {
+      let bucketKey = userDoc.initialFile.bucketKey;
+      
+      // If bucketKey is missing, try to reconstruct it from KB name and fileName
+      if (!bucketKey && userDoc.initialFile.fileName) {
+        const kbName = getKBNameFromUserDoc(userDoc, userId);
+        if (kbName) {
+          // File should be in userId/KB/FileName.pdf
+          const cleanFileName = userDoc.initialFile.fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+          bucketKey = `${userId}/${kbName}/${cleanFileName}`;
+          // Update user document with the reconstructed bucketKey
+          try {
+            userDoc.initialFile.bucketKey = bucketKey;
+            await cloudant.saveDocument('maia_users', userDoc);
+          } catch (updateErr) {
+            // Failed to update user document - continue
+          }
+        }
+      }
+      
+      initialFile = {
+        fileName: userDoc.initialFile.fileName,
+        bucketKey: bucketKey,
+        fileSize: userDoc.initialFile.fileSize,
+        uploadedAt: userDoc.initialFile.uploadedAt
+      };
+      
+    }
 
     const workflowStage = userDoc.workflowStage || 'unknown';
     const fileCount = userDoc.files ? userDoc.files.length : 0;
@@ -8342,6 +8531,9 @@ app.get('/api/user-status', async (req, res) => {
                          Array.isArray(userDoc.kbIndexedFiles) && 
                          userDoc.kbIndexedFiles.length > 0;
 
+    // Get KB name for file path resolution
+    const kbName = getKBNameFromUserDoc(userDoc, userId);
+    
     res.json({
       success: true,
       workflowStage,
@@ -8350,6 +8542,7 @@ app.get('/api/user-status', async (req, res) => {
       hasKB,
       hasFilesInKB,
       kbStatus, // 'none' | 'not_attached' | 'attached'
+      kbName, // KB folder name (e.g., 'userId-agent-YYYYMMDD-HHMMSS')
       initialFile,
       currentMedications: userDoc.currentMedications || null
     });
