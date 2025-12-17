@@ -1628,6 +1628,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
   /**
    * Process initial file for Lists extraction
    * POST /api/files/lists/process-initial-file
+   * Accepts optional bucketKey and fileName in request body to process a specific file
    */
   app.post('/api/files/lists/process-initial-file', async (req, res) => {
     console.log(`🚀 [LISTS] POST /api/files/lists/process-initial-file called`);
@@ -1640,19 +1641,32 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       }
       console.log(`✅ [LISTS] Authenticated user: ${userId}`);
 
-      // Get user document to access initial file
-      const userDoc = await cloudant.getDocument('maia_users', userId);
-      if (!userDoc) {
-        return res.status(404).json({ error: 'User not found' });
-      }
+      const { bucketKey: providedBucketKey, fileName: providedFileName } = req.body || {};
+      
+      let initialFileBucketKey;
+      let initialFileName;
 
-      if (!userDoc.initialFile || !userDoc.initialFile.bucketKey) {
-        return res.status(400).json({ error: 'No initial file found for this user' });
+      // If bucketKey is provided in request, use it directly (for file replacement)
+      if (providedBucketKey) {
+        initialFileBucketKey = providedBucketKey;
+        initialFileName = providedFileName || 'Replaced File';
+        console.log(`📄 [LISTS] Using provided file: ${initialFileName} (${initialFileBucketKey})`);
+      } else {
+        // Otherwise, get from user document (original flow)
+        const userDoc = await cloudant.getDocument('maia_users', userId);
+        if (!userDoc) {
+          return res.status(404).json({ error: 'User not found' });
+        }
+
+        if (!userDoc.initialFile || !userDoc.initialFile.bucketKey) {
+          return res.status(400).json({ error: 'No initial file found for this user' });
+        }
+
+        initialFileBucketKey = userDoc.initialFile.bucketKey;
+        initialFileName = userDoc.initialFile.fileName;
       }
 
       const { client: s3Client, bucketName } = getS3Client();
-      const initialFileBucketKey = userDoc.initialFile.bucketKey;
-      const initialFileName = userDoc.initialFile.fileName;
 
       console.log(`📄 [LISTS] Processing initial file for Lists: ${initialFileName} (${initialFileBucketKey})`);
       console.log(`📄 [LISTS] Using bucket: ${bucketName}`);
