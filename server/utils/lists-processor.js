@@ -260,24 +260,24 @@ export async function extractAndSaveCategoryFiles(fullMarkdown, userId, listsFol
       const categoryFileName = `${sanitizedCategoryName}.md`;
       const categoryBucketKey = `${listsFolder}${categoryFileName}`;
       
-      // Build markdown content for category file
-      const categoryMarkdown = `# ${categoryName}\n\n` +
-        `**Total Observations:** ${observations.length}\n\n` +
-        `---\n\n` +
+      // Build markdown content for category file (compact format, preserves metadata and page links)
+      const categoryMarkdown = `# ${categoryName}\n` +
+        `**Total Observations:** ${observations.length}\n` +
         observations.map(obs => {
-          let line = '';
+          const parts = [];
           if (obs.date) {
-            line += `**Date:** ${obs.date}\n`;
+            parts.push(`**Date:** ${obs.date}`);
           }
           if (obs.page) {
-            line += `**Page:** ${obs.page}\n`;
+            parts.push(`**Page:** ${obs.page}`);
           }
-          line += `\n${obs.display}\n`;
+          const metadata = parts.length > 0 ? parts.join(' | ') + '\n' : '';
+          let line = metadata + obs.display;
           if (obs.outOfRangeLines && obs.outOfRangeLines.length > 0) {
-            line += `\n**Out of Range:**\n${obs.outOfRangeLines.map(l => `- ${l}`).join('\n')}\n`;
+            line += ` | **Out of Range:** ${obs.outOfRangeLines.map(l => l.trim()).join('; ')}`;
           }
           return line;
-        }).join('\n---\n\n');
+        }).join('\n---\n');
       
       // Delete existing category file if it exists
       try {

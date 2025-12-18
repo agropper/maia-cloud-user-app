@@ -1858,6 +1858,97 @@ export default function setupFileRoutes(app, cloudant, doClient) {
   });
 
   /**
+   * Save a category file from frontend
+   * POST /api/files/lists/save-category
+   */
+  app.post('/api/files/lists/save-category', async (req, res) => {
+    try {
+      // Require authentication
+      const userId = req.session?.userId || req.session?.deepLinkUserId;
+      if (!userId) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+
+      const { categoryName, observations } = req.body;
+      
+      if (!categoryName || !observations || !Array.isArray(observations)) {
+        return res.status(400).json({ error: 'categoryName and observations array are required' });
+      }
+
+      const { client: s3Client, bucketName } = getS3Client();
+      const { PutObjectCommand, HeadObjectCommand, DeleteObjectCommand } = await import('@aws-sdk/client-s3');
+      
+      // Sanitize category name for filename
+      const sanitizedCategoryName = categoryName
+        .replace(/[^a-zA-Z0-9\s-]/g, '')
+        .replace(/\s+/g, '_')
+        .toLowerCase();
+      
+      const listsFolder = `${userId}/Lists/`;
+      const categoryFileName = `${sanitizedCategoryName}.md`;
+      const categoryBucketKey = `${listsFolder}${categoryFileName}`;
+
+      // Check if file already exists
+      try {
+        await s3Client.send(new HeadObjectCommand({
+          Bucket: bucketName,
+          Key: categoryBucketKey
+        }));
+        // File exists - don't overwrite
+        return res.json({ 
+          success: true, 
+          message: 'Category file already exists',
+          bucketKey: categoryBucketKey
+        });
+      } catch (headErr) {
+        // File doesn't exist - proceed to save
+      }
+
+      // Build markdown content for category file (compact format, preserves metadata and page links)
+      const categoryMarkdown = `# ${categoryName}\n` +
+        `**Total Observations:** ${observations.length}\n` +
+        observations.map(obs => {
+          const parts = [];
+          if (obs.date) {
+            parts.push(`**Date:** ${obs.date}`);
+          }
+          if (obs.page) {
+            parts.push(`**Page:** ${obs.page}`);
+          }
+          const metadata = parts.length > 0 ? parts.join(' | ') + '\n' : '';
+          let line = metadata + obs.display;
+          if (obs.outOfRangeLines && obs.outOfRangeLines.length > 0) {
+            line += ` | **Out of Range:** ${obs.outOfRangeLines.map(l => l.trim()).join('; ')}`;
+          }
+          return line;
+        }).join('\n---\n');
+
+      // Save category file
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: categoryBucketKey,
+        Body: categoryMarkdown,
+        ContentType: 'text/markdown',
+        Metadata: {
+          categoryName: categoryName,
+          observationCount: observations.length.toString(),
+          processedAt: new Date().toISOString(),
+          userId: userId
+        }
+      }));
+
+      res.json({
+        success: true,
+        bucketKey: categoryBucketKey,
+        observationCount: observations.length
+      });
+    } catch (error) {
+      console.error('Error saving category file:', error);
+      res.status(500).json({ error: `Failed to save category file: ${error.message}` });
+    }
+  });
+
+  /**
    * Get category file
    * GET /api/files/lists/category/:categoryName
    */

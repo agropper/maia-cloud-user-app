@@ -1782,6 +1782,54 @@ const countObservationsByPageRange = (markedMarkdown: string): void => {
       loadCurrentMedications();
     }
   }
+  
+  // Save all categories to files if they don't already exist
+  for (const category of categoriesList.value) {
+    if (category.observations && category.observations.length > 0) {
+      saveCategoryIfNeeded(category);
+    }
+  }
+};
+
+// Save category file if it doesn't already exist (generic function for all categories)
+const saveCategoryIfNeeded = async (category: { name: string; observations: Array<{ date: string; display: string; page?: number; lineCount?: number; outOfRangeLines?: string[] }> }) => {
+  try {
+    // Sanitize category name to match backend format (same as lists-processor.js)
+    const sanitizedCategoryName = category.name
+      .replace(/[^a-zA-Z0-9\s-]/g, '')
+      .replace(/\s+/g, '_')
+      .toLowerCase();
+    
+    // Check if category file already exists (using sanitized name)
+    const checkResponse = await fetch(`/api/files/lists/category/${encodeURIComponent(sanitizedCategoryName)}`, {
+      credentials: 'include'
+    });
+    
+    if (checkResponse.ok) {
+      // File already exists - don't save
+      return;
+    }
+    
+    // File doesn't exist - save it
+    const saveResponse = await fetch('/api/files/lists/save-category', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      credentials: 'include',
+      body: JSON.stringify({
+        categoryName: category.name,
+        observations: category.observations
+      })
+    });
+    
+    if (saveResponse.ok) {
+      const result = await saveResponse.json();
+      // Successfully saved
+    }
+  } catch (err) {
+    // Failed to save - silently continue (non-critical)
+  }
 };
 
 
