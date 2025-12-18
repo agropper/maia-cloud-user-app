@@ -303,7 +303,9 @@ const emailService = new EmailService({
   apiKey: process.env.RESEND_API_KEY,
   fromEmail: process.env.RESEND_FROM_EMAIL,
   adminEmail: process.env.RESEND_ADMIN_EMAIL,
-  baseUrl: process.env.PUBLIC_APP_URL || `http://localhost:${PORT}`
+  // For deep links, use frontend URL (Vite dev server on 5173, or production frontend)
+  // Backend URL (PORT) is only needed for admin provisioning links
+  baseUrl: process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
 });
 
 const doClient = new DigitalOceanClient(process.env.DIGITALOCEAN_TOKEN, {
@@ -3927,13 +3929,47 @@ async function provisionUserAsync(userId, token) {
       agentName: agentName
     });
 
-    // Step 7.5: Generate Current Medications (if Lists processing was done and agent is ready)
+    // Step 7.4: Generate Current Medications Token (UNCONDITIONAL - always generate token after agent is ready)
+    // This ensures users can always edit Current Medications, even if AI generation fails or no markdown exists
+    console.log(`[CUR MEDS] Step 7.4: Generating Current Medications token (unconditional)`);
+    if (agentEndpointUrl && apiKey) {
+      try {
+        console.log(`[CUR MEDS] Agent is ready - generating token unconditionally`);
+        const tokenData = await emailService.generateCurrentMedicationsToken(userId);
+        console.log(`[CUR MEDS] Token generated: ${tokenData.token.substring(0, 8)}... (expires: ${tokenData.expiresAt})`);
+        
+        // Save token to user document (even if Current Medications content is empty)
+        await updateUserDoc({
+          currentMedicationsToken: tokenData.token,
+          currentMedicationsTokenExpiresAt: tokenData.expiresAt
+        });
+        console.log(`[CUR MEDS] ✅ Token saved to user document (unconditional)`);
+        logProvisioning(userId, `🔗 [CURRENT MEDICATIONS] Deep link token generated and saved (unconditional)`, 'info');
+      } catch (tokenError) {
+        console.log(`[CUR MEDS] ❌ Error generating token: ${tokenError.message}`);
+        console.log(`[CUR MEDS] Error stack: ${tokenError.stack}`);
+        logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] Error generating token: ${tokenError.message}. Continuing provisioning.`, 'warning');
+        // Don't fail provisioning if token generation fails
+      }
+    } else {
+      console.log(`[CUR MEDS] ⚠️  Agent not ready - cannot generate token yet`);
+    }
+
+    // Step 7.5: Generate Current Medications Content (OPTIONAL - tries to pre-populate from markdown)
+    // This is separate from token generation - token is always created, content is optional
+    console.log(`[CUR MEDS] Step 7.5: Starting Current Medications content generation (optional)`);
+    console.log(`[CUR MEDS] Prerequisites check: initialFile=${!!userDoc.initialFile}, bucketKey=${!!userDoc.initialFile?.bucketKey}, agentEndpointUrl=${!!agentEndpointUrl}, apiKey=${!!apiKey}`);
+    
     if (userDoc.initialFile && userDoc.initialFile.bucketKey && agentEndpointUrl && apiKey) {
+      console.log(`[CUR MEDS] ✅ All prerequisites met, proceeding with Current Medications generation`);
       try {
         const initialFileName = userDoc.initialFile.fileName;
         const listsFolder = `${userId}/Lists/`;
-        const markdownFileName = initialFileName.replace(/\.pdf$/i, '.md');
+        // Sanitize filename to match how it's saved (spaces -> underscores)
+        const cleanFileName = initialFileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const markdownFileName = cleanFileName.replace(/\.pdf$/i, '.md');
         const markdownBucketKey = `${listsFolder}${markdownFileName}`;
+        console.log(`[CUR MEDS] Looking for markdown file: ${markdownBucketKey}`);
         
         // Check if Lists markdown file exists
         const { S3Client, GetObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
@@ -3941,8 +3977,10 @@ async function provisionUserAsync(userId, token) {
         // Get S3 client (same pattern as in files.js)
         const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
         if (!bucketUrl) {
+          console.log(`[CUR MEDS] ⚠️  DigitalOcean bucket not configured. Skipping.`);
           logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] DigitalOcean bucket not configured. Skipping.`, 'warning');
         } else {
+          console.log(`[CUR MEDS] Bucket URL: ${bucketUrl}`);
           const bucketName = bucketUrl.split('//')[1]?.split('.')[0] || 'maia';
           const s3Client = new S3Client({
             endpoint: process.env.DIGITALOCEAN_ENDPOINT_URL || 'https://tor1.digitaloceanspaces.com',
@@ -3956,16 +3994,22 @@ async function provisionUserAsync(userId, token) {
           
           let markdownExists = false;
           try {
+            console.log(`[CUR MEDS] Checking if markdown file exists: ${markdownBucketKey}`);
             await s3Client.send(new HeadObjectCommand({
               Bucket: bucketName,
               Key: markdownBucketKey
             }));
             markdownExists = true;
+            console.log(`[CUR MEDS] ✅ Markdown file exists`);
           } catch (headErr) {
+            console.log(`[CUR MEDS] ⚠️  Markdown file not found: ${markdownBucketKey}`);
+            console.log(`[CUR MEDS] Error: ${headErr.message}`);
             logProvisioning(userId, `ℹ️  [CURRENT MEDICATIONS] Lists markdown not found: ${markdownBucketKey}. Skipping Current Medications generation.`, 'info');
           }
           
           if (markdownExists) {
+          console.log(`[CUR MEDS] ✅ Markdown exists, proceeding with Current Medications content generation`);
+          const contentGenStartTime = Date.now();
           updateStatus('Generating Current Medications...', { fileName: initialFileName });
           logProvisioning(userId, `💊 [CURRENT MEDICATIONS] Generating current medications from Lists markdown...`, 'info');
           
@@ -4049,6 +4093,7 @@ async function provisionUserAsync(userId, token) {
               const prompt = `What are the current medications from this list?\n\n${medicationsText}\n\nPlease list only the medications that are currently active or being taken. Format your response as a clear, readable list.`;
               
               logProvisioning(userId, `🤖 [CURRENT MEDICATIONS] Calling Private AI to identify current medications...`, 'info');
+              console.log(`[CUR MEDS] Calling Private AI with prompt (first 200 chars): ${prompt.substring(0, 200)}...`);
               
               const response = await agentProvider.chat(
                 [{ role: 'user', content: prompt }],
@@ -4059,37 +4104,52 @@ async function provisionUserAsync(userId, token) {
               );
               
               const currentMedications = (response.content || response.text || '').trim();
+              console.log(`[CUR MEDS] Private AI response length: ${currentMedications.length}`);
+              console.log(`[CUR MEDS] Private AI response (first 200 chars): ${currentMedications.substring(0, 200)}...`);
               
+              // Step 5: Save content to user document
               if (currentMedications && currentMedications.length > 0) {
-                // Generate deep link token for Current Medications editor
-                const tokenData = emailService.generateCurrentMedicationsToken(userId);
-                
-                // Save to user document (including token for email link)
+                console.log(`[CUR MEDS] [Step 5/5] Saving Current Medications content to user document...`);
+                const saveStartTime = Date.now();
+                // Note: Token was already generated in Step 7.4, so we only update the content here
                 await updateUserDoc({
-                  currentMedications: currentMedications,
-                  currentMedicationsToken: tokenData.token,
-                  currentMedicationsTokenExpiresAt: tokenData.expiresAt
+                  currentMedications: currentMedications
                 });
+                const saveDuration = Date.now() - saveStartTime;
+                const totalDuration = Date.now() - contentGenStartTime;
+                console.log(`[CUR MEDS] [Step 5/5] ✅ Content saved to user document (${saveDuration}ms)`);
+                console.log(`[CUR MEDS] ✅ Current Medications content generation complete (total: ${totalDuration}ms, ${currentMedications.length} chars)`);
                 
-                logProvisioning(userId, `✅ [CURRENT MEDICATIONS] Current medications generated and saved successfully`, 'success');
-                logProvisioning(userId, `🔗 [CURRENT MEDICATIONS] Deep link token generated for email`, 'info');
+                logProvisioning(userId, `✅ [CURRENT MEDICATIONS] Current medications content generated and saved successfully`, 'success');
                 updateStatus('Current Medications generated', { medicationsGenerated: true });
               } else {
-                logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] Empty response from Private AI`, 'warning');
+                const totalDuration = Date.now() - contentGenStartTime;
+                console.log(`[CUR MEDS] [Step 5/5] ⚠️  Empty response from Private AI - skipping content save`);
+                console.log(`[CUR MEDS] ⚠️  Content generation completed but no content to save (total: ${totalDuration}ms, token still available)`);
+                logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] Empty response from Private AI - user can still edit manually`, 'warning');
               }
             } else {
+              const totalDuration = Date.now() - contentGenStartTime;
+              console.log(`[CUR MEDS] ℹ️  No medication observations found in Lists markdown (total: ${totalDuration}ms)`);
               logProvisioning(userId, `ℹ️  [CURRENT MEDICATIONS] No medication observations found in Lists markdown`, 'info');
             }
           } catch (medError) {
+            console.log(`[CUR MEDS] ❌ Error generating current medications: ${medError.message}`);
+            console.log(`[CUR MEDS] Error stack: ${medError.stack}`);
             logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] Error generating current medications: ${medError.message}. Continuing provisioning.`, 'warning');
             // Don't fail provisioning if Current Medications generation fails
           }
           }
         }
       } catch (currentMedsError) {
+        console.log(`[CUR MEDS] ❌ Error in Current Medications step: ${currentMedsError.message}`);
+        console.log(`[CUR MEDS] Error stack: ${currentMedsError.stack}`);
         logProvisioning(userId, `⚠️  [CURRENT MEDICATIONS] Error in Current Medications step: ${currentMedsError.message}. Continuing provisioning.`, 'warning');
         // Don't fail provisioning
       }
+    } else {
+      console.log(`[CUR MEDS] ⚠️  Agent not ready - skipping Current Medications generation`);
+      console.log(`[CUR MEDS] assignedAgentId: ${userDoc.assignedAgentId}, agentEndpoint: ${userDoc.agentEndpoint}`);
     }
 
     // Step 7.6: Verify KB Contents and Generate Patient Summary (if initial file was indexed)
@@ -4323,8 +4383,10 @@ async function provisionUserAsync(userId, token) {
     if (userEmail) {
       try {
         // Get current medications token from user document (if it was generated)
+        console.log(`[CUR MEDS] Getting final user document to retrieve token for email...`);
         const finalUserDoc = await cloudant.getDocument('maia_users', userId);
         const currentMedicationsToken = finalUserDoc?.currentMedicationsToken || null;
+        console.log(`[CUR MEDS] Token from user document: ${currentMedicationsToken ? currentMedicationsToken.substring(0, 8) + '...' : 'null'}`);
         
         await emailService.sendProvisioningCompletionEmail({
           userId,
@@ -4333,11 +4395,14 @@ async function provisionUserAsync(userId, token) {
           errorDetails: null,
           currentMedicationsToken: currentMedicationsToken
         });
+        console.log(`[CUR MEDS] ✅ Provisioning completion email sent ${currentMedicationsToken ? 'with' : 'without'} medications token`);
       } catch (emailError) {
+        console.log(`[CUR MEDS] ❌ Failed to send success email: ${emailError.message}`);
         logProvisioning(userId, `⚠️  Failed to send success email: ${emailError.message}`, 'warning');
         // Don't fail provisioning if email fails
       }
     } else {
+      console.log(`[CUR MEDS] ⚠️  No user email found, skipping success email`);
       logProvisioning(userId, `⚠️  No user email found, skipping success email`, 'warning');
     }
   } catch (error) {
@@ -6446,6 +6511,62 @@ app.post('/api/user-current-medications', async (req, res) => {
       success: false, 
       message: `Failed to save current medications: ${error.message}`,
       error: 'SAVE_FAILED'
+    });
+  }
+});
+
+// Test endpoint: Generate a test Current Medications token for existing user
+// This allows testing the deep link flow without creating a new patient
+app.post('/api/test-medications-token', async (req, res) => {
+  try {
+    const userId = req.session?.userId || req.body?.userId;
+    
+    if (!userId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'User ID is required',
+        error: 'MISSING_USER_ID'
+      });
+    }
+
+    // Get the user document
+    const userDoc = await cloudant.getDocument('maia_users', userId);
+    
+    if (!userDoc) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found',
+        error: 'USER_NOT_FOUND'
+      });
+    }
+
+    // Generate new token
+    const tokenData = await emailService.generateCurrentMedicationsToken(userId);
+    
+    // Save to user document
+    userDoc.currentMedicationsToken = tokenData.token;
+    userDoc.currentMedicationsTokenExpiresAt = tokenData.expiresAt;
+    userDoc.updatedAt = new Date().toISOString();
+    
+    await cloudant.saveDocument('maia_users', userDoc);
+    
+    // Build deep link URL
+    const frontendUrl = process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
+    const deepLinkUrl = `${frontendUrl}/?editMedications=${tokenData.token}&userId=${userId}`;
+    
+    return res.json({
+      success: true,
+      token: tokenData.token,
+      expiresAt: tokenData.expiresAt,
+      deepLinkUrl: deepLinkUrl,
+      message: 'Test token generated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error generating test medications token:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: `Failed to generate test token: ${error.message}`,
+      error: 'TOKEN_GENERATION_FAILED'
     });
   }
 });

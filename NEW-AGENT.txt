@@ -85,19 +85,25 @@ All status tip messages displayed in the application (numbered 1-17, correspondi
 
 ## Provisioning Email
 
-Subject: "Private MAIA provisioned for <userId>
+Subject: "Private MAIA provisioned for <userId>"
 
-Body:
-<Hi <userID>,
-<user email>
+Body (HTML and Text versions):
+Hi <userId>,
 
-Your Private AI agent has been provisioned and is ready to receive your health records. 
+Your Private MAIA has been provisioned and is ready to use!
 
-MAIA, including your Private AI agent, can work with imported files directly but large documents may fail and many privacy features will be unavailable. For large files and best results, use the SAVED FILES tab in My Stuff to choose files for indexing into your knowledge base.
+**IMPORTANT**: Please review and edit your Current Medications list. This helps ensure your Patient Summary is accurate.
 
-I look forward to hearing from you with comments, suggestions and, of course, bugs.
+[Edit Current Medications] (deep link button/link)
+
+After you save your medications, your Patient Summary will be automatically generated.
+
+Your Private AI agent is ready to receive your health records and answer questions.
 
 -Adrian
+
+**Deep Link Format**: `{frontendUrl}/?editMedications={token}&userId={userId}`
+**Token Expiration**: 7 days from generation
 
 ---
 

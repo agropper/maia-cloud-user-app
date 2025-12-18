@@ -3417,6 +3417,7 @@ onMounted(async () => {
   }
   
   // Check for pending Current Medications edit deep link
+  // This should work whether user is already authenticated or needs to authenticate
   const pendingEdit = sessionStorage.getItem('pendingMedicationsEdit');
   if (pendingEdit && props.user?.userId) {
     try {
@@ -3431,6 +3432,8 @@ onMounted(async () => {
           const verifyResult = await verifyResponse.json();
           if (verifyResult.valid && !verifyResult.expired) {
             // Token is valid - open My Stuff dialog with Lists tab and auto-edit
+            // Use nextTick to ensure dialog is ready
+            await nextTick();
             myStuffInitialTab.value = 'lists';
             showMyStuffDialog.value = true;
             // Store flag to auto-edit medications in Lists component
@@ -3442,9 +3445,17 @@ onMounted(async () => {
             sessionStorage.removeItem('pendingMedicationsEdit');
             if (verifyResult.expired) {
               console.warn('Current Medications edit token has expired');
+            } else {
+              console.warn('Current Medications edit token is invalid');
             }
           }
+        } else {
+          console.error('Failed to verify medications token:', verifyResponse.status);
+          sessionStorage.removeItem('pendingMedicationsEdit');
         }
+      } else {
+        // Token or userId mismatch - clear it
+        sessionStorage.removeItem('pendingMedicationsEdit');
       }
     } catch (err) {
       console.error('Error processing pending medications edit:', err);

@@ -415,6 +415,8 @@ onMounted(async () => {
         const normalizedUrl = `${window.location.origin}/?share=${encodeURIComponent(info.shareId)}${window.location.hash}`;
         window.history.replaceState({}, '', normalizedUrl);
       }
+      // If user is already authenticated and we have a pending medications edit, 
+      // it will be handled in ChatInterface's onMounted
       return;
     }
   } catch (error) {

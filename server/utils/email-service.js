@@ -8,7 +8,9 @@ export class EmailService {
     this.apiKey = options.apiKey || process.env.RESEND_API_KEY;
     this.fromEmail = options.fromEmail || process.env.RESEND_FROM_EMAIL;
     this.adminEmail = options.adminEmail || process.env.RESEND_ADMIN_EMAIL;
-    this.baseUrl = options.baseUrl || process.env.PUBLIC_APP_URL || 'http://localhost:3001';
+    // For deep links, use frontend URL (Vite dev server on 5173, or production frontend URL)
+    // Backend URL is only needed for admin provisioning links
+    this.baseUrl = options.baseUrl || process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
   }
 
   /**
@@ -89,6 +91,8 @@ export class EmailService {
    * @param {string} options.errorDetails - Error details if provisioning failed
    */
   async sendProvisioningCompletionEmail({ userId, userEmail, success, errorDetails = null, currentMedicationsToken = null }) {
+    console.log(`[CUR MEDS] sendProvisioningCompletionEmail called for userId: ${userId}, hasToken: ${!!currentMedicationsToken}`);
+    
     if (!this.apiKey || !this.fromEmail) {
       console.warn('⚠️  Email service not configured (RESEND_API_KEY, RESEND_FROM_EMAIL)');
       return { success: false, error: 'Email service not configured' };
@@ -110,7 +114,9 @@ export class EmailService {
       // Build deep link URL if token is provided
       let medicationsLink = '';
       if (currentMedicationsToken) {
+        console.log(`[CUR MEDS] Building deep link URL with token: ${currentMedicationsToken.substring(0, 8)}...`);
         const medicationsUrl = `${this.baseUrl}/?editMedications=${currentMedicationsToken}&userId=${userId}`;
+        console.log(`[CUR MEDS] Deep link URL: ${medicationsUrl}`);
         medicationsLink = `\n\n**IMPORTANT**: Please review and edit your Current Medications list. This helps ensure your Patient Summary is accurate.\n\n[Edit Current Medications](${medicationsUrl})\n\nAfter you save your medications, your Patient Summary will be automatically generated.\n\n`;
         
         htmlBody = `
@@ -129,6 +135,8 @@ export class EmailService {
             <p>-Adrian</p>
           </div>
         `;
+      } else {
+        console.log(`[CUR MEDS] ⚠️  No currentMedicationsToken provided - email will not include deep link`);
       }
       
       body = `Hi ${userId},\n\nYour Private MAIA has been provisioned and is ready to use!${medicationsLink}\nYour Private AI agent is ready to receive your health records and answer questions.\n\n-Adrian`;
@@ -279,15 +287,18 @@ export class EmailService {
    * @param {string} userId - User ID
    * @returns {Object} Token object with token string and expiration timestamp
    */
-  generateCurrentMedicationsToken(userId) {
+  async generateCurrentMedicationsToken(userId) {
+    console.log(`[CUR MEDS] Generating token for userId: ${userId}`);
     // Generate cryptographically secure random token (32 hex characters)
-    // Use crypto module (available in Node.js)
-    const crypto = require('crypto');
+    // Use crypto module (available in Node.js) - use dynamic import for ES modules
+    const crypto = await import('crypto');
     const token = crypto.randomBytes(16).toString('hex');
     
     // Set expiration to 7 days from now
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
+    
+    console.log(`[CUR MEDS] Token generated: ${token.substring(0, 8)}... (expires: ${expiresAt.toISOString()})`);
     
     return {
       token,

@@ -15,13 +15,46 @@
       </div>
     </div>
 
-    <!-- Current Medications -->
-    <q-card v-if="currentMedications !== null" class="q-mb-md">
+    <!-- Current Medications - Always visible -->
+    <q-card class="q-mb-md">
       <q-card-section>
         <div class="text-h6 q-mb-md">Current Medications</div>
         
+        <!-- Loading State with Progress Messages -->
+        <div v-if="isLoadingCurrentMedications" class="q-pa-md">
+          <div class="text-center q-mb-md">
+            <q-spinner color="primary" size="2em" />
+          </div>
+          <div class="text-body2 text-center text-grey-7">
+            <div v-if="currentMedicationsStatus === 'reviewing'">
+              Reviewing your Medications List...
+            </div>
+            <div v-else-if="currentMedicationsStatus === 'consulting'">
+              Consulting Private AI to identify current medications...
+            </div>
+            <div v-else>
+              Processing your medications...
+            </div>
+          </div>
+        </div>
+        
         <!-- Display Mode -->
-        <div v-if="!isEditingCurrentMedications" class="text-body2" style="white-space: pre-wrap;">{{ currentMedications }}</div>
+        <div v-else-if="!isEditingCurrentMedications && currentMedications">
+          <div class="text-body2" style="white-space: pre-wrap;">{{ cleanedCurrentMedications }}</div>
+          <div class="text-caption text-grey-7 q-mt-md q-pt-md" style="border-top: 1px solid #e0e0e0;">
+            Please edit this AI suggestion to reflect your actual prescription drug use.
+          </div>
+        </div>
+        
+        <!-- Empty State -->
+        <div v-else-if="!isEditingCurrentMedications && !currentMedications" class="text-body2 text-grey-7 q-pa-md text-center">
+          <div v-if="hasMedicationRecords">
+            No current medications identified yet. Click "Generate" to review your medication records.
+          </div>
+          <div v-else>
+            No medication records found. Upload a health record file to extract medication information.
+          </div>
+        </div>
         
         <!-- Edit Mode -->
         <div v-else>
@@ -53,7 +86,18 @@
         
         <div class="q-mt-sm">
           <q-btn
-            v-if="!isEditingCurrentMedications"
+            v-if="!isEditingCurrentMedications && !currentMedications && hasMedicationRecords"
+            flat
+            dense
+            icon="play_arrow"
+            label="Generate"
+            color="primary"
+            @click="loadCurrentMedications(true)"
+            :loading="isLoadingCurrentMedications"
+            class="q-mr-sm"
+          />
+          <q-btn
+            v-if="!isEditingCurrentMedications && currentMedications"
             flat
             dense
             icon="edit"
@@ -62,7 +106,7 @@
             class="q-mr-sm"
           />
           <q-btn
-            v-if="hasMedicationRecords && !isEditingCurrentMedications"
+            v-if="hasMedicationRecords && !isEditingCurrentMedications && currentMedications"
             flat
             dense
             icon="refresh"
@@ -86,6 +130,22 @@
         <q-card-actions align="right">
           <q-btn flat label="CANCEL" color="grey-7" v-close-popup />
           <q-btn flat label="REFRESH" color="primary" @click="confirmRefreshCurrentMedications" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <!-- Show Summary Dialog (after saving Current Medications) -->
+    <q-dialog v-model="showSummaryDialog" persistent>
+      <q-card style="min-width: 400px">
+        <q-card-section>
+          <div class="text-h6">Current Medications Saved</div>
+        </q-card-section>
+        <q-card-section>
+          Editing the Current Medications automatically updates the Patient Summary.
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat label="CLOSE" color="grey-7" v-close-popup />
+          <q-btn flat label="SHOW SUMMARY" color="primary" @click="handleShowSummary" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -394,8 +454,9 @@ interface Props {
 
 const props = defineProps<Props>();
 
-defineEmits<{
+const emit = defineEmits<{
   'back-to-chat': [];
+  'show-patient-summary': [];
 }>();
 
 interface UserFile {
@@ -477,6 +538,8 @@ const editingCurrentMedications = ref('');
 const editingOriginalCurrentMedications = ref('');
 const isSavingCurrentMedications = ref(false);
 const isCurrentMedicationsEdited = ref(false);
+const currentMedicationsStatus = ref<'reviewing' | 'consulting' | ''>('');
+const showSummaryDialog = ref(false);
 const showRefreshConfirmDialog = ref(false);
 const showMarkdownContent = ref(false);
 const fileInputRef = ref<HTMLInputElement | null>(null);
@@ -2147,7 +2210,14 @@ const loadCurrentMedications = async (forceRefresh = false) => {
   }
 
   isLoadingCurrentMedications.value = true;
+  currentMedicationsStatus.value = 'reviewing';
+  
+  // Simulate delay to show "reviewing" message
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
   try {
+    currentMedicationsStatus.value = 'consulting';
+    
     const response = await fetch('/api/files/lists/current-medications', {
       method: 'POST',
       headers: {
@@ -2166,7 +2236,9 @@ const loadCurrentMedications = async (forceRefresh = false) => {
 
     const result = await response.json();
     if (result.success && result.currentMedications) {
-      currentMedications.value = result.currentMedications;
+      // Remove headings from AI response (lines starting with ** that look like headings)
+      const cleaned = removeHeadingsFromResponse(result.currentMedications);
+      currentMedications.value = cleaned;
       isCurrentMedicationsEdited.value = false; // Reset edited flag when loading from AI
     } else {
       currentMedications.value = null;
@@ -2176,8 +2248,39 @@ const loadCurrentMedications = async (forceRefresh = false) => {
     currentMedications.value = null;
   } finally {
     isLoadingCurrentMedications.value = false;
+    currentMedicationsStatus.value = '';
   }
 };
+
+// Remove headings from AI response (e.g., "**Current medications (non‑sexual‑function agents)**")
+const removeHeadingsFromResponse = (text: string): string => {
+  if (!text) return text;
+  
+  const lines = text.split('\n');
+  const cleanedLines: string[] = [];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    // Skip lines that look like headings: start with **, end with **, and are relatively short
+    // Also skip lines that are just "**Current medications**" or similar patterns
+    if (line.startsWith('**') && line.endsWith('**') && line.length < 100) {
+      // Check if it looks like a heading (contains words like "Current", "medications", "agents", etc.)
+      const headingPattern = /^\*\*(current|medications?|agents?|drugs?|prescriptions?|list|summary)/i;
+      if (headingPattern.test(line)) {
+        continue; // Skip this line
+      }
+    }
+    cleanedLines.push(lines[i]); // Keep original line (with original formatting)
+  }
+  
+  return cleanedLines.join('\n').trim();
+};
+
+// Computed property for cleaned current medications (for display)
+const cleanedCurrentMedications = computed(() => {
+  if (!currentMedications.value) return '';
+  return removeHeadingsFromResponse(currentMedications.value);
+});
 
 // Start editing current medications
 const startEditingCurrentMedications = () => {
@@ -2219,6 +2322,9 @@ const saveCurrentMedications = async () => {
     isEditingCurrentMedications.value = false;
     editingCurrentMedications.value = '';
     editingOriginalCurrentMedications.value = '';
+    
+    // Show dialog about Patient Summary update
+    showSummaryDialog.value = true;
   } catch (err) {
     console.error('Error saving current medications:', err);
     if ($q && typeof $q.notify === 'function') {
@@ -2231,6 +2337,13 @@ const saveCurrentMedications = async () => {
   } finally {
     isSavingCurrentMedications.value = false;
   }
+};
+
+// Handle SHOW SUMMARY button click
+const handleShowSummary = () => {
+  showSummaryDialog.value = false;
+  // Emit event to parent (MyStuffDialog) to switch to Patient Summary tab and trigger generation
+  emit('show-patient-summary');
 };
 
 // Handle refresh click - show confirmation if edited

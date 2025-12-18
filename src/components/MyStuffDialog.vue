@@ -412,6 +412,7 @@
               ref="listsComponentRef"
               :userId="userId"
               @back-to-chat="closeDialog"
+              @show-patient-summary="handleShowPatientSummary"
             />
           </q-tab-panel>
 
@@ -986,6 +987,18 @@ const emit = defineEmits<{
   'diary-posted': [content: string]; // Emit diary content to add to chat
   'reference-file-added': [file: { fileName: string; bucketKey: string; fileSize: number; uploadedAt: string; fileType?: string; fileUrl?: string; isReference: boolean }]; // Emit reference file to add to chat
 }>();
+
+// Handle show patient summary from Lists component
+const handleShowPatientSummary = async () => {
+  // Switch to Patient Summary tab
+  currentTab.value = 'summary';
+  
+  // Wait a bit for tab to switch, then trigger new summary generation
+  await nextTick();
+  setTimeout(() => {
+    requestNewSummary();
+  }, 300);
+};
 
 const isOpen = ref(props.modelValue);
 const currentTab = ref(props.initialTab || 'files');
