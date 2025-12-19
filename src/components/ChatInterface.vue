@@ -332,7 +332,7 @@
       :userId="props.user?.userId || ''"
       :initial-tab="myStuffInitialTab"
       :messages="messages"
-      :original-messages="originalMessages"
+      :original-messages="trulyOriginalMessages.length > 0 ? trulyOriginalMessages : originalMessages"
       @chat-selected="handleChatSelected"
       @indexing-started="handleIndexingStarted"
       @indexing-status-update="handleIndexingStatusUpdate"
@@ -493,6 +493,7 @@ const providers = ref<string[]>([]);
 const selectedProvider = ref<string>('Private AI');
 const messages = ref<Message[]>([]);
 const originalMessages = ref<Message[]>([]); // Store original unfiltered messages for privacy filtering
+const trulyOriginalMessages = ref<Message[]>([]); // Store truly original messages that never get overwritten (for filtering)
 const inputMessage = ref('');
 const isStreaming = ref(false);
 const uploadedFiles = ref<UploadedFile[]>([]);
@@ -828,6 +829,9 @@ const sendMessage = async () => {
   const isPatientSummaryRequest = /patient\s+summary/i.test(inputMessage.value);
   messages.value.push(userMessage);
   originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
+  // Update trulyOriginalMessages when adding new messages (but not when filtering)
+  // This ensures new messages are included in the truly original set
+  trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
   inputMessage.value = '';
   // Defer snapshot updates so save buttons stay enabled until the user chooses how to persist the chat
   
@@ -847,7 +851,7 @@ const sendMessage = async () => {
             // Use existing summary
             const existingProviderKey = getProviderKey(selectedProvider.value);
             const existingProviderLabel = getProviderLabelFromKey(existingProviderKey);
-            messages.value.push({
+            const summaryMessage: Message = {
               role: 'assistant',
               content: summaryData.summary,
               authorType: 'assistant',
@@ -855,7 +859,11 @@ const sendMessage = async () => {
               authorId: existingProviderKey,
               authorLabel: existingProviderLabel,
               name: existingProviderLabel
-            });
+            };
+            messages.value.push(summaryMessage);
+            // Update originalMessages and trulyOriginalMessages when loading summary from storage
+            originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+            trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
             isStreaming.value = false;
             return;
           }
@@ -995,6 +1003,8 @@ const sendMessage = async () => {
               
               // Update originalMessages AFTER streaming completes with full content
               originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+              // Update trulyOriginalMessages when assistant response completes (new message added)
+              trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
               
               return;
             }
@@ -1016,6 +1026,8 @@ const sendMessage = async () => {
     
     // Update originalMessages AFTER streaming completes with full content
     originalMessages.value = JSON.parse(JSON.stringify(messages.value));
+    // Update trulyOriginalMessages when assistant response completes (new message added)
+    trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
   } catch (error) {
     const responseTime = Date.now() - startTime;
     console.error('Chat error:', error);
@@ -1049,6 +1061,8 @@ const sendMessage = async () => {
       name: errorProviderLabel
     });
     originalMessages.value = JSON.parse(JSON.stringify(messages.value)); // Keep original in sync
+    // Update trulyOriginalMessages when error message is added (new message)
+    trulyOriginalMessages.value = JSON.parse(JSON.stringify(messages.value));
     isStreaming.value = false;
   }
 };
@@ -2842,6 +2856,7 @@ const handleChatSelected = async (chat: any) => {
     const normalizedHistory = chat.chatHistory.map((msg: Message) => normalizeMessage(msg));
     messages.value = normalizedHistory;
     originalMessages.value = JSON.parse(JSON.stringify(normalizedHistory)); // Keep original in sync
+    trulyOriginalMessages.value = JSON.parse(JSON.stringify(normalizedHistory)); // Store truly original for filtering
   }
   
   // Load the uploaded files
@@ -3076,13 +3091,16 @@ const handleFilesArchived = (archivedBucketKeys: string[]) => {
   updateContextualTip();
 };
 
-const handleMessagesFiltered = (filteredMessages: Message[]) => {
+const handleMessagesFiltered = async (filteredMessages: Message[]) => {
   // Replace current messages with filtered messages
   messages.value = filteredMessages;
   
-  // Keep originalMessages synchronized with filtered messages
-  // The filtered messages become the new "original" state
+  // Update originalMessages to reflect current state (for display purposes)
+  // BUT keep trulyOriginalMessages unchanged so we can filter again if needed
   originalMessages.value = JSON.parse(JSON.stringify(filteredMessages));
+  
+  // Force Vue to re-render by triggering a reactive update
+  await nextTick();
   
   // Scroll to bottom to show the filtered messages
   setTimeout(() => {
@@ -3103,7 +3121,8 @@ const handleDiaryPosted = (diaryContent: string) => {
   };
   
   messages.value.push(diaryMessage);
-  originalMessages.value.push(diaryMessage);
+    originalMessages.value.push(diaryMessage);
+    trulyOriginalMessages.value.push(JSON.parse(JSON.stringify(diaryMessage)));
   
   // Scroll to bottom
   nextTick(() => {

@@ -456,8 +456,20 @@
               </div>
               
               <div v-else class="q-mt-md">
-                <div class="text-body2 text-grey q-mb-sm">
-                  Showing {{ privacyFilterMapping.length }} name{{ privacyFilterMapping.length !== 1 ? 's' : '' }} in pseudonym mapping
+                <div class="row items-center q-mb-sm">
+                  <div class="text-body2 text-grey">
+                    Showing {{ privacyFilterMapping.length }} name{{ privacyFilterMapping.length !== 1 ? 's' : '' }} in pseudonym mapping
+                  </div>
+                  <q-space />
+                  <q-btn
+                    label="Clean Duplicates"
+                    color="primary"
+                    outline
+                    size="sm"
+                    icon="cleaning_services"
+                    @click="cleanDuplicates"
+                    :loading="cleaningDuplicates"
+                  />
                 </div>
                 <q-table
                   :rows="privacyFilterMapping"
@@ -1041,6 +1053,7 @@ const loadingPrivacyFilter = ref(false);
 const privacyFilterError = ref('');
 const privacyFilterResponse = ref('');
 const privacyFilterMapping = ref<Array<{ original: string; pseudonym: string }>>([]);
+const cleaningDuplicates = ref(false);
 const loadingRandomNames = ref(false);
 const patientSummary = ref('');
 const patientSummaries = ref<Array<{ text: string; createdAt: string; updatedAt: string; isCurrent: boolean }>>([]);
@@ -2857,6 +2870,134 @@ const swapSummary = async (index: number) => {
   }
 };
 
+// Helper function to deduplicate mapping (used both on load and when adding new names)
+const deduplicateMapping = (mappings: Array<{ original: string; pseudonym: string }>): {
+  deduplicated: Array<{ original: string; pseudonym: string }>;
+  removed: string[];
+} => {
+  const seen = new Set<string>();
+  const seenIndices = new Map<string, number>(); // Track which index we saw each name at
+  const deduplicatedMapping: Array<{ original: string; pseudonym: string }> = [];
+  const duplicatesRemoved: string[] = [];
+  
+  console.log(`[PRIVACY] Deduplicating ${mappings.length} mappings...`);
+  
+  for (let i = 0; i < mappings.length; i++) {
+    const mapping = mappings[i];
+    // Normalize: trim whitespace, replace non-breaking spaces, and use lowercase for comparison
+    // Also replace any Unicode whitespace characters
+    const normalized = mapping.original
+      .replace(/\u00A0/g, ' ') // Replace non-breaking space with regular space
+      .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+      .trim()
+      .toLowerCase();
+    
+    // Debug: log the original and normalized versions
+    if (i < 5) {
+      console.log(`[PRIVACY] Mapping ${i}: original="${mapping.original}" (length: ${mapping.original.length}), normalized="${normalized}"`);
+      // Check for special characters
+      const specialChars = mapping.original.match(/[^\x20-\x7E]/g);
+      if (specialChars) {
+        console.log(`[PRIVACY] Mapping ${i} has special characters:`, specialChars.map(c => `U+${c.charCodeAt(0).toString(16)}`));
+      }
+    }
+    
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      seenIndices.set(normalized, i);
+      deduplicatedMapping.push(mapping);
+    } else {
+      const firstIndex = seenIndices.get(normalized);
+      duplicatesRemoved.push(mapping.original);
+      console.log(`[PRIVACY] Removing duplicate at index ${i}: "${mapping.original}" (first seen at index ${firstIndex}: "${mappings[firstIndex!].original}")`);
+    }
+  }
+  
+  console.log(`[PRIVACY] Deduplication complete: ${deduplicatedMapping.length} unique, ${duplicatesRemoved.length} duplicates removed`);
+  if (duplicatesRemoved.length > 0) {
+    console.log(`[PRIVACY] Duplicates removed:`, duplicatesRemoved);
+  }
+  
+  return { deduplicated: deduplicatedMapping, removed: duplicatesRemoved };
+};
+
+// Manual function to clean duplicates (can be called by user)
+const cleanDuplicates = async () => {
+  cleaningDuplicates.value = true;
+  try {
+    console.log(`[PRIVACY] Starting manual duplicate cleanup. Current mapping has ${privacyFilterMapping.value.length} entries.`);
+    console.log(`[PRIVACY] Current mapping entries:`, privacyFilterMapping.value.map((m, i) => `${i}: "${m.original}" -> "${m.pseudonym}"`));
+    
+    const { deduplicated, removed } = deduplicateMapping(privacyFilterMapping.value);
+    
+    console.log(`[PRIVACY] After deduplication: ${deduplicated.length} unique entries, ${removed.length} duplicates removed`);
+    
+    if (removed.length > 0) {
+      console.log(`[PRIVACY] Manually removed ${removed.length} duplicate(s):`, removed);
+      privacyFilterMapping.value = deduplicated;
+      
+      // Save the cleaned mapping back to storage
+      try {
+        const saveResponse = await fetch('/api/privacy-filter-mapping', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include',
+          body: JSON.stringify({ mapping: deduplicated })
+        });
+        if (!saveResponse.ok) {
+          console.warn(`[PRIVACY] Failed to save deduplicated mapping:`, await saveResponse.text());
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'negative',
+              message: 'Failed to save cleaned mapping',
+              timeout: 3000
+            });
+          }
+        } else {
+          console.log(`[PRIVACY] Saved deduplicated mapping (${deduplicated.length} entries)`);
+          if ($q && typeof $q.notify === 'function') {
+            $q.notify({
+              type: 'positive',
+              message: `Removed ${removed.length} duplicate(s). Mapping now has ${deduplicated.length} unique entries.`,
+              timeout: 4000
+            });
+          }
+        }
+      } catch (saveErr) {
+        console.error(`[PRIVACY] Error saving deduplicated mapping:`, saveErr);
+        if ($q && typeof $q.notify === 'function') {
+          $q.notify({
+            type: 'negative',
+            message: 'Error saving cleaned mapping',
+            timeout: 3000
+          });
+        }
+      }
+    } else {
+      if ($q && typeof $q.notify === 'function') {
+        $q.notify({
+          type: 'info',
+          message: 'No duplicates found',
+          timeout: 2000
+        });
+      }
+    }
+  } catch (err) {
+    console.error(`[PRIVACY] Error cleaning duplicates:`, err);
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'negative',
+        message: 'Error cleaning duplicates',
+        timeout: 3000
+      });
+    }
+  } finally {
+    cleaningDuplicates.value = false;
+  }
+};
+
 const loadPrivacyFilter = async () => {
   loadingPrivacyFilter.value = true;
   privacyFilterError.value = '';
@@ -2872,30 +3013,105 @@ const loadPrivacyFilter = async () => {
       if (loadResponse.ok) {
         const loadData = await loadResponse.json();
         if (loadData.mapping && loadData.mapping.length > 0) {
-          privacyFilterMapping.value = loadData.mapping;
+          // Deduplicate the loaded mapping (case-insensitive, keep first occurrence)
+          const { deduplicated, removed } = deduplicateMapping(loadData.mapping);
+          
+          if (removed.length > 0) {
+            console.log(`[PRIVACY] Removed ${removed.length} duplicate(s) on load:`, removed);
+            // Save the deduplicated mapping back to storage
+            try {
+              const saveResponse = await fetch('/api/privacy-filter-mapping', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json'
+                },
+                credentials: 'include',
+                body: JSON.stringify({ mapping: deduplicated })
+              });
+              if (!saveResponse.ok) {
+                console.warn(`[PRIVACY] Failed to save deduplicated mapping:`, await saveResponse.text());
+              } else {
+                console.log(`[PRIVACY] Saved deduplicated mapping (${deduplicated.length} entries)`);
+              }
+            } catch (saveErr) {
+              console.error(`[PRIVACY] Error saving deduplicated mapping:`, saveErr);
+            }
+          }
+          
+          privacyFilterMapping.value = deduplicated;
+          console.log(`[PRIVACY] Loaded ${deduplicated.length} unique mapping entries (was ${loadData.mapping.length})`);
+        } else {
+          // Even if no duplicates were found, still deduplicate to be safe
+          const { deduplicated } = deduplicateMapping(loadData.mapping);
+          privacyFilterMapping.value = deduplicated;
+          console.log(`[PRIVACY] Loaded ${deduplicated.length} mapping entries (verified unique)`);
         }
       }
     } catch (loadErr) {
       console.warn(`[PRIVACY] Could not load existing mapping:`, loadErr);
       privacyFilterMapping.value = [];
     }
+    
+    // Always run deduplication on the current mapping value (in case it was set elsewhere)
+    if (privacyFilterMapping.value.length > 0) {
+      const { deduplicated, removed } = deduplicateMapping(privacyFilterMapping.value);
+      if (removed.length > 0 || deduplicated.length !== privacyFilterMapping.value.length) {
+        console.log(`[PRIVACY] Found ${removed.length} duplicate(s) in current mapping, cleaning...`);
+        privacyFilterMapping.value = deduplicated;
+        // Save cleaned version
+        try {
+          const saveResponse = await fetch('/api/privacy-filter-mapping', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            credentials: 'include',
+            body: JSON.stringify({ mapping: deduplicated })
+          });
+          if (saveResponse.ok) {
+            console.log(`[PRIVACY] Saved cleaned mapping (${deduplicated.length} entries)`);
+          }
+        } catch (saveErr) {
+          console.error(`[PRIVACY] Error saving cleaned mapping:`, saveErr);
+        }
+      }
+    }
 
     // Use originalMessages if available (unfiltered), otherwise fall back to props.messages
-    const messagesToAnalyze = (props.originalMessages && props.originalMessages.length > 0) 
+    const allMessages = (props.originalMessages && props.originalMessages.length > 0) 
       ? props.originalMessages 
       : props.messages;
+    
+    // Filter to only Private AI messages and user messages for name extraction
+    // Private AI is identified by providerKey === 'digitalocean'
+    const messagesToAnalyze = allMessages.filter(msg => {
+      // Include user messages (they may contain names)
+      if (msg.role === 'user') {
+        return true;
+      }
+      // Include only Private AI assistant messages
+      if (msg.role === 'assistant') {
+        const isPrivateAI = (msg as any).providerKey === 'digitalocean' || 
+                            (msg as any).authorLabel === 'Private AI' ||
+                            (msg as any).name === 'Private AI';
+        return isPrivateAI;
+      }
+      return false;
+    });
     
     // Check if we have messages to query Private AI
     if (!messagesToAnalyze || messagesToAnalyze.length === 0) {
       // Still show existing mapping if available - don't set error if mapping exists
       if (privacyFilterMapping.value.length === 0) {
-        privacyFilterError.value = 'No chat messages available';
+        privacyFilterError.value = 'No Private AI chat messages available';
       }
       return;
     }
 
+    console.log('[PRIVACY] Analyzing names from', messagesToAnalyze.length, 'Private AI messages (out of', allMessages.length, 'total)');
+
     // Prepare messages for Private AI query
-    // Include all chat messages plus the privacy filter question
+    // Include only Private AI chat messages plus the privacy filter question
     // IMPORTANT: We only want names from the chat messages themselves, not from knowledge base documents
     const chatMessagesOnly = messagesToAnalyze.map(msg => ({
       role: msg.role,
@@ -3012,19 +3228,82 @@ const createPseudonymMapping = async (responseText: string) => {
     
     const extractedNames: string[] = [];
     for (const line of responseLines) {
-      // Extract name (may have notes in parentheses like "Adrian Gropper (also appears as...)")
-      const nameMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+(?:\.[A-Z])?)+)/);
-      if (nameMatch) {
-        extractedNames.push(nameMatch[1]);
+      // Remove notes in parentheses
+      const cleanLine = line.replace(/\s*\([^)]*\)/g, '').trim();
+      
+      // Extract names with optional titles (Dr., Mr., Ms., Mrs., etc.)
+      // Pattern: (optional title) FirstName LastName
+      // Examples: "Adrian Gropper", "Dr. Harshal Patil", "Mr. Gropper"
+      const namePatterns = [
+        /^(?:Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|RN|CNP|OD)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/, // With title
+        /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/, // Full name without title
+        /^(?:Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.)\s+([A-Z][a-z]+)/, // Title + single name
+        /^([A-Z][a-z]+)$/ // Single capitalized word (last name)
+      ];
+      
+      for (const pattern of namePatterns) {
+        const match = cleanLine.match(pattern);
+        if (match) {
+          const name = match[1] || match[0]; // Use captured group or full match
+          if (name && name.length > 1) {
+            extractedNames.push(name);
+            // Also extract full line if it has a title (e.g., "Dr. Harshal Patil")
+            if (pattern === namePatterns[0] && match[0] !== name) {
+              extractedNames.push(match[0]); // Include "Dr. Harshal Patil" as well
+            }
+            break; // Only match one pattern per line
+          }
+        }
       }
     }
     
+    // Remove duplicates from extracted names (case-insensitive)
+    const seenExtracted = new Set<string>();
+    const uniqueExtractedNames: string[] = [];
+    for (const name of extractedNames) {
+      const key = name.toLowerCase();
+      if (!seenExtracted.has(key)) {
+        seenExtracted.add(key);
+        uniqueExtractedNames.push(name);
+      }
+    }
+    console.log('[PRIVACY] Extracted names:', uniqueExtractedNames);
+    
     // Start with existing mapping (cumulative - never delete)
     const existingMapping = privacyFilterMapping.value || [];
-    const existingOriginals = new Set(existingMapping.map(m => m.original));
+    const existingOriginals = new Set(existingMapping.map(m => m.original.toLowerCase()));
     
-    // Find new names that aren't in existing mapping
-    const newNames = extractedNames.filter(name => !existingOriginals.has(name));
+    // Find new names that aren't in existing mapping (case-insensitive comparison)
+    const newNamesSet = new Set<string>();
+    for (const name of uniqueExtractedNames) {
+      if (!existingOriginals.has(name.toLowerCase())) {
+        newNamesSet.add(name); // Use first occurrence (preserve original casing)
+      }
+    }
+    const newNames = Array.from(newNamesSet);
+    
+    // Also extract last names from full names and add them if not already present
+    const lastNamesToAdd: string[] = [];
+    const seenLastNames = new Set<string>();
+    for (const fullName of newNames) {
+      const parts = fullName.split(/\s+/);
+      if (parts.length >= 2) {
+        const lastName = parts[parts.length - 1]; // Last part is last name
+        const lastNameKey = lastName.toLowerCase();
+        // Only add if it's not already in mapping, not in newNames, and not already in lastNamesToAdd
+        if (lastName.length > 1 && 
+            !existingOriginals.has(lastNameKey) &&
+            !newNames.some(n => n.toLowerCase() === lastNameKey) &&
+            !seenLastNames.has(lastNameKey)) {
+          seenLastNames.add(lastNameKey);
+          lastNamesToAdd.push(lastName);
+        }
+      }
+    }
+    
+    // Add last names to newNames (deduplicated)
+    newNames.push(...lastNamesToAdd);
+    console.log('[PRIVACY] New names (including last names):', newNames);
     
     if (newNames.length === 0) {
       return; // No new names, keep existing mapping
@@ -3090,8 +3369,38 @@ const createPseudonymMapping = async (responseText: string) => {
     }
     
     // Merge new mappings with existing ones (cumulative)
-    const updatedMapping = [...existingMapping, ...newMappings];
-    privacyFilterMapping.value = updatedMapping;
+    // Remove duplicates (case-insensitive) before merging
+    // Keep the FIRST occurrence of each name (preserve existing mappings over new duplicates)
+    const allMappings = [...existingMapping, ...newMappings];
+    const { deduplicated: deduplicatedMapping, removed: duplicateRemoved } = deduplicateMapping(allMappings);
+    
+    if (duplicateRemoved.length > 0) {
+      console.log(`[PRIVACY] Removed ${duplicateRemoved.length} duplicate(s):`, duplicateRemoved);
+    }
+    
+    privacyFilterMapping.value = deduplicatedMapping;
+    console.log(`[PRIVACY] Final mapping count (deduplicated): ${deduplicatedMapping.length} (was ${allMappings.length})`);
+    
+    // Always save the deduplicated mapping to ensure storage is clean
+    if (duplicateRemoved.length > 0 || newMappings.length > 0) {
+      try {
+        const saveResponse = await fetch('/api/privacy-filter-mapping', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          credentials: 'include',
+          body: JSON.stringify({ mapping: deduplicatedMapping })
+        });
+        if (!saveResponse.ok) {
+          console.warn(`[PRIVACY] Failed to save deduplicated mapping:`, await saveResponse.text());
+        } else {
+          console.log(`[PRIVACY] Saved deduplicated mapping to storage`);
+        }
+      } catch (saveErr) {
+        console.error(`[PRIVACY] Error saving deduplicated mapping:`, saveErr);
+      }
+    }
     
     // Save updated mapping to user document
     try {
@@ -3101,7 +3410,7 @@ const createPseudonymMapping = async (responseText: string) => {
           'Content-Type': 'application/json'
         },
         credentials: 'include',
-        body: JSON.stringify({ mapping: updatedMapping })
+        body: JSON.stringify({ mapping: deduplicatedMapping })
       });
       
       if (!saveResponse.ok) {
@@ -3120,11 +3429,12 @@ const createPseudonymMapping = async (responseText: string) => {
 };
 
 const filterCurrentChat = () => {
-  // Use originalMessages if available and has same length as props.messages (unfiltered), otherwise use props.messages
-  // This ensures we always filter the correct number of messages
-  const messagesToFilter = (props.originalMessages && props.originalMessages.length > 0 && props.originalMessages.length === props.messages.length) 
+  // Prefer originalMessages (truly original unfiltered) if available, otherwise use props.messages
+  // The condition checks if originalMessages exists and has content
+  // IMPORTANT: props.originalMessages is trulyOriginalMessages from ChatInterface, which is never filtered
+  const messagesToFilter = (props.originalMessages && props.originalMessages.length > 0) 
     ? props.originalMessages 
-    : props.messages;
+    : (props.messages && props.messages.length > 0 ? props.messages : []);
   
   if (!messagesToFilter || messagesToFilter.length === 0) {
     if ($q && typeof $q.notify === 'function') {
@@ -3151,16 +3461,52 @@ const filterCurrentChat = () => {
   // Track which names were pseudonymized
   const pseudonymizedNames: Array<{ original: string; pseudonym: string }> = [];
   
+  // Filter only Private AI messages and user messages (skip other AI providers)
+  // Private AI is identified by providerKey === 'digitalocean'
+  const messagesToFilterPrivateAI = messagesToFilter.filter(msg => {
+    // Include user messages (they may contain names that need filtering)
+    if (msg.role === 'user') {
+      return true;
+    }
+    // Include only Private AI assistant messages
+    if (msg.role === 'assistant') {
+      // Check providerKey if available, otherwise check authorLabel or name
+      const isPrivateAI = (msg as any).providerKey === 'digitalocean' || 
+                          (msg as any).authorLabel === 'Private AI' ||
+                          (msg as any).name === 'Private AI';
+      return isPrivateAI;
+    }
+    return false;
+  });
+  
   // Create filtered messages by replacing names with pseudonyms
+  // Only filter Private AI messages, keep others unchanged
   const filteredMessages: Message[] = messagesToFilter.map(msg => {
+    // Skip filtering for non-Private AI messages
+    const isUserMessage = msg.role === 'user';
+    const isPrivateAI = msg.role === 'assistant' && 
+                       ((msg as any).providerKey === 'digitalocean' || 
+                        (msg as any).authorLabel === 'Private AI' ||
+                        (msg as any).name === 'Private AI');
+    
+    if (!isUserMessage && !isPrivateAI) {
+      // Return message unchanged for non-Private AI responses
+      return msg;
+    }
+    
     let filteredContent = msg.content;
     
-    // Replace each original name with its pseudonym
-    // Sort by length (longest first) to avoid partial replacements
-    // (e.g., "John Smith" before "John")
-    const sortedMappings = [...privacyFilterMapping.value].sort((a, b) => b.original.length - a.original.length);
+    // Build enhanced mappings that include variations with titles
+    const enhancedMappings: Array<{ 
+      original: string; 
+      pseudonym: string; 
+      lastName: string | null;
+      lastNamePseudonym: string | null;
+      isFullName: boolean;
+    }> = [];
+    const titles = ['Dr\\.', 'Mr\\.', 'Mrs\\.', 'Ms\\.', 'Prof\\.', 'RN', 'CNP', 'OD'];
     
-    for (const mapping of sortedMappings) {
+    for (const mapping of privacyFilterMapping.value) {
       const original = mapping.original;
       const pseudonym = mapping.pseudonym;
       
@@ -3169,19 +3515,499 @@ const filterCurrentChat = () => {
         continue; // Skip this mapping
       }
       
-      // Escape special regex characters
-      const escapedOriginal = original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Extract last name if this is a full name
+      const nameParts = original.split(/\s+/);
+      const isFullName = nameParts.length >= 2;
+      const lastName = isFullName ? nameParts[nameParts.length - 1] : null;
       
-      // For multi-word names (e.g., "John Smith"), match as a whole phrase with word boundaries
-      // For single-word names, use word boundaries on both sides
-      // Case-insensitive matching
-      const regex = new RegExp(`\\b${escapedOriginal}\\b`, 'gi');
-      const beforeReplace = filteredContent;
-      filteredContent = filteredContent.replace(regex, pseudonym);
+      // Find pseudonym for last name (if this is a full name, extract last name part from pseudonym)
+      let lastNamePseudonym: string | null = null;
+      if (isFullName && lastName) {
+        const pseudonymParts = pseudonym.split(/\s+/);
+        if (pseudonymParts.length >= 2) {
+          lastNamePseudonym = pseudonymParts[pseudonymParts.length - 1]; // Last part of pseudonym
+        }
+      }
       
-      // Track if this name was actually replaced in this message
-      if (beforeReplace !== filteredContent && !pseudonymizedNames.some(n => n.original === original)) {
-        pseudonymizedNames.push({ original, pseudonym });
+      enhancedMappings.push({ 
+        original, 
+        pseudonym, 
+        lastName,
+        lastNamePseudonym,
+        isFullName
+      });
+    }
+    
+    // Sort by length (longest first) to avoid partial replacements
+    // (e.g., "John Smith" before "John")
+    enhancedMappings.sort((a, b) => b.original.length - a.original.length);
+    
+    // Track changes for full name replacements
+    const beforeFullNameReplace = filteredContent;
+    
+    // Apply replacements for each mapping (full names first)
+    for (const mapping of enhancedMappings) {
+      // Normalize the original name: replace U+202f (narrow no-break space) and other Unicode spaces with regular space
+      const normalizedOriginal = mapping.original
+        .replace(/\u202F/g, ' ') // Replace narrow no-break space
+        .replace(/\u00A0/g, ' ') // Replace non-breaking space
+        .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+        .trim();
+      
+      const escapedOriginal = normalizedOriginal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedOriginalWithUnicode = mapping.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      // Pattern 1: Exact match (case-insensitive, word boundaries)
+      // Match both the normalized version (regular spaces) and the original (with Unicode spaces)
+      // This handles: "Adrian Gropper", "Adrian Gropper" (with U+202f), etc.
+      // Also handles markdown formatting: **Name**, *Name*, ## Name, etc.
+      const exactPattern = new RegExp(`\\b${escapedOriginal}\\b`, 'gi');
+      const exactPatternUnicode = escapedOriginal !== escapedOriginalWithUnicode 
+        ? new RegExp(`\\b${escapedOriginalWithUnicode}\\b`, 'gi')
+        : null;
+      
+      // Try both patterns (normalized and with Unicode spaces)
+      filteredContent = filteredContent.replace(exactPattern, (match, offset) => {
+        // Check if this match is inside markdown formatting
+        const before = filteredContent.substring(Math.max(0, offset - 10), offset);
+        const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 10));
+        
+        // Check for markdown bold/italic before: ** or * or ##
+        const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+        // Check for markdown after: ** or * or comma/age info
+        const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+        
+        if (hasMarkdownBefore || hasMarkdownAfter) {
+          // Preserve markdown formatting
+          let result = mapping.pseudonym;
+          if (hasMarkdownBefore) {
+            // Extract markdown prefix
+            const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+            if (mdMatch) {
+              result = mdMatch[1] + result;
+            }
+          }
+          if (hasMarkdownAfter) {
+            // Extract markdown suffix and any trailing info (like ", 73 M")
+            const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+            if (mdMatch) {
+              result = result + mdMatch[1];
+            }
+          }
+          return result;
+        }
+        return mapping.pseudonym;
+      });
+      
+      // Also try matching with Unicode spaces if different
+      if (exactPatternUnicode) {
+        filteredContent = filteredContent.replace(exactPatternUnicode, (match, offset) => {
+          const before = filteredContent.substring(Math.max(0, offset - 10), offset);
+          const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 10));
+          const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+          const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+          
+          if (hasMarkdownBefore || hasMarkdownAfter) {
+            let result = mapping.pseudonym;
+            if (hasMarkdownBefore) {
+              const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+              if (mdMatch) {
+                result = mdMatch[1] + result;
+              }
+            }
+            if (hasMarkdownAfter) {
+              const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+              if (mdMatch) {
+                result = result + mdMatch[1];
+              }
+            }
+            return result;
+          }
+          return mapping.pseudonym;
+        });
+      }
+      
+      // Pattern 2: With titles (e.g., "Dr. Adrian Gropper", "Mr. Gropper")
+      // Preserve the title in the replacement, and handle markdown
+      // Use normalized original for matching
+      for (const title of titles) {
+        const titlePattern = new RegExp(`\\b${title}\\s+${escapedOriginal}\\b`, 'gi');
+        const titlePatternUnicode = exactPatternUnicode 
+          ? new RegExp(`\\b${title}\\s+${escapedOriginalWithUnicode}\\b`, 'gi')
+          : null;
+        
+        filteredContent = filteredContent.replace(titlePattern, (match, offset) => {
+          const titleMatch = match.match(/^(Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|RN|CNP|OD)\s+/i);
+          const replacement = titleMatch ? `${titleMatch[1]} ${mapping.pseudonym}` : mapping.pseudonym;
+          
+          // Check for markdown formatting
+          const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+          const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+          const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+          const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+          
+          if (hasMarkdownBefore || hasMarkdownAfter) {
+            let result = replacement;
+            if (hasMarkdownBefore) {
+              const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+              if (mdMatch) {
+                result = mdMatch[1] + result;
+              }
+            }
+            if (hasMarkdownAfter) {
+              const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+              if (mdMatch) {
+                result = result + mdMatch[1];
+              }
+            }
+            return result;
+          }
+          return replacement;
+        });
+        
+        // Also try with Unicode spaces
+        if (titlePatternUnicode) {
+          filteredContent = filteredContent.replace(titlePatternUnicode, (match, offset) => {
+            const titleMatch = match.match(/^(Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|RN|CNP|OD)\s+/i);
+            const replacement = titleMatch ? `${titleMatch[1]} ${mapping.pseudonym}` : mapping.pseudonym;
+            
+            const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+            const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+            const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+            const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+            
+            if (hasMarkdownBefore || hasMarkdownAfter) {
+              let result = replacement;
+              if (hasMarkdownBefore) {
+                const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+                if (mdMatch) {
+                  result = mdMatch[1] + result;
+                }
+              }
+              if (hasMarkdownAfter) {
+                const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+                if (mdMatch) {
+                  result = result + mdMatch[1];
+                }
+              }
+              return result;
+            }
+            return replacement;
+          });
+        }
+      }
+      
+      // Pattern 3: Names in markdown formatting (e.g., "**Adrian Gropper, 73 M**")
+      // This handles the full markdown-wrapped name
+      // Use normalized version for matching
+      const markdownPatterns = [
+        new RegExp(`\\*\\*${escapedOriginal}([^\\*]*?)\\*\\*`, 'gi'), // **Name, info**
+        new RegExp(`\\*${escapedOriginal}([^\\*]*?)\\*`, 'gi'), // *Name, info*
+        new RegExp(`##\\s+${escapedOriginal}(.*?)(?:\\n|$)`, 'gi'), // ## Name info
+      ];
+      
+      // Also create patterns for Unicode version if different
+      const markdownPatternsUnicode = exactPatternUnicode ? [
+        new RegExp(`\\*\\*${escapedOriginalWithUnicode}([^\\*]*?)\\*\\*`, 'gi'),
+        new RegExp(`\\*${escapedOriginalWithUnicode}([^\\*]*?)\\*`, 'gi'),
+        new RegExp(`##\\s+${escapedOriginalWithUnicode}(.*?)(?:\\n|$)`, 'gi'),
+      ] : [];
+      
+      for (const mdPattern of markdownPatterns) {
+        filteredContent = filteredContent.replace(mdPattern, (match, suffix) => {
+          // Preserve the markdown formatting and any suffix (like ", 73 M")
+          if (match.startsWith('**')) {
+            return `**${mapping.pseudonym}${suffix || ''}**`;
+          } else if (match.startsWith('*')) {
+            return `*${mapping.pseudonym}${suffix || ''}*`;
+          } else if (match.startsWith('##')) {
+            return `## ${mapping.pseudonym}${suffix || ''}`;
+          }
+          return mapping.pseudonym + (suffix || '');
+        });
+      }
+      
+      // Also try Unicode patterns
+      for (const mdPattern of markdownPatternsUnicode) {
+        filteredContent = filteredContent.replace(mdPattern, (match, suffix) => {
+          if (match.startsWith('**')) {
+            return `**${mapping.pseudonym}${suffix || ''}**`;
+          } else if (match.startsWith('*')) {
+            return `*${mapping.pseudonym}${suffix || ''}*`;
+          } else if (match.startsWith('##')) {
+            return `## ${mapping.pseudonym}${suffix || ''}`;
+          }
+          return mapping.pseudonym + (suffix || '');
+        });
+      }
+    }
+    
+    // Track which full names were replaced
+    if (beforeFullNameReplace !== filteredContent) {
+      for (const mapping of enhancedMappings) {
+        const escapedOriginal = mapping.original.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const testPattern = new RegExp(`\\b${escapedOriginal}\\b`, 'gi');
+        if (testPattern.test(beforeFullNameReplace) && !pseudonymizedNames.some(n => n.original === mapping.original)) {
+          pseudonymizedNames.push({ original: mapping.original, pseudonym: mapping.pseudonym });
+        }
+      }
+    }
+    
+    // Second pass: Process last names only (for full names that were mapped)
+    // This avoids replacing last names that are part of already-replaced full names
+    const lastNameMappings: Array<{ lastName: string; lastNamePseudonym: string; normalizedLastName: string }> = [];
+    for (const mapping of enhancedMappings) {
+      if (mapping.isFullName && mapping.lastName && mapping.lastNamePseudonym) {
+        // Normalize last name (handle Unicode spaces)
+        const normalizedLastName = mapping.lastName
+          .replace(/\u202F/g, ' ')
+          .replace(/\u00A0/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        
+        // Check if this last name mapping is unique (by normalized name)
+        if (!lastNameMappings.some(m => m.normalizedLastName.toLowerCase() === normalizedLastName.toLowerCase())) {
+          lastNameMappings.push({
+            lastName: mapping.lastName,
+            lastNamePseudonym: mapping.lastNamePseudonym,
+            normalizedLastName: normalizedLastName
+          });
+        }
+      }
+    }
+    
+    // Apply last name replacements (only if they haven't been replaced as part of full names)
+    for (const lastNameMapping of lastNameMappings) {
+      // Use normalized last name for matching
+      const escapedLastName = lastNameMapping.normalizedLastName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedLastNameUnicode = lastNameMapping.lastName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      
+      // Match standalone last name (with word boundaries, case-insensitive)
+      // Also handle markdown formatting
+      // Try both normalized and Unicode versions
+      const lastNamePattern = new RegExp(`\\b${escapedLastName}\\b`, 'gi');
+      const lastNamePatternUnicode = escapedLastName !== escapedLastNameUnicode
+        ? new RegExp(`\\b${escapedLastNameUnicode}\\b`, 'gi')
+        : null;
+      
+      filteredContent = filteredContent.replace(lastNamePattern, (match, offset) => {
+        // Check if this is part of a pseudonym (has numbers nearby) - if so, skip
+        const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+        const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+        if (/\d/.test(before + after)) {
+          return match; // Part of pseudonym, don't replace
+        }
+        
+        // Check for markdown formatting
+        const beforeFull = filteredContent.substring(Math.max(0, offset - 10), offset);
+        const afterFull = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 10));
+        const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(beforeFull);
+        const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(afterFull);
+        
+        if (hasMarkdownBefore || hasMarkdownAfter) {
+          let result = lastNameMapping.lastNamePseudonym;
+          if (hasMarkdownBefore) {
+            const mdMatch = beforeFull.match(/(\*\*|\*|##)\s*$/);
+            if (mdMatch) {
+              result = mdMatch[1] + result;
+            }
+          }
+          if (hasMarkdownAfter) {
+            const mdMatch = afterFull.match(/^\s*(\*\*|\*|,.*?)/);
+            if (mdMatch) {
+              result = result + mdMatch[1];
+            }
+          }
+          return result;
+        }
+        
+        return lastNameMapping.lastNamePseudonym;
+      });
+      
+      // Also try Unicode version
+      if (lastNamePatternUnicode) {
+        filteredContent = filteredContent.replace(lastNamePatternUnicode, (match, offset) => {
+          const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+          const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+          if (/\d/.test(before + after)) {
+            return match;
+          }
+          
+          const beforeFull = filteredContent.substring(Math.max(0, offset - 10), offset);
+          const afterFull = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 10));
+          const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(beforeFull);
+          const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(afterFull);
+          
+          if (hasMarkdownBefore || hasMarkdownAfter) {
+            let result = lastNameMapping.lastNamePseudonym;
+            if (hasMarkdownBefore) {
+              const mdMatch = beforeFull.match(/(\*\*|\*|##)\s*$/);
+              if (mdMatch) {
+                result = mdMatch[1] + result;
+              }
+            }
+            if (hasMarkdownAfter) {
+              const mdMatch = afterFull.match(/^\s*(\*\*|\*|,.*?)/);
+              if (mdMatch) {
+                result = result + mdMatch[1];
+              }
+            }
+            return result;
+          }
+          
+          return lastNameMapping.lastNamePseudonym;
+        });
+      }
+      
+      // Match last name with titles
+      for (const title of titles) {
+        const titleLastNamePattern = new RegExp(`\\b${title}\\s+${escapedLastName}\\b`, 'gi');
+        const titleLastNamePatternUnicode = lastNamePatternUnicode
+          ? new RegExp(`\\b${title}\\s+${escapedLastNameUnicode}\\b`, 'gi')
+          : null;
+        filteredContent = filteredContent.replace(titleLastNamePattern, (match, offset) => {
+          const titleMatch = match.match(/^(Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|RN|CNP|OD)\s+/i);
+          const replacement = titleMatch ? `${titleMatch[1]} ${lastNameMapping.lastNamePseudonym}` : lastNameMapping.lastNamePseudonym;
+          
+          // Check for markdown formatting
+          const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+          const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+          const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+          const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+          
+          if (hasMarkdownBefore || hasMarkdownAfter) {
+            let result = replacement;
+            if (hasMarkdownBefore) {
+              const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+              if (mdMatch) {
+                result = mdMatch[1] + result;
+              }
+            }
+            if (hasMarkdownAfter) {
+              const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+              if (mdMatch) {
+                result = result + mdMatch[1];
+              }
+            }
+            return result;
+          }
+          return replacement;
+        });
+        
+        // Also try Unicode version
+        if (titleLastNamePatternUnicode) {
+          filteredContent = filteredContent.replace(titleLastNamePatternUnicode, (match, offset) => {
+            const titleMatch = match.match(/^(Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|RN|CNP|OD)\s+/i);
+            const replacement = titleMatch ? `${titleMatch[1]} ${lastNameMapping.lastNamePseudonym}` : lastNameMapping.lastNamePseudonym;
+            
+            const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+            const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+            const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+            const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+            
+            if (hasMarkdownBefore || hasMarkdownAfter) {
+              let result = replacement;
+              if (hasMarkdownBefore) {
+                const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+                if (mdMatch) {
+                  result = mdMatch[1] + result;
+                }
+              }
+              if (hasMarkdownAfter) {
+                const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+                if (mdMatch) {
+                  result = result + mdMatch[1];
+                }
+              }
+              return result;
+            }
+            return replacement;
+          });
+        }
+      }
+      
+      // Match "Mr./Ms. LastName" format (with period)
+      const titlePeriodPattern = new RegExp(`\\b(Mr|Ms|Mrs|Dr|Prof)\\.\\s+${escapedLastName}\\b`, 'gi');
+      const titlePeriodPatternUnicode = lastNamePatternUnicode
+        ? new RegExp(`\\b(Mr|Ms|Mrs|Dr|Prof)\\.\\s+${escapedLastNameUnicode}\\b`, 'gi')
+        : null;
+      filteredContent = filteredContent.replace(titlePeriodPattern, (match, offset) => {
+        const titleMatch = match.match(/^(Mr|Ms|Mrs|Dr|Prof)\./i);
+        const replacement = titleMatch ? `${titleMatch[1]}. ${lastNameMapping.lastNamePseudonym}` : lastNameMapping.lastNamePseudonym;
+        
+        // Check for markdown formatting
+        const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+        const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+        const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+        const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+        
+        if (hasMarkdownBefore || hasMarkdownAfter) {
+          let result = replacement;
+          if (hasMarkdownBefore) {
+            const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+            if (mdMatch) {
+              result = mdMatch[1] + result;
+            }
+          }
+          if (hasMarkdownAfter) {
+            const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+            if (mdMatch) {
+              result = result + mdMatch[1];
+            }
+          }
+          return result;
+        }
+        return replacement;
+      });
+      
+      // Also try Unicode version
+      if (titlePeriodPatternUnicode) {
+        filteredContent = filteredContent.replace(titlePeriodPatternUnicode, (match, offset) => {
+          const titleMatch = match.match(/^(Mr|Ms|Mrs|Dr|Prof)\./i);
+          const replacement = titleMatch ? `${titleMatch[1]}. ${lastNameMapping.lastNamePseudonym}` : lastNameMapping.lastNamePseudonym;
+          
+          const before = filteredContent.substring(Math.max(0, offset - 5), offset);
+          const after = filteredContent.substring(offset + match.length, Math.min(filteredContent.length, offset + match.length + 5));
+          const hasMarkdownBefore = /(\*\*|\*|##)\s*$/.test(before);
+          const hasMarkdownAfter = /^\s*(\*\*|\*|,)/.test(after);
+          
+          if (hasMarkdownBefore || hasMarkdownAfter) {
+            let result = replacement;
+            if (hasMarkdownBefore) {
+              const mdMatch = before.match(/(\*\*|\*|##)\s*$/);
+              if (mdMatch) {
+                result = mdMatch[1] + result;
+              }
+            }
+            if (hasMarkdownAfter) {
+              const mdMatch = after.match(/^\s*(\*\*|\*|,.*?)/);
+              if (mdMatch) {
+                result = result + mdMatch[1];
+              }
+            }
+            return result;
+          }
+          return replacement;
+        });
+      }
+      
+      // Pattern for last names in markdown formatting (e.g., "**Mr. Gropper**")
+      const lastNameMarkdownPatterns = [
+        new RegExp(`\\*\\*([^\\*]*?\\s+)?${escapedLastName}([^\\*]*?)\\*\\*`, 'gi'), // **prefix LastName suffix**
+        new RegExp(`\\*([^\\*]*?\\s+)?${escapedLastName}([^\\*]*?)\\*`, 'gi'), // *prefix LastName suffix*
+      ];
+      
+      for (const mdPattern of lastNameMarkdownPatterns) {
+        filteredContent = filteredContent.replace(mdPattern, (match, prefix, suffix) => {
+          const prefixText = prefix || '';
+          const suffixText = suffix || '';
+          if (match.startsWith('**')) {
+            return `**${prefixText}${lastNameMapping.lastNamePseudonym}${suffixText}**`;
+          } else if (match.startsWith('*')) {
+            return `*${prefixText}${lastNameMapping.lastNamePseudonym}${suffixText}*`;
+          }
+          return prefixText + lastNameMapping.lastNamePseudonym + suffixText;
+        });
       }
     }
     
@@ -3191,14 +4017,64 @@ const filterCurrentChat = () => {
     };
   });
   
+  // Check if any names were actually replaced
+  const namesReplaced = pseudonymizedNames.length > 0;
+  
+  // Compare filtered messages with original to see if anything changed
+  let hasChanges = false;
+  for (let i = 0; i < filteredMessages.length && i < messagesToFilter.length; i++) {
+    if (filteredMessages[i].content !== messagesToFilter[i].content) {
+      hasChanges = true;
+      break;
+    }
+  }
+  
+  // Check if messages might already be filtered (contain pseudonyms with numbers)
+  const mightBeFiltered = messagesToFilter.some(msg => {
+    // Check if message contains patterns like "Name45" or "Name67" (pseudonym pattern)
+    return /\b[A-Z][a-z]+\d{2}\s+[A-Z][a-z]+\d{2}\b/.test(msg.content);
+  });
+  
+  if (!hasChanges && !namesReplaced) {
+    if ($q && typeof $q.notify === 'function') {
+      $q.notify({
+        type: 'info',
+        message: mightBeFiltered 
+          ? 'Messages appear to already be filtered. Use truly original messages to re-filter.'
+          : 'No names found to replace in messages. They may not be present in the current chat.',
+        timeout: 4000
+      });
+    }
+    return;
+  }
   
   // Emit filtered messages to parent component
   emit('messages-filtered', filteredMessages);
   
+  const namesList = pseudonymizedNames.map(n => `${n.original} → ${n.pseudonym}`).join(', ');
+  
+  // Show warning modal after filtering
+  if ($q && typeof $q.dialog === 'function') {
+    $q.dialog({
+      title: 'Privacy Filter Applied',
+      message: 'Privacy filtering can miss sensitive information. Always review the result and use the Edit function to make further changes to the chat before sharing.',
+      persistent: false,
+      ok: {
+        label: 'OK',
+        color: 'primary',
+        flat: false
+      }
+    }).onOk(() => {
+      // Close Privacy Filter tab and My Stuff dialog
+      currentTab.value = 'files'; // Switch to a different tab
+      closeDialog(); // Close My Stuff dialog
+    });
+  }
+  
   if ($q && typeof $q.notify === 'function') {
     $q.notify({
       type: 'positive',
-      message: `Filtered ${filteredMessages.length} messages with pseudonyms`,
+      message: `Filtered ${messagesToFilterPrivateAI.length} Private AI message(s). Replaced: ${namesList || 'names'}`,
       timeout: 3000
     });
   }
@@ -4160,8 +5036,39 @@ watch(isOpen, (newValue) => {
 
 const listsComponentRef = ref<InstanceType<typeof Lists> | null>(null);
 
-watch(currentTab, (newTab) => {
-  if (isOpen.value) {
+watch(currentTab, async (newTab) => {
+  // When Privacy Filter tab is opened, check for and remove duplicates
+  if (newTab === 'privacy') {
+    // Always check for duplicates when opening the tab
+    if (privacyFilterMapping.value.length > 0) {
+      const { deduplicated, removed } = deduplicateMapping(privacyFilterMapping.value);
+      if (removed.length > 0) {
+        console.log(`[PRIVACY] Found and removed ${removed.length} duplicate(s) when opening tab:`, removed);
+        privacyFilterMapping.value = deduplicated;
+        // Save the cleaned mapping back to storage
+        try {
+          const saveResponse = await fetch('/api/privacy-filter-mapping', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            credentials: 'include',
+            body: JSON.stringify({ mapping: deduplicated })
+          });
+          if (!saveResponse.ok) {
+            console.warn(`[PRIVACY] Failed to save deduplicated mapping:`, await saveResponse.text());
+          } else {
+            console.log(`[PRIVACY] Saved deduplicated mapping (${deduplicated.length} entries)`);
+          }
+        } catch (saveErr) {
+          console.error(`[PRIVACY] Error saving deduplicated mapping:`, saveErr);
+        }
+      }
+    }
+    
+    // Load privacy filter data
+    loadPrivacyFilter();
+  } else if (isOpen.value) {
     if (newTab === 'files') {
       loadFiles();
     } else if (newTab === 'agent') {
@@ -4175,8 +5082,6 @@ watch(currentTab, (newTab) => {
       if (listsComponentRef.value && typeof listsComponentRef.value.reloadCategories === 'function') {
         listsComponentRef.value.reloadCategories();
       }
-    } else if (newTab === 'privacy') {
-      loadPrivacyFilter();
     } else if (newTab === 'diary') {
       loadDiary();
     } else if (newTab === 'references') {
