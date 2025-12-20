@@ -37,7 +37,7 @@ function generateKBName(userId) {
  * This is called during registration to enable file uploads before admin approval
  */
 async function createUserBucketFolders(userId, kbName) {
-  console.log(`[NEW FLOW] Creating bucket folders for user: ${userId}, KB: ${kbName}`);
+  console.log(`[NEW FLOW 2] Creating bucket folders for user: ${userId}, KB: ${kbName}`);
   
   const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
   if (!bucketUrl) {
@@ -75,7 +75,7 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created root folder: ${userId}/`);
+    console.log(`[NEW FLOW 2] Created root folder: ${userId}/`);
     
     // Create archived folder placeholder (for files moved from root)
     await s3Client.send(new PutObjectCommand({
@@ -89,7 +89,7 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created archived folder: ${userId}/archived/`);
+    console.log(`[NEW FLOW 2] Created archived folder: ${userId}/archived/`);
     
     // Create KB folder placeholder
     await s3Client.send(new PutObjectCommand({
@@ -103,12 +103,12 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created KB folder: ${userId}/${kbName}/`);
+    console.log(`[NEW FLOW 2] Created KB folder: ${userId}/${kbName}/`);
     
-    console.log(`[NEW FLOW] ✅ All bucket folders created successfully for ${userId}`);
+    console.log(`[NEW FLOW 2] ✅ All bucket folders created successfully for ${userId}`);
     return { root: `${userId}/`, archived: `${userId}/archived/`, kb: `${userId}/${kbName}/` };
   } catch (err) {
-    console.error(`[NEW FLOW] ❌ Failed to create bucket folders: ${err.message}`);
+    console.error(`[NEW FLOW 2] ❌ Failed to create bucket folders: ${err.message}`);
     throw new Error(`Failed to create bucket folders: ${err.message}`);
   }
 }
@@ -223,14 +223,14 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       const updatedUser = result.userDoc;
       updatedUser.challenge = undefined; // Remove challenge
       
-      console.log(`[NEW FLOW] Starting pre-provisioning setup for user: ${updatedUser.userId}`);
+      console.log(`[NEW FLOW 2] Starting pre-provisioning setup for user: ${updatedUser.userId}`);
       
       // Generate agent name and KB name BEFORE admin approval
       const agentName = generateAgentName(updatedUser.userId);
       const kbName = generateKBName(updatedUser.userId);
       
-      console.log(`[NEW FLOW] Generated agent name: ${agentName}`);
-      console.log(`[NEW FLOW] Generated KB name: ${kbName}`);
+      console.log(`[NEW FLOW 2] Generated agent name: ${agentName}`);
+      console.log(`[NEW FLOW 2] Generated KB name: ${kbName}`);
       
       // Store agent name and KB name in user document
       updatedUser.assignedAgentName = agentName;
@@ -239,9 +239,9 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       // Create bucket folders immediately (enables file uploads before admin approval)
       try {
         await createUserBucketFolders(updatedUser.userId, kbName);
-        console.log(`[NEW FLOW] ✅ Bucket folders created for ${updatedUser.userId}`);
+        console.log(`[NEW FLOW 2] ✅ Bucket folders created for ${updatedUser.userId}`);
       } catch (folderError) {
-        console.error(`[NEW FLOW] ❌ Failed to create bucket folders: ${folderError.message}`);
+        console.error(`[NEW FLOW 2] ❌ Failed to create bucket folders: ${folderError.message}`);
         // Don't fail registration if folder creation fails, but log it
         // User can still proceed, folders will be created during provisioning if needed
       }
@@ -259,7 +259,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
       updatedUser.initialFile = null;
       
       await cloudant.saveDocument('maia_users', updatedUser);
-      console.log(`[NEW FLOW] ✅ User document saved with agent name and KB name`);
+      console.log(`[NEW FLOW 2] ✅ User document saved with agent name and KB name`);
 
       // Set session
       req.session.userId = updatedUser.userId;
@@ -277,8 +277,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         userAgent: clientInfo.userAgent
       });
 
-      console.log(`[NEW FLOW] Passkey registration logged for ${updatedUser.userId}`);
-      console.log(`[NEW FLOW] Ready to show file import dialog - folders created, names generated`);
+      console.log(`[NEW FLOW 2] Passkey registration logged for ${updatedUser.userId}`);
+      console.log(`[NEW FLOW 2] Ready to show file import dialog - folders created, names generated`);
 
       // Return success with flag indicating file import dialog should be shown
       // The frontend will handle showing the dialog and uploading files
@@ -306,8 +306,8 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         return res.status(400).json({ error: 'User ID required' });
       }
 
-      console.log(`[NEW FLOW] Completing registration for user: ${userId}`);
-      console.log(`[NEW FLOW] Initial file:`, initialFile ? `${initialFile.fileName} (${initialFile.bucketKey})` : 'none');
+      console.log(`[NEW FLOW 2] Completing registration for user: ${userId}`);
+      console.log(`[NEW FLOW 2] Initial file:`, initialFile ? `${initialFile.fileName} (${initialFile.bucketKey})` : 'none');
 
       // Get user document
       const userDoc = await cloudant.getDocument('maia_users', userId);
@@ -323,18 +323,18 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           fileSize: initialFile.fileSize,
           uploadedAt: initialFile.uploadedAt || new Date().toISOString()
         };
-        console.log(`[NEW FLOW] Stored initial file info in user document: ${initialFile.fileName}`);
+        console.log(`[NEW FLOW 2] Stored initial file info in user document: ${initialFile.fileName}`);
       } else {
         userDoc.initialFile = null;
-        console.log(`[NEW FLOW] No initial file - user proceeding without file`);
+        console.log(`[NEW FLOW 2] No initial file - user proceeding without file`);
       }
 
       // Set workflowStage to request_sent (admin will be notified)
       userDoc.workflowStage = 'request_sent';
-      console.log(`[NEW FLOW] Setting workflowStage to 'request_sent' for ${userId}`);
+      console.log(`[NEW FLOW 2] Setting workflowStage to 'request_sent' for ${userId}`);
 
       await cloudant.saveDocument('maia_users', userDoc);
-      console.log(`[NEW FLOW] User document updated with initial file and workflowStage`);
+      console.log(`[NEW FLOW 2] User document updated with initial file and workflowStage`);
 
       // Send email notification to admin (only now, after file import decision)
       try {
@@ -345,10 +345,10 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
           email: userDoc.email || null,
           provisionToken: provisionToken
         });
-        console.log(`[NEW FLOW] ✅ Admin notification email sent for ${userId}`);
+        console.log(`[NEW FLOW 2] ✅ Admin notification email sent for ${userId}`);
       } catch (emailError) {
         // Log error but don't fail registration if email fails
-        console.error('[NEW FLOW] ❌ Failed to send admin notification email:', emailError);
+        console.error('[NEW FLOW 2] ❌ Failed to send admin notification email:', emailError);
       }
 
       res.json({ 
@@ -359,7 +359,7 @@ export default function setupAuthRoutes(app, passkeyService, cloudant, doClient,
         }
       });
     } catch (error) {
-      console.error('[NEW FLOW] Registration complete error:', error);
+      console.error('[NEW FLOW 2] Registration complete error:', error);
       res.status(500).json({ error: error.message });
     }
   });

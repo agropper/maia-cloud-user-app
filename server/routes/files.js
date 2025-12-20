@@ -697,7 +697,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       if (isInitialImport && subfolder) {
         // Initial import goes directly to KB subfolder
         userFolder = `${userId}/${subfolder}/`;
-        console.log(`[NEW FLOW] Initial import during registration - uploading to KB folder: ${userFolder}`);
+        console.log(`[NEW FLOW 2] Initial import during registration - uploading to KB folder: ${userFolder}`);
       } else if (subfolder) {
         // Regular subfolder (e.g., "References")
         userFolder = `${userId}/${subfolder}/`;
@@ -706,7 +706,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
         userFolder = `${userId}/`;
       }
       
-      console.log(`[NEW FLOW] File upload - userId: ${userId}, isInitialImport: ${isInitialImport}, userFolder: ${userFolder}`);
+      console.log(`[NEW FLOW 2] File upload - userId: ${userId}, isInitialImport: ${isInitialImport}, userFolder: ${userFolder}`);
       
       const fileName = req.file.originalname;
       
@@ -772,7 +772,7 @@ export default function setupFileRoutes(app, cloudant, doClient) {
       await s3Client.send(uploadCommand);
       
       if (isInitialImport) {
-        console.log(`[NEW FLOW] ✅ Initial import file uploaded successfully: ${fileName} to ${bucketKey}`);
+        console.log(`[NEW FLOW 2] ✅ Initial import file uploaded successfully: ${fileName} to ${bucketKey}`);
       }
 
       // Generate signed URL for reading (valid for 7 days)

@@ -271,7 +271,7 @@ const handleRegistration = async () => {
   if (result.success) {
     // If showFileImport flag is set, show file import dialog instead of immediately authenticating
     if (result.showFileImport && result.kbName) {
-      console.log('[NEW FLOW] Showing file import dialog');
+      console.log('[NEW FLOW 2] Showing file import dialog');
       kbName.value = result.kbName;
       showFileImportDialog.value = true;
       // Don't emit authenticated yet - wait for file upload or user to proceed
@@ -294,7 +294,7 @@ const handleFileSelected = async (event: Event) => {
 
   uploadingFile.value = true;
   try {
-    console.log('[NEW FLOW] Uploading initial file to KB folder:', file.name);
+    console.log('[NEW FLOW 2] Uploading initial file to KB folder:', file.name);
     
     const formData = new FormData();
     formData.append('file', file);
@@ -313,7 +313,7 @@ const handleFileSelected = async (event: Event) => {
     }
 
     const uploadResult = await uploadResponse.json();
-    console.log('[NEW FLOW] File uploaded successfully:', uploadResult);
+    console.log('[NEW FLOW 2] File uploaded successfully:', uploadResult);
 
     // Notify backend that initial file upload is complete
     const completeResponse = await fetch('/api/passkey/registration-complete', {
@@ -336,13 +336,13 @@ const handleFileSelected = async (event: Event) => {
     }
 
     const completeResult = await completeResponse.json();
-    console.log('[NEW FLOW] Registration complete, admin email sent');
+    console.log('[NEW FLOW 2] Registration complete, admin email sent');
 
     showFileImportDialog.value = false;
     emit('authenticated', completeResult.user);
   } catch (err: any) {
     error.value = err.message || 'Failed to upload file';
-    console.error('[NEW FLOW] File upload error:', err);
+    console.error('[NEW FLOW 2] File upload error:', err);
   } finally {
     uploadingFile.value = false;
     // Reset file input
@@ -365,7 +365,7 @@ const goBackToFileChooser = () => {
 const sendRequestWithoutFile = async () => {
   loading.value = true;
   try {
-    console.log('[NEW FLOW] User proceeding without file, sending admin email');
+    console.log('[NEW FLOW 2] User proceeding without file, sending admin email');
     
     const response = await fetch('/api/passkey/registration-complete', {
       method: 'POST',
@@ -383,13 +383,13 @@ const sendRequestWithoutFile = async () => {
     }
 
     const result = await response.json();
-    console.log('[NEW FLOW] Registration complete without file, admin email sent');
+    console.log('[NEW FLOW 2] Registration complete without file, admin email sent');
 
     showConfirmWithoutFileDialog.value = false;
     emit('authenticated', result.user);
   } catch (err: any) {
     error.value = err.message || 'Failed to complete registration';
-    console.error('[NEW FLOW] Registration completion error:', err);
+    console.error('[NEW FLOW 2] Registration completion error:', err);
   } finally {
     loading.value = false;
   }

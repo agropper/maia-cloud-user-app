@@ -54,7 +54,7 @@ function generateKBName(userId) {
  * This is called during registration to enable file uploads before admin approval
  */
 async function createUserBucketFolders(userId, kbName) {
-  console.log(`[NEW FLOW] Creating bucket folders for user: ${userId}, KB: ${kbName}`);
+  console.log(`[NEW FLOW 2] Creating bucket folders for user: ${userId}, KB: ${kbName}`);
   
   const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
   if (!bucketUrl) {
@@ -93,7 +93,7 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created root folder: ${userId}/`);
+    console.log(`[NEW FLOW 2] Created root folder: ${userId}/`);
     
     // Create archived folder placeholder (for files moved from root)
     await s3Client.send(new PutObjectCommand({
@@ -107,7 +107,7 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created archived folder: ${userId}/archived/`);
+    console.log(`[NEW FLOW 2] Created archived folder: ${userId}/archived/`);
     
     // Create KB folder placeholder
     await s3Client.send(new PutObjectCommand({
@@ -121,12 +121,12 @@ async function createUserBucketFolders(userId, kbName) {
         createdAt: new Date().toISOString()
       }
     }));
-    console.log(`[NEW FLOW] Created KB folder: ${userId}/${kbName}/`);
+    console.log(`[NEW FLOW 2] Created KB folder: ${userId}/${kbName}/`);
     
-    console.log(`[NEW FLOW] ✅ All bucket folders created successfully for ${userId}`);
+    console.log(`[NEW FLOW 2] ✅ All bucket folders created successfully for ${userId}`);
     return { root: `${userId}/`, archived: `${userId}/archived/`, kb: `${userId}/${kbName}/` };
   } catch (err) {
-    console.error(`[NEW FLOW] ❌ Failed to create bucket folders: ${err.message}`);
+    console.error(`[NEW FLOW 2] ❌ Failed to create bucket folders: ${err.message}`);
     throw new Error(`Failed to create bucket folders: ${err.message}`);
   }
 }
@@ -2259,12 +2259,12 @@ app.post('/api/admin/provision/confirm', async (req, res) => {
     }
 
     if (action === 'reject') {
-      console.log(`[NEW FLOW] Admin rejected provisioning for user: ${userId}`);
+      console.log(`[NEW FLOW 2] Admin rejected provisioning for user: ${userId}`);
       logProvisioning(userId, `⛔️ Provisioning rejected for user ${userId}`, 'warning');
       
       // Cleanup: Delete bucket folder and user document (keep audit log)
       try {
-        console.log(`[NEW FLOW] Starting cleanup for rejected user: ${userId}`);
+        console.log(`[NEW FLOW 2] Starting cleanup for rejected user: ${userId}`);
         
         // Delete all files in user's bucket folder
         const bucketUrl = process.env.DIGITALOCEAN_BUCKET;
@@ -2304,9 +2304,9 @@ app.post('/api/admin/provision/confirm', async (req, res) => {
                       Key: object.Key
                     }));
                     deletedCount++;
-                    console.log(`[NEW FLOW] Deleted file: ${object.Key}`);
+                    console.log(`[NEW FLOW 2] Deleted file: ${object.Key}`);
                   } catch (deleteErr) {
-                    console.error(`[NEW FLOW] Failed to delete ${object.Key}:`, deleteErr.message);
+                    console.error(`[NEW FLOW 2] Failed to delete ${object.Key}:`, deleteErr.message);
                   }
                 }
               }
@@ -2316,20 +2316,20 @@ app.post('/api/admin/provision/confirm', async (req, res) => {
             continuationToken = listResult.NextContinuationToken || null;
           } while (continuationToken);
           
-          console.log(`[NEW FLOW] Deleted ${deletedCount} files from bucket folder for ${userId}`);
+          console.log(`[NEW FLOW 2] Deleted ${deletedCount} files from bucket folder for ${userId}`);
         }
         
         // Delete user document
         try {
           await cloudant.deleteDocument('maia_users', userId);
-          console.log(`[NEW FLOW] Deleted user document for ${userId}`);
+          console.log(`[NEW FLOW 2] Deleted user document for ${userId}`);
         } catch (deleteErr) {
-          console.error(`[NEW FLOW] Failed to delete user document:`, deleteErr.message);
+          console.error(`[NEW FLOW 2] Failed to delete user document:`, deleteErr.message);
         }
         
-        console.log(`[NEW FLOW] ✅ Cleanup completed for rejected user: ${userId}`);
+        console.log(`[NEW FLOW 2] ✅ Cleanup completed for rejected user: ${userId}`);
       } catch (cleanupErr) {
-        console.error(`[NEW FLOW] ❌ Error during cleanup:`, cleanupErr.message);
+        console.error(`[NEW FLOW 2] ❌ Error during cleanup:`, cleanupErr.message);
         // Continue even if cleanup fails
       }
       
